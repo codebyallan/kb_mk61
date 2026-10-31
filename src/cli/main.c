@@ -25,8 +25,8 @@ static void usage(FILE *f)
     fputs("Commands:\n", f);
     fputs("  list                          List devices known to kbdd\n", f);
     fputs("  status                        Show daemon status\n", f);
-    fputs("  read-profile [index]          (not implemented yet)\n", f);
-    fputs("  write-profile <index> <file>  (not implemented: disabled until hardware validation)\n", f);
+    fputs("  read-profile [index]          Read a profile (index 0-3)\n", f);
+    fputs("  write-profile <index> <file>  Write a profile file (index 0-3)\n", f);
     fputs("  read-config                   Read daemon configuration summary\n", f);
     fputs("  enable-notifications          Enable input notifications\n", f);
     fputs("  active-profile                Ask the keyboard which profile is active (0x81)\n", f);
@@ -46,6 +46,88 @@ static void usage(FILE *f)
     fputs("          sweep: --delay MS  --color RRGGBB  --from N\n", f);
     fputs("  help                          Show this help\n", f);
     fputs("  version                       Show version\n", f);
+    fputs("\nUse 'kbctl help <command>' for detailed help.\n", f);
+}
+
+static void usage_command(FILE *f, const char *command)
+{
+    if (strcmp(command, "list") == 0) {
+        fputs("Usage: kbctl list\n\nList the HID devices discovered by kbdd, including model and path.\n", f);
+    } else if (strcmp(command, "status") == 0) {
+        fputs("Usage: kbctl status\n\nShow daemon status, connected devices, and enabled capabilities.\n", f);
+    } else if (strcmp(command, "read-profile") == 0) {
+        fputs("Usage: kbctl read-profile [index]\n\nRead a profile by index (0-3). With no index, read profile 0.\n", f);
+    } else if (strcmp(command, "write-profile") == 0) {
+        fputs("Usage: kbctl write-profile <index> <file>\n\nWrite a 264-byte profile file to index 0-3. Profile writes require\n"
+              "KBDD_ENABLE_PROFILE_WRITE=1 and are backed up by kbctl first.\n", f);
+    } else if (strcmp(command, "read-config") == 0) {
+        fputs("Usage: kbctl read-config\n\nRead the daemon configuration summary.\n", f);
+    } else if (strcmp(command, "enable-notifications") == 0) {
+        fputs("Usage: kbctl enable-notifications\n\nEnable keyboard input notifications through kbdd.\n", f);
+    } else if (strcmp(command, "active-profile") == 0) {
+        fputs("Usage: kbctl active-profile\n\nQuery the keyboard for its active profile.\n", f);
+    } else if (strcmp(command, "dump-block") == 0) {
+        fputs("Usage: kbctl dump-block <1-4> [file]\n\nRead and hex-dump one raw 264-byte profile parameter block. If file\n"
+              "is supplied, save the raw block there.\n", f);
+    } else if (strcmp(command, "diff-block") == 0) {
+        fputs("Usage: kbctl diff-block <a.bin> <b.bin>\n\nCompare two saved 264-byte profile blocks and print changed offsets.\n", f);
+    } else if (strcmp(command, "led") == 0) {
+        fputs("Usage: kbctl led <subcommand> [arguments]\n\nUse 'kbctl help led <subcommand>' for a specific LED command.\n", f);
+    } else if (strcmp(command, "version") == 0) {
+        fputs("Usage: kbctl version\n\nPrint the kbctl and libkbcore versions.\n", f);
+    } else {
+        fprintf(f, "kbctl: no help available for '%s'\n", command);
+    }
+}
+
+static void usage_led(FILE *f, const char *subcommand)
+{
+    if (subcommand == NULL || strcmp(subcommand, "led") == 0) {
+        fputs("Usage: kbctl led <subcommand> [arguments]\n\n"
+              "Subcommands:\n"
+              "  solid <RRGGBB> [opts]       Fill all matrix positions\n"
+              "  off [opts]                  Turn all positions off\n"
+              "  pos <n> <RRGGBB> [opts]     Set one position, preserving others\n"
+              "  clear [opts]                Clear the host-controlled frame\n"
+              "  sweep [opts]                Light positions sequentially\n"
+              "  release                     Stop periodic frame streaming\n"
+              "  effects                     List built-in keyboard effects\n"
+              "  effect <name|index>         Set the active profile effect\n"
+              "  brightness <0-10>           Set brightness\n"
+              "  speed <2-102>               Set effect speed\n\n"
+              "Options for solid/off/pos/clear: --once, --stride N\n"
+              "Options for sweep: --delay MS, --color RRGGBB, --from N\n"
+              "Requires KBDD_ENABLE_LED=1 for frame commands.\n", f);
+        return;
+    }
+    if (strcmp(subcommand, "solid") == 0) {
+        fputs("Usage: kbctl led solid <RRGGBB> [--once] [--stride N]\n\n"
+              "Set every matrix position to one RGB color. RRGGBB is hexadecimal.\n", f);
+    } else if (strcmp(subcommand, "off") == 0) {
+        fputs("Usage: kbctl led off [--once] [--stride N]\n\nTurn every matrix position off.\n", f);
+    } else if (strcmp(subcommand, "pos") == 0) {
+        fputs("Usage: kbctl led pos <n> <RRGGBB> [--once] [--stride N]\n\n"
+              "Set position n (zero-based) to a color while preserving other positions.\n", f);
+    } else if (strcmp(subcommand, "clear") == 0) {
+        fputs("Usage: kbctl led clear [--once] [--stride N]\n\nClear every position in the host-controlled frame.\n", f);
+    } else if (strcmp(subcommand, "sweep") == 0) {
+        fputs("Usage: kbctl led sweep [--delay MS] [--color RRGGBB] [--from N]\n\n"
+              "Light one position at a time to map matrix positions. Press Ctrl+C to stop.\n", f);
+    } else if (strcmp(subcommand, "release") == 0) {
+        fputs("Usage: kbctl led release\n\nStop periodic LED frame streaming.\n", f);
+    } else if (strcmp(subcommand, "effects") == 0) {
+        fputs("Usage: kbctl led effects\n\nList supported built-in effect names and numeric indexes.\n", f);
+    } else if (strcmp(subcommand, "effect") == 0) {
+        fputs("Usage: kbctl led effect <name|index>\n\nSet the active profile effect. Requires KBDD_ENABLE_PROFILE_WRITE=1.\n", f);
+    } else if (strcmp(subcommand, "brightness") == 0) {
+        fputs("Usage: kbctl led brightness <0-10>\n\nSet profile brightness; 0 is off and 10 is maximum.\n"
+              "Requires KBDD_ENABLE_PROFILE_WRITE=1.\n", f);
+    } else if (strcmp(subcommand, "speed") == 0) {
+        fputs("Usage: kbctl led speed <2-102>\n\nSet raw effect speed; lower values are faster.\n"
+              "Requires KBDD_ENABLE_PROFILE_WRITE=1.\n", f);
+    } else {
+        fprintf(f, "kbctl: no LED help available for '%s'\n", subcommand);
+    }
 }
 
 static int send_all(int fd, const void *buf, size_t len)
@@ -530,6 +612,18 @@ static int cmd_led(int argc, char **argv)
     const char *sub = (argc >= 3) ? argv[2] : "";
     int rc;
 
+    if (strcmp(sub, "help") == 0 || strcmp(sub, "--help") == 0 ||
+        strcmp(sub, "-h") == 0) {
+        usage_led(stdout, "led");
+        return 0;
+    }
+    if (argc >= 4 && (strcmp(argv[3], "help") == 0 ||
+                      strcmp(argv[3], "--help") == 0 ||
+                      strcmp(argv[3], "-h") == 0)) {
+        usage_led(stdout, sub);
+        return 0;
+    }
+
     memset(&o, 0, sizeof(o));
     o.flags = KBDD_LED_FLAG_HOLD;
     o.delay = 800;
@@ -725,7 +819,27 @@ int main(int argc, char **argv)
 
     if (strcmp(cmd, "help") == 0 || strcmp(cmd, "-h") == 0 ||
         strcmp(cmd, "--help") == 0) {
-        usage(stdout);
+        if (argc == 2) {
+            usage(stdout);
+        } else if (argc == 3 && strcmp(argv[2], "led") == 0) {
+            usage_led(stdout, "led");
+        } else if (argc == 4 && strcmp(argv[2], "led") == 0) {
+            usage_led(stdout, argv[3]);
+        } else if (argc == 3) {
+            usage_command(stdout, argv[2]);
+        } else {
+            usage(stdout);
+        }
+        return 0;
+    }
+
+    if (argc >= 3 && (strcmp(argv[2], "--help") == 0 ||
+                      strcmp(argv[2], "-h") == 0)) {
+        if (strcmp(cmd, "led") == 0) {
+            usage_led(stdout, "led");
+        } else {
+            usage_command(stdout, cmd);
+        }
         return 0;
     }
 

@@ -104,35 +104,91 @@ To remove an installation made by the supplied script:
 
 ## Usage
 
-After `kbdd` is running, use `kbctl` to inspect the connection:
+After `kbdd` is running, use `kbctl help` to list all commands. Detailed
+help is available for every command and LED subcommand:
 
 ```sh
-kbctl status
+kbctl help
+kbctl help status
+kbctl help led
+kbctl help led pos
+kbctl status --help
+kbctl led pos --help
+```
+
+### Device and daemon commands
+
+```sh
 kbctl list
+kbctl status
 kbctl version
+kbctl read-config
+kbctl enable-notifications
 kbctl active-profile
 ```
+
+- `list` lists the devices discovered by `kbdd`.
+- `status` shows daemon state, connected devices, and enabled capabilities.
+- `version` prints the `kbctl` and `libkbcore` versions.
+- `read-config` reads the daemon configuration summary.
+- `enable-notifications` enables keyboard input notifications.
+- `active-profile` queries the active profile from the keyboard.
+
+### Profile commands
+
+Profile indexes use `0` through `3` for the four profiles:
+
+```sh
+kbctl read-profile [index]
+kbctl write-profile <index> <file>
+kbctl dump-block <1-4> [file]
+kbctl diff-block <a.bin> <b.bin>
+```
+
+- `read-profile` reads a profile; without an index it reads profile `0`.
+- `write-profile` writes a profile file and requires
+  `KBDD_ENABLE_PROFILE_WRITE=1`. The CLI backs up the active profile first.
+- `dump-block` reads and displays a raw 264-byte profile parameter block,
+  optionally saving it to a file.
+- `diff-block` compares two saved 264-byte blocks and reports changed offsets.
+
+### LED commands
 
 LED commands are available when LED support has been explicitly enabled:
 
 ```sh
 kbctl led effects
 kbctl led solid FF0000
-kbctl led off
 kbctl led clear
 kbctl led pos 12 00FF00
 kbctl led pos 24 FF0000
+kbctl led off
 kbctl led sweep --delay 100 --color 0000FF
 kbctl led release
+kbctl led effect lighting
+kbctl led brightness 8
+kbctl led speed 50
 ```
 
-`led pos` changes one position while preserving the colors already selected
-in the host-controlled frame, allowing different colors on different keys.
-Use `led clear` to clear all positions before building a new custom layout.
-The `--once` option sends the frame once without periodic streaming; omit it
-for continuous refresh.
+- `led solid <RRGGBB>` fills every matrix position with one RGB color.
+- `led off` turns every matrix position off.
+- `led clear` clears the host-controlled frame.
+- `led pos <n> <RRGGBB>` changes one zero-based position while preserving
+  other colors, allowing a multicolor custom layout.
+- `led sweep` lights positions sequentially to map physical keys. Use
+  `--delay MS`, `--color RRGGBB`, and `--from N`.
+- `led release` stops periodic LED frame streaming.
+- `led effects` lists the built-in effects supported by the keyboard.
+- `led effect <name|index>` changes the active profile effect.
+- `led brightness <0-10>` changes brightness; `0` is off and `10` is maximum.
+- `led speed <2-102>` changes raw effect speed; lower values are faster.
 
-For the complete command list and option syntax:
+Frame commands accept `--once` to send one frame without periodic refresh and
+`--stride N` to override the frame layout (default: the detected matrix size).
+The `effect`, `brightness`, and `speed` commands require
+`KBDD_ENABLE_PROFILE_WRITE=1`; frame commands require `KBDD_ENABLE_LED=1`.
+
+For complete command syntax:
 
 ```sh
 kbctl help

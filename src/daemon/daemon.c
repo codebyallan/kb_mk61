@@ -134,7 +134,10 @@ typedef struct {
     int allow_led;                       /* KBDD_ENABLE_LED=1 */
     int allow_profile_write;             /* KBDD_ENABLE_PROFILE_WRITE=1 */
     int led_hold;                        /* streaming active */
+    int led_active;                      /* a host-controlled frame is installed */
     uint8_t led_frame[KBC_LED_BUFFER_SIZE];
+    uint8_t led_base_frame[KBC_LED_BUFFER_SIZE];
+    uint8_t led_brightness;              /* host-frame scale, 0..10 */
     size_t led_stride;
     int led_fail;
     long long led_next_ms;
@@ -202,6 +205,7 @@ static int kbdd_handle_led(kbdd_ctx_t *k, const kbdd_ipc_message_t *req,
 
     if (mode == KBDD_LED_MODE_RELEASE) {
         k->led_hold = 0;
+        k->led_active = 0;
         return kbdd_reply_text(resp, "ok: LED streaming stopped");
     }
     dev = kbdd_control_dev(k);
@@ -216,15 +220,20 @@ static int kbdd_handle_led(kbdd_ctx_t *k, const kbdd_ipc_message_t *req,
     count = matrix < stride ? matrix : stride;
 
     memset(k->led_frame, 0, sizeof(k->led_frame));
+    memset(k->led_base_frame, 0, sizeof(k->led_base_frame));
     if (mode == KBDD_LED_MODE_SOLID) {
-        kbc_led_frame_fill(k->led_frame, stride, count, r, g, b);
+        kbc_led_frame_fill(k->led_base_frame, stride, count, r, g, b);
     } else if (mode == KBDD_LED_MODE_POS) {
         if (pos >= count) {
             return kbdd_reply_text(resp, "error: position out of range");
         }
-        kbc_led_frame_set(k->led_frame, stride, pos, r, g, b);
+        kbc_led_frame_set(k->led_base_frame, stride, pos, r, g, b);
     } else {
         return kbdd_reply_text(resp, "error: unknown LED mode");
+    }
+    memcpy(k->led_frame, k->led_base_frame, sizeof(k->led_frame));
+    if (kbc_led_frame_apply_brightness(k->led_frame, stride, k->led_brightness) != KBC_OK) {
+        return kbdd_reply_text(resp, "error: invalid LED brightness");
     }
 
     kbdd_dev_io_init_hidraw(&io, dev);
@@ -234,6 +243,7 @@ static int kbdd_handle_led(kbdd_ctx_t *k, const kbdd_ipc_message_t *req,
         return kbdd_reply_text(resp, kbdd_dev_err(rc));
     }
     k->led_stride = stride;
+    k->led_active = 1;
     k->led_fail = 0;
     k->led_next_ms = kbdd_now_ms() + 40;
     k->led_hold = (flags & KBDD_LED_FLAG_HOLD) ? 1 : 0;
@@ -263,6 +273,7 @@ static int kbdd_handle_effect(kbdd_ctx_t *k, const kbdd_ipc_message_t *req,
         return kbdd_reply_text(resp, "error: no keyboard control interface available");
     }
     k->led_hold = 0; /* stop host streaming so the effect is visible */
+    k->led_active = 0;
     kbdd_dev_io_init_hidraw(&io, dev);
     rc = kbdd_dev_set_effect(&io, req->payload[0], &prof);
     if (rc != KBDD_DEV_OK) {
@@ -281,7 +292,7 @@ static int kbdd_handle_field(kbdd_ctx_t *k, const kbdd_ipc_message_t *req,
     kbdd_dev_io_t io;
     uint8_t prof = 0;
     char buf[160];
-    int rc, field;
+    int rc, field, resume_led;
 
     if (!k->allow_profile_write) {
         return kbdd_reply_text(resp,
@@ -295,11 +306,29 @@ static int kbdd_handle_field(kbdd_ctx_t *k, const kbdd_ipc_message_t *req,
     if (dev == NULL) {
         return kbdd_reply_text(resp, "error: no keyboard control interface available");
     }
+    resume_led = (field == KBC_FIELD_BRIGHTNESS) ? k->led_hold : 0;
     k->led_hold = 0;
+    if (field != KBC_FIELD_BRIGHTNESS) {
+        k->led_active = 0;
+    }
     kbdd_dev_io_init_hidraw(&io, dev);
     rc = kbdd_dev_set_field(&io, field, req->payload[1], &prof);
     if (rc != KBDD_DEV_OK) {
         return kbdd_reply_text(resp, kbdd_dev_err(rc));
+    }
+    if (field == KBC_FIELD_BRIGHTNESS) {
+        k->led_brightness = req->payload[1];
+        if (k->led_active) {
+            memcpy(k->led_frame, k->led_base_frame, sizeof(k->led_frame));
+            if (kbc_led_frame_apply_brightness(k->led_frame, k->led_stride,
+                                               k->led_brightness) != KBC_OK ||
+                kbdd_dev_send_frame(&io, k->led_frame, k->led_stride) != KBDD_DEV_OK) {
+                k->led_active = 0;
+                return kbdd_reply_text(resp, "error: brightness changed, but solid LED frame could not be refreshed");
+            }
+            k->led_next_ms = kbdd_now_ms() + 40;
+            k->led_hold = resume_led;
+        }
     }
     snprintf(buf, sizeof(buf), "ok: %s set to %u on profile %u, verified by read-back",
              names[field], (unsigned)req->payload[1], (unsigned)prof);
@@ -554,6 +583,7 @@ int kbdd_run(int argc, char **argv)
 
     kbdd_ctx_t kctx;
     memset(&kctx, 0, sizeof(kctx));
+    kctx.led_brightness = KBC_BRIGHTNESS_RAW_MAX;
     kctx.devices = devices;
     kctx.count = device_count;
     {

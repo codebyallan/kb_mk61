@@ -147,6 +147,21 @@ kbc_status kbc_led_frame_fill(uint8_t *frame, size_t stride, size_t count,
     return KBC_OK;
 }
 
+kbc_status kbc_led_frame_apply_brightness(uint8_t *frame, size_t stride,
+                                          uint8_t brightness)
+{
+    size_t i;
+
+    if (frame == NULL) return KBC_ERR_INVALID_ARGUMENT;
+    if (!led_stride_ok(stride) || brightness > KBC_BRIGHTNESS_RAW_MAX) {
+        return KBC_ERR_RANGE;
+    }
+    for (i = 0; i < 3 * stride; i++) {
+        frame[i] = (uint8_t)(((unsigned)frame[i] * brightness + 5u) / 10u);
+    }
+    return KBC_OK;
+}
+
 kbc_status kbc_build_read_request(uint8_t opcode, uint8_t profile,
                                   uint8_t *buf, size_t buf_len)
 {
@@ -188,8 +203,11 @@ kbc_status kbc_profile_block_to_write(const uint8_t *block, size_t block_len,
         block[2] != profile) {
         return KBC_ERR_PROTOCOL;
     }
-    /* sanity: the current effect byte must be a valid effect index */
-    if (block[KBC_PBLK_OFF_MODE] > KBC_LED_EFFECT_LIGHTING && block[KBC_PBLK_OFF_MODE] != 15) {
+    /* Preserve the observed mode 14 even though it is not exposed as a
+     * selectable effect; profile field writes must not alter it. */
+    if (block[KBC_PBLK_OFF_MODE] > KBC_LED_EFFECT_LIGHTING &&
+        block[KBC_PBLK_OFF_MODE] != KBC_LED_EFFECT_OBSERVED_14 &&
+        block[KBC_PBLK_OFF_MODE] != 15) {
         return KBC_ERR_PROTOCOL;
     }
     memcpy(out, block, KBC_FEATURE_REPORT_SIZE);

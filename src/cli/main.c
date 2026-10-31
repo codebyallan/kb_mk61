@@ -39,7 +39,7 @@ static void usage(FILE *f)
     fputs("  led release                   Stop streaming frames\n", f);
     fputs("  led effects                   List the keyboard built-in effects (offline)\n", f);
     fputs("  led effect <name|index>       Set the active profile effect (needs KBDD_ENABLE_PROFILE_WRITE=1)\n", f);
-    fputs("  led brightness <0-10>         Set the active profile brightness (0 = off)\n", f);
+    fputs("  led brightness <0-10>         Set brightness (also scales solid colors; 0 = off)\n", f);
     fputs("  led speed <2-102>             Set the current effect speed (raw, lower = faster)\n", f);
     fputs("    opts: --once (send one frame, no streaming)  --stride N (frame layout, default = matrix size)\n", f);
     fputs("          sweep: --delay MS  --color RRGGBB  --from N\n", f);

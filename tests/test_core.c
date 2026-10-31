@@ -936,6 +936,22 @@ static void test_led_frame(void)
     CHECK(rep[8 + 5] == 1 && rep[8 + 75] == 2 && rep[8 + 145] == 3);
 }
 
+static void test_led_frame_brightness(void)
+{
+    uint8_t frame[KBC_LED_BUFFER_SIZE] = {0};
+
+    CHECK(kbc_led_frame_fill(frame, 2, 2, 255, 100, 1) == KBC_OK);
+    CHECK(kbc_led_frame_apply_brightness(frame, 2, 10) == KBC_OK);
+    CHECK(frame[0] == 255 && frame[2] == 100 && frame[4] == 1);
+    CHECK(kbc_led_frame_apply_brightness(frame, 2, 5) == KBC_OK);
+    CHECK(frame[0] == 128 && frame[2] == 50 && frame[4] == 1);
+    CHECK(kbc_led_frame_apply_brightness(frame, 2, 0) == KBC_OK);
+    CHECK(frame[0] == 0 && frame[2] == 0 && frame[4] == 0);
+    CHECK(kbc_led_frame_apply_brightness(frame, 0, 5) == KBC_ERR_RANGE);
+    CHECK(kbc_led_frame_apply_brightness(NULL, 2, 5) == KBC_ERR_INVALID_ARGUMENT);
+    CHECK(kbc_led_frame_apply_brightness(frame, 2, 11) == KBC_ERR_RANGE);
+}
+
 static void test_read_requests(void)
 {
     uint8_t buf[KBC_FEATURE_REPORT_SIZE];
@@ -1015,6 +1031,10 @@ static void test_profile_block_fields(void)
     for (i = 3; i < 264; i++) if (out[i] != blk[i]) { changed++; CHECK(i == 12); }
     CHECK(changed == 1 && out[12] == 10 && out[1] == 0x02);
     CHECK(kbc_profile_block_set_field(blk, 264, 1, KBC_FIELD_BRIGHTNESS, 11, out, 264) == KBC_ERR_RANGE);
+    blk[11] = KBC_LED_EFFECT_OBSERVED_14;
+    CHECK(kbc_profile_block_set_field(blk, 264, 1, KBC_FIELD_BRIGHTNESS, 5, out, 264) == KBC_OK);
+    CHECK(out[11] == KBC_LED_EFFECT_OBSERVED_14 && out[12] == 5);
+    blk[11] = 0;
 
     /* speed: slot = 19 + current effect */
     CHECK(kbc_profile_block_set_field(blk, 264, 1, KBC_FIELD_SPEED, 2, out, 264) == KBC_OK);
@@ -1060,6 +1080,7 @@ int main(void)
     test_macro_limits();
     test_led_pagination();
     test_led_frame();
+    test_led_frame_brightness();
     test_read_requests();
     test_led_effect_names();
     test_profile_block_write();

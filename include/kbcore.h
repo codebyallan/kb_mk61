@@ -314,6 +314,9 @@ KBCORE_API kbc_status kbc_led_encode_game_mode(const uint8_t *colors, size_t col
 KBCORE_API size_t kbc_led_frame_page_count(size_t stride);
 KBCORE_API kbc_status kbc_led_frame_set(uint8_t *frame, size_t stride, size_t pos, uint8_t r, uint8_t g, uint8_t b);
 KBCORE_API kbc_status kbc_led_frame_fill(uint8_t *frame, size_t stride, size_t count, uint8_t r, uint8_t g, uint8_t b);
+/* Applies the profile brightness scale (0..KBC_BRIGHTNESS_RAW_MAX) to a frame. */
+KBCORE_API kbc_status kbc_led_frame_apply_brightness(uint8_t *frame, size_t stride,
+                                                      uint8_t brightness);
 
 /* Profile parameter block (response of 0x82 / payload of 0x02, path B).
  * Offsets are absolute within the 264-byte report. */
@@ -338,9 +341,11 @@ KBCORE_API kbc_status kbc_profile_block_set_field(const uint8_t *block, size_t b
  * and 15 = custom need extra commands and are rejected). */
 KBCORE_API kbc_status kbc_profile_block_set_mode(const uint8_t *block, size_t block_len, uint8_t profile, uint8_t mode, uint8_t *out, size_t out_len);
 
-/* Built-in LED effects (hardware mode index 0..12; 15 = custom). */
+/* Built-in LED effects (hardware mode index 0..12; 14 = observed device
+ * mode preserved by profile writes; 15 = custom). */
 #define KBC_LED_EFFECT_COUNT   13
 #define KBC_LED_EFFECT_LIGHTING 12   /* constant single colour */
+#define KBC_LED_EFFECT_OBSERVED_14 14
 #define KBC_LED_SPEED_MIN       1
 #define KBC_LED_SPEED_MAX       3
 #define KBC_LED_BRIGHTNESS_MIN  0

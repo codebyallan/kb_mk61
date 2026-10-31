@@ -32,6 +32,8 @@ target keyboard.
 - Keyboard discovery through `hidraw`.
 - Profile inspection and active-profile queries.
 - LED color, position, sweep, brightness, speed, and built-in effect commands.
+  The `led brightness` value also scales host-driven solid colors, which are
+  sent as direct RGB frames instead of using the keyboard's built-in effect.
 - Optional virtual keyboard input through `uinput`.
 - Unix-socket IPC between `kbctl` and `kbdd`.
 - Unit tests and optional AddressSanitizer/UndefinedBehaviorSanitizer tests.

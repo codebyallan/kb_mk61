@@ -129,7 +129,7 @@ static int kbdd_acquire_lock(void)
 }
 
 typedef struct {
-    const kbdd_hid_device_t *devices;
+    kbdd_hid_device_t *devices;
     size_t count;
     int allow_led;                       /* KBDD_ENABLE_LED=1 */
     int allow_profile_write;             /* KBDD_ENABLE_PROFILE_WRITE=1 */
@@ -142,6 +142,55 @@ typedef struct {
     int led_fail;
     long long led_next_ms;
 } kbdd_ctx_t;
+
+static int kbdd_same_devices(const kbdd_hid_device_t *a, size_t acount,
+                             const kbdd_hid_device_t *b, size_t bcount)
+{
+    if (acount != bcount) {
+        return 0;
+    }
+    for (size_t i = 0; i < acount; i++) {
+        if (a[i].fd < 0 ||
+            strcmp(a[i].path, b[i].path) != 0 ||
+            a[i].vid != b[i].vid ||
+            a[i].pid != b[i].pid ||
+            a[i].usage_page != b[i].usage_page ||
+            a[i].usage != b[i].usage ||
+            a[i].role != b[i].role) {
+            return 0;
+        }
+    }
+    return 1;
+}
+
+static int kbdd_refresh_devices(kbdd_ctx_t *k)
+{
+    kbdd_hid_device_t *found = NULL;
+    size_t found_count = 0;
+
+    if (kbdd_hidraw_enumerate(KBDD_MODELS,
+                              sizeof(KBDD_MODELS) / sizeof(KBDD_MODELS[0]),
+                              &found, &found_count) != 0) {
+        return 0;
+    }
+    if (kbdd_same_devices(k->devices, k->count, found, found_count)) {
+        kbdd_hidraw_free(found, found_count);
+        return 0;
+    }
+
+    for (size_t i = 0; i < found_count; i++) {
+        (void)kbdd_hidraw_open(&found[i]);
+    }
+    kbdd_hidraw_free(k->devices, k->count);
+    k->devices = found;
+    k->count = found_count;
+    k->led_hold = 0;
+    k->led_active = 0;
+    k->led_fail = 0;
+    fprintf(stderr, "kbdd: device set changed, now tracking %zu interface(s)\n",
+            found_count);
+    return 1;
+}
 
 static int kbdd_reply_text(kbdd_ipc_message_t *resp, const char *msg);
 
@@ -601,6 +650,7 @@ int kbdd_run(int argc, char **argv)
     }
 
     /* main loop */
+    long long next_device_scan_ms = kbdd_now_ms();
     while (!kbdd_stop_flag) {
         if (ipc != NULL) {
             kbdd_ipc_server_poll(ipc, kctx.led_hold ? 20 : 50, kbdd_ipc_handle, &kctx);
@@ -610,20 +660,28 @@ int kbdd_run(int argc, char **argv)
             nanosleep(&ts, NULL);
         }
 
+        if (kbdd_now_ms() >= next_device_scan_ms) {
+            (void)kbdd_refresh_devices(&kctx);
+            next_device_scan_ms = kbdd_now_ms() + 500;
+        }
         kbdd_led_tick(&kctx);
 
         /* read input reports from devices (nonblocking) */
-        for (size_t i = 0; i < device_count; i++) {
-            if (devices[i].role != 1) {
+        for (size_t i = 0; i < kctx.count; i++) {
+            if (kctx.devices[i].role != 1) {
                 continue;
             }
-            if (devices[i].fd < 0) {
+            if (kctx.devices[i].fd < 0) {
                 continue;
             }
             uint8_t buf[256];
-            ssize_t r = kbdd_hidraw_read(&devices[i], buf, sizeof(buf));
+            ssize_t r = kbdd_hidraw_read(&kctx.devices[i], buf, sizeof(buf));
             if (r > 0) {
                 /* parse input report via libkbcore? skip logging */
+            } else if (r < 0 &&
+                       (errno == EBADF || errno == EIO ||
+                        errno == ENODEV || errno == ENXIO)) {
+                kbdd_hidraw_close(&kctx.devices[i]);
             }
         }
     }
@@ -635,7 +693,7 @@ int kbdd_run(int argc, char **argv)
     if (uinput != NULL) {
         kbdd_uinput_close(uinput);
     }
-    kbdd_hidraw_free(devices, device_count);
+    kbdd_hidraw_free(kctx.devices, kctx.count);
     if (lock_fd >= 0) {
         flock(lock_fd, LOCK_UN);
         close(lock_fd);

@@ -36,6 +36,7 @@ target keyboard.
   sent as direct RGB frames instead of using the keyboard's built-in effect.
 - Optional virtual keyboard input through `uinput`.
 - Unix-socket IPC between `kbctl` and `kbdd`.
+- Automatic keyboard reconnect after USB unplug/replug while `kbdd` stays running.
 - Unit tests and optional AddressSanitizer/UndefinedBehaviorSanitizer tests.
 - systemd user-service and udev integration.
 
@@ -115,6 +116,10 @@ kbctl help led pos
 kbctl status --help
 kbctl led pos --help
 ```
+
+The daemon watches for HID interfaces that are added or removed. If the
+keyboard is unplugged, `kbdd` keeps running and automatically discovers it
+again when it is plugged back in.
 
 ### Device and daemon commands
 

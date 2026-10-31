@@ -315,6 +315,29 @@ KBCORE_API size_t kbc_led_frame_page_count(size_t stride);
 KBCORE_API kbc_status kbc_led_frame_set(uint8_t *frame, size_t stride, size_t pos, uint8_t r, uint8_t g, uint8_t b);
 KBCORE_API kbc_status kbc_led_frame_fill(uint8_t *frame, size_t stride, size_t count, uint8_t r, uint8_t g, uint8_t b);
 
+/* Profile parameter block (response of 0x82 / payload of 0x02, path B).
+ * Offsets are absolute within the 264-byte report. */
+#define KBC_PBLK_OFF_RATE        8   /* observed 1 on a default profile (inferred: report rate index + 1) */
+#define KBC_PBLK_OFF_MODE        11  /* CONFIRMED on hardware: LED effect index */
+#define KBC_PBLK_OFF_BRIGHTNESS  12  /* CONFIRMED on hardware: linear 0..10, step 1 */
+#define KBC_PBLK_OFF_SPEED_TABLE 19  /* CONFIRMED for wave (effect 0); table of 12 entries, one per effect (inferred) */
+#define KBC_BRIGHTNESS_RAW_MAX   10
+#define KBC_SPEED_RAW_MIN        2   /* fastest observed; lower value = faster */
+#define KBC_SPEED_RAW_MAX        102 /* slowest observed (0x66) */
+
+/* Converts a 0x82 response into a 0x02 write report (same data, header fixed). */
+KBCORE_API kbc_status kbc_profile_block_to_write(const uint8_t *block, size_t block_len, uint8_t profile, uint8_t *out, size_t out_len);
+typedef enum { KBC_FIELD_MODE = 1, KBC_FIELD_BRIGHTNESS = 2, KBC_FIELD_SPEED = 3 } kbc_profile_field;
+/* Builds a 0x02 write report that changes exactly ONE byte of the block:
+ *  MODE        effect index (same rules as kbc_profile_block_set_mode)
+ *  BRIGHTNESS  0..KBC_BRIGHTNESS_RAW_MAX
+ *  SPEED       raw KBC_SPEED_RAW_MIN..MAX for the CURRENT effect (0..10, 12... slot = 19 + mode,
+ *              effects 0..11 only); lower = faster */
+KBCORE_API kbc_status kbc_profile_block_set_field(const uint8_t *block, size_t block_len, uint8_t profile, kbc_profile_field field, uint8_t value, uint8_t *out, size_t out_len);
+/* Same, and sets the LED effect. Allowed modes: 0..10 and 12 (11 = game mode
+ * and 15 = custom need extra commands and are rejected). */
+KBCORE_API kbc_status kbc_profile_block_set_mode(const uint8_t *block, size_t block_len, uint8_t profile, uint8_t mode, uint8_t *out, size_t out_len);
+
 /* Built-in LED effects (hardware mode index 0..12; 15 = custom). */
 #define KBC_LED_EFFECT_COUNT   13
 #define KBC_LED_EFFECT_LIGHTING 12   /* constant single colour */

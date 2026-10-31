@@ -89,3 +89,49 @@ int kbdd_dev_send_frame(const kbdd_dev_io_t *io, const uint8_t frame[432],
     }
     return KBDD_DEV_OK;
 }
+
+int kbdd_dev_set_field(const kbdd_dev_io_t *io, int field, uint8_t value, uint8_t *profile_out)
+{
+    uint8_t act[264], before[264], after[264], rep[264], undo[264];
+    uint8_t prof;
+    kbc_status st;
+    int rc;
+
+    if (io == NULL) return KBDD_DEV_EINVAL;
+    rc = kbdd_dev_query(io, KBC_OP_READ_ACTIVE_PROFILE, 0, act);
+    if (rc != KBDD_DEV_OK) return rc;
+    /* hardware reply: 07 81 <profile> ... */
+    if (act[1] != KBC_OP_READ_ACTIVE_PROFILE) return KBDD_DEV_EPROTO;
+    prof = act[2];
+    if (prof < 1 || prof > 4) return KBDD_DEV_EPROTO;
+
+    rc = kbdd_dev_query(io, KBC_OP_READ_PROFILE_BLOCK, prof, before);
+    if (rc != KBDD_DEV_OK) return rc;
+
+    st = kbc_profile_block_set_field(before, sizeof(before), prof,
+                                     (kbc_profile_field)field, value, rep, sizeof(rep));
+    if (st == KBC_ERR_RANGE || st == KBC_ERR_INVALID_ARGUMENT) return KBDD_DEV_EINVAL;
+    if (st != KBC_OK) return KBDD_DEV_EPROTO;
+    if (profile_out != NULL) *profile_out = prof;
+
+    if (io->set_feature(io->ctx, rep, sizeof(rep)) < 0) return KBDD_DEV_EIO;
+    io->sleep_ms(io->ctx, 200u);
+
+    rc = kbdd_dev_query(io, KBC_OP_READ_PROFILE_BLOCK, prof, after);
+    if (rc != KBDD_DEV_OK) return rc;
+
+    /* the keyboard must now report exactly what we wrote (data + params) */
+    if (memcmp(after + 3, rep + 3, sizeof(after) - 3) == 0) return KBDD_DEV_OK;
+
+    /* roll back to exactly what the keyboard reported before */
+    if (kbc_profile_block_to_write(before, sizeof(before), prof, undo, sizeof(undo)) == KBC_OK) {
+        (void)io->set_feature(io->ctx, undo, sizeof(undo));
+        io->sleep_ms(io->ctx, 200u);
+    }
+    return KBDD_DEV_EVERIFY;
+}
+
+int kbdd_dev_set_effect(const kbdd_dev_io_t *io, uint8_t mode, uint8_t *profile_out)
+{
+    return kbdd_dev_set_field(io, KBC_FIELD_MODE, mode, profile_out);
+}

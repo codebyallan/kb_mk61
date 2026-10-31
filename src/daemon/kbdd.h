@@ -53,12 +53,20 @@ typedef struct kbdd_dev_io {
 #define KBDD_DEV_EINVAL (-1)
 #define KBDD_DEV_EIO (-2)
 #define KBDD_DEV_EPROTO (-3)
+#define KBDD_DEV_EVERIFY (-4)  /* write not confirmed by read-back (rolled back) */
 
 void kbdd_dev_io_init_hidraw(kbdd_dev_io_t *io, const kbdd_hid_device_t *dev);
 int kbdd_dev_query(const kbdd_dev_io_t *io, uint8_t opcode, uint8_t profile,
                    uint8_t out[264]);
 int kbdd_dev_send_frame(const kbdd_dev_io_t *io, const uint8_t frame[432],
                         size_t stride);
+
+/* Changes the LED effect of the ACTIVE profile: read 0x81, read 0x82, write
+ * 0x02 with only the effect byte changed, read back and verify. On a failed
+ * verification the original block is written back (EVERIFY). */
+int kbdd_dev_set_effect(const kbdd_dev_io_t *io, uint8_t mode, uint8_t *profile_out);
+/* Same flow for one field (kbc_profile_field): effect, brightness or speed. */
+int kbdd_dev_set_field(const kbdd_dev_io_t *io, int field, uint8_t value, uint8_t *profile_out);
 
 /* uinput module */
 typedef struct kbdd_uinput kbdd_uinput_t;

@@ -132,6 +132,7 @@ typedef struct {
     const kbdd_hid_device_t *devices;
     size_t count;
     int allow_led;                       /* KBDD_ENABLE_LED=1 */
+    int allow_profile_write;             /* KBDD_ENABLE_PROFILE_WRITE=1 */
     int led_hold;                        /* streaming active */
     uint8_t led_frame[KBC_LED_BUFFER_SIZE];
     size_t led_stride;
@@ -174,7 +175,8 @@ static const char *kbdd_dev_err(int rc)
     switch (rc) {
     case KBDD_DEV_EINVAL: return "error: invalid request";
     case KBDD_DEV_EIO:    return "error: device I/O failed (is the keyboard connected and the udev rule installed?)";
-    case KBDD_DEV_EPROTO: return "error: unexpected response from the device";
+    case KBDD_DEV_EPROTO: return "error: unexpected response from the device (layout check failed, nothing written)";
+    case KBDD_DEV_EVERIFY: return "error: write not confirmed by read-back; original block restored";
     default:              return "error: unknown";
     }
 }
@@ -238,6 +240,70 @@ static int kbdd_handle_led(kbdd_ctx_t *k, const kbdd_ipc_message_t *req,
     return kbdd_reply_text(resp, k->led_hold
         ? "ok: LED frame sent, streaming every 40 ms (kbctl led release to stop)"
         : "ok: LED frame sent once");
+}
+
+static int kbdd_handle_effect(kbdd_ctx_t *k, const kbdd_ipc_message_t *req,
+                              kbdd_ipc_message_t *resp)
+{
+    const kbdd_hid_device_t *dev;
+    kbdd_dev_io_t io;
+    uint8_t prof = 0;
+    char buf[160];
+    int rc;
+
+    if (!k->allow_profile_write) {
+        return kbdd_reply_text(resp,
+            "error: profile writes are disabled. Start kbdd with KBDD_ENABLE_PROFILE_WRITE=1");
+    }
+    if (req->payload == NULL || req->payload_len != 1) {
+        return kbdd_reply_text(resp, "error: payload must be [mode]");
+    }
+    dev = kbdd_control_dev(k);
+    if (dev == NULL) {
+        return kbdd_reply_text(resp, "error: no keyboard control interface available");
+    }
+    k->led_hold = 0; /* stop host streaming so the effect is visible */
+    kbdd_dev_io_init_hidraw(&io, dev);
+    rc = kbdd_dev_set_effect(&io, req->payload[0], &prof);
+    if (rc != KBDD_DEV_OK) {
+        return kbdd_reply_text(resp, kbdd_dev_err(rc));
+    }
+    snprintf(buf, sizeof(buf), "ok: effect %s (%u) set on profile %u, verified by read-back",
+             kbc_led_effect_name(req->payload[0]), (unsigned)req->payload[0], (unsigned)prof);
+    return kbdd_reply_text(resp, buf);
+}
+
+static int kbdd_handle_field(kbdd_ctx_t *k, const kbdd_ipc_message_t *req,
+                             kbdd_ipc_message_t *resp)
+{
+    static const char *const names[] = {"?", "effect", "brightness", "speed"};
+    const kbdd_hid_device_t *dev;
+    kbdd_dev_io_t io;
+    uint8_t prof = 0;
+    char buf[160];
+    int rc, field;
+
+    if (!k->allow_profile_write) {
+        return kbdd_reply_text(resp,
+            "error: profile writes are disabled. Start kbdd with KBDD_ENABLE_PROFILE_WRITE=1");
+    }
+    if (req->payload == NULL || req->payload_len != 2 || req->payload[0] < 1 || req->payload[0] > 3) {
+        return kbdd_reply_text(resp, "error: payload must be [field 1..3, value]");
+    }
+    field = req->payload[0];
+    dev = kbdd_control_dev(k);
+    if (dev == NULL) {
+        return kbdd_reply_text(resp, "error: no keyboard control interface available");
+    }
+    k->led_hold = 0;
+    kbdd_dev_io_init_hidraw(&io, dev);
+    rc = kbdd_dev_set_field(&io, field, req->payload[1], &prof);
+    if (rc != KBDD_DEV_OK) {
+        return kbdd_reply_text(resp, kbdd_dev_err(rc));
+    }
+    snprintf(buf, sizeof(buf), "ok: %s set to %u on profile %u, verified by read-back",
+             names[field], (unsigned)req->payload[1], (unsigned)prof);
+    return kbdd_reply_text(resp, buf);
 }
 
 static void kbdd_led_tick(kbdd_ctx_t *k)
@@ -385,13 +451,14 @@ static int kbdd_ipc_handle(const kbdd_ipc_message_t *req, kbdd_ipc_message_t *re
             if (rc != KBDD_DEV_OK) {
                 return kbdd_reply_text(resp, kbdd_dev_err(rc));
             }
-            if (out[1] >= 1 && out[1] <= 4) {
-                snprintf(buf, sizeof(buf), "active profile: %u", (unsigned)out[1]);
+            /* hardware reply: 07 81 <profile> ... (profile in byte 2) */
+            if (out[1] == KBC_OP_READ_ACTIVE_PROFILE && out[2] >= 1 && out[2] <= 4) {
+                snprintf(buf, sizeof(buf), "active profile: %u", (unsigned)out[2]);
             } else {
                 snprintf(buf, sizeof(buf),
-                         "unexpected profile byte 0x%02x; first bytes: "
+                         "unexpected reply; first bytes: "
                          "%02x %02x %02x %02x %02x %02x %02x %02x",
-                         out[1], out[0], out[1], out[2], out[3], out[4],
+                         out[0], out[1], out[2], out[3], out[4],
                          out[5], out[6], out[7]);
             }
             return kbdd_reply_text(resp, buf);
@@ -416,6 +483,10 @@ static int kbdd_ipc_handle(const kbdd_ipc_message_t *req, kbdd_ipc_message_t *re
         }
         case KBDD_IPC_OP_LED_SET:
             return kbdd_handle_led(kctx, req, resp);
+        case KBDD_IPC_OP_SET_EFFECT:
+            return kbdd_handle_effect(kctx, req, resp);
+        case KBDD_IPC_OP_SET_FIELD:
+            return kbdd_handle_field(kctx, req, resp);
         default: {
             const char *msg = "error: unsupported command";
             size_t n = strlen(msg);
@@ -487,7 +558,9 @@ int kbdd_run(int argc, char **argv)
     kctx.count = device_count;
     {
         const char *want_led = getenv("KBDD_ENABLE_LED");
+        const char *want_pw = getenv("KBDD_ENABLE_PROFILE_WRITE");
         kctx.allow_led = (want_led != NULL && strcmp(want_led, "1") == 0);
+        kctx.allow_profile_write = (want_pw != NULL && strcmp(want_pw, "1") == 0);
     }
 
     /* main loop */

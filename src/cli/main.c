@@ -6,6 +6,8 @@
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
+#include <sys/stat.h>
+#include <strings.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
 #include <sys/un.h>
@@ -36,6 +38,9 @@ static void usage(FILE *f)
     fputs("  led sweep [opts]              Light positions one by one to map keys\n", f);
     fputs("  led release                   Stop streaming frames\n", f);
     fputs("  led effects                   List the keyboard built-in effects (offline)\n", f);
+    fputs("  led effect <name|index>       Set the active profile effect (needs KBDD_ENABLE_PROFILE_WRITE=1)\n", f);
+    fputs("  led brightness <0-10>         Set the active profile brightness (0 = off)\n", f);
+    fputs("  led speed <2-102>             Set the current effect speed (raw, lower = faster)\n", f);
     fputs("    opts: --once (send one frame, no streaming)  --stride N (frame layout, default = matrix size)\n", f);
     fputs("          sweep: --delay MS  --color RRGGBB  --from N\n", f);
     fputs("  help                          Show this help\n", f);
@@ -404,6 +409,119 @@ static int led_parse_opts(int argc, char **argv, int start, struct led_opts *o)
     return 0;
 }
 
+
+static int effect_from_arg(const char *a)
+{
+    unsigned long v;
+    int m;
+    if (parse_uint(a, 15, &v) == 0) return (int)v;
+    for (m = 0; m < KBC_LED_EFFECT_COUNT; m++) {
+        if (strcasecmp(a, kbc_led_effect_name((uint8_t)m)) == 0) return m;
+    }
+    return -1;
+}
+
+static int mkdir_p(char *path)
+{
+    char *p;
+    for (p = path + 1; *p; p++) {
+        if (*p == '/') { *p = '\0'; (void)mkdir(path, 0700); *p = '/'; }
+    }
+    return mkdir(path, 0700) == 0 || errno == EEXIST ? 0 : -1;
+}
+
+/* Saves the current block of profile `prof` to the state dir. 0 = ok. */
+static int backup_block(unsigned prof, char *outpath, size_t outsz)
+{
+    uint8_t payload[1] = {(uint8_t)prof};
+    uint8_t *resp = NULL;
+    uint32_t rlen = 0;
+    const char *base = getenv("XDG_STATE_HOME");
+    const char *home = getenv("HOME");
+    char dir[400];
+    FILE *f;
+
+    if (ipc_request(KBDD_IPC_OP_READ_BLOCK, payload, 1, &resp, &rlen) != 0) {
+        free(resp);
+        return -1;
+    }
+    if (rlen != 264 || resp[0] != 0x07) { free(resp); return -1; }
+    if (base != NULL && base[0] == '/') snprintf(dir, sizeof(dir), "%s/kbctl", base);
+    else if (home != NULL) snprintf(dir, sizeof(dir), "%s/.local/state/kbctl", home);
+    else { free(resp); return -1; }
+    if (mkdir_p(dir) != 0) { free(resp); return -1; }
+    snprintf(outpath, outsz, "%s/profile%u-%ld.bin", dir, prof, (long)time(NULL));
+    f = fopen(outpath, "wb");
+    if (f == NULL || fwrite(resp, 1, rlen, f) != rlen) {
+        if (f != NULL) fclose(f);
+        free(resp);
+        return -1;
+    }
+    fclose(f);
+    free(resp);
+    return 0;
+}
+
+/* Backup of the active profile block, then one profile write through kbdd. */
+static int profile_write(uint8_t op, const uint8_t *payload, size_t plen)
+{
+    uint8_t *resp = NULL;
+    uint32_t rlen = 0;
+    unsigned prof = 0;
+    char path[512];
+    int rc;
+
+    if (ipc_request(KBDD_IPC_OP_READ_ACTIVE, NULL, 0, &resp, &rlen) != 0) {
+        free(resp);
+        return 1;
+    }
+    if (resp == NULL || rlen < 17 || sscanf((const char *)resp, "active profile: %u", &prof) != 1) {
+        (void)print_reply(resp, rlen);
+        free(resp);
+        return 1;
+    }
+    free(resp);
+    if (backup_block(prof, path, sizeof(path)) != 0) {
+        fprintf(stderr, "kbctl: could not back up the current profile block; aborting\n");
+        return 1;
+    }
+    printf("backup: %s\n", path);
+    resp = NULL;
+    if (ipc_request(op, payload, plen, &resp, &rlen) != 0) {
+        free(resp);
+        return 1;
+    }
+    rc = print_reply(resp, rlen);
+    free(resp);
+    return rc;
+}
+
+static int cmd_led_effect(int argc, char **argv)
+{
+    uint8_t mode;
+    int m;
+    if (argc != 4 || (m = effect_from_arg(argv[3])) < 0) {
+        fprintf(stderr, "kbctl: led effect <name|index>  (see: kbctl led effects)\n");
+        return 2;
+    }
+    mode = (uint8_t)m;
+    return profile_write(KBDD_IPC_OP_SET_EFFECT, &mode, 1);
+}
+
+static int cmd_led_field(int argc, char **argv, uint8_t field, unsigned long lo,
+                         unsigned long hi, const char *hint)
+{
+    unsigned long v;
+    uint8_t payload[2];
+    if (argc != 4 || parse_uint(argv[3], hi, &v) != 0 || v < lo) {
+        fprintf(stderr, "kbctl: led %s <%lu-%lu>  %s\n", argv[2], lo, hi, hint);
+        return 2;
+    }
+    payload[0] = field;
+    payload[1] = (uint8_t)v;
+    return profile_write(KBDD_IPC_OP_SET_FIELD, payload, 2);
+}
+
 static int cmd_led(int argc, char **argv)
 {
     struct led_opts o;
@@ -427,6 +545,12 @@ static int cmd_led(int argc, char **argv)
                KBC_LED_SPEED_MAX, KBC_LED_BRIGHTNESS_MIN, KBC_LED_BRIGHTNESS_MAX);
         return 0;
     }
+    if (strcmp(sub, "effect") == 0) return cmd_led_effect(argc, argv);
+    if (strcmp(sub, "brightness") == 0)
+        return cmd_led_field(argc, argv, 2, 0, KBC_BRIGHTNESS_RAW_MAX, "(0 = off, 10 = max)");
+    if (strcmp(sub, "speed") == 0)
+        return cmd_led_field(argc, argv, 3, KBC_SPEED_RAW_MIN, KBC_SPEED_RAW_MAX,
+                             "(raw; lower = faster; applies to the current effect)");
     if (strcmp(sub, "release") == 0) {
         rc = led_call(0, 0, KBDD_LED_MODE_RELEASE, 0, 0, 0, 0, msg, sizeof(msg));
         if (rc < 0) return 1;
@@ -532,11 +656,11 @@ static int cmd_dump_block(int argc, char **argv)
     {
         const char *na = kbc_led_effect_name(resp[7]);
         const char *nb = kbc_led_effect_name(resp[11]);
-        printf("candidatos (spec Q8, NAO confirmados):\n"
+        printf("campos (efeito/brilho/velocidade confirmados em hardware; [8] inferido):\n"
                "  A: rate=[4]=%u  efeito=[7]=%u (%s)\n"
-               "  B: efeito=[11]=%u (%s)  brilho=[12]=%u  veloc=[13]=%u\n",
+               "  B: efeito=[11]=%u (%s)  brilho=[12]=%u  veloc(wave)=[19]=%u  rate?=[8]=%u\n",
                resp[4], resp[7], na ? na : "?", resp[11], nb ? nb : "?",
-               resp[12], resp[13]);
+               resp[12], resp[19], resp[8]);
     }
     if (argc == 4) {
         FILE *f = fopen(argv[3], "wb");

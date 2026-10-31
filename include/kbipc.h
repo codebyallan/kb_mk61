@@ -21,6 +21,10 @@
 #define KBDD_IPC_OP_READ_BLOCK 10u   /* query 0x82: payload [profile]; 264 raw bytes */
 #define KBDD_IPC_OP_LED_SET 11u      /* payload: see KBDD_LED_* below (7 bytes) */
 
+#define KBDD_IPC_OP_SET_EFFECT 12u  /* payload [mode]: active profile effect (0x02, verified) */
+
+#define KBDD_IPC_OP_SET_FIELD 13u   /* payload [field(1=effect,2=brightness,3=speed), value] */
+
 /* LED_SET payload: [flags, stride, mode, pos, r, g, b] */
 #define KBDD_LED_PAYLOAD_SIZE 7u
 #define KBDD_LED_FLAG_HOLD 0x01u     /* keep re-sending the frame every 40 ms */

@@ -968,6 +968,72 @@ static void test_led_effect_names(void)
     CHECK(KBC_LED_EFFECT_LIGHTING == 12);
 }
 
+static void test_profile_block_write(void)
+{
+    uint8_t blk[264], out[264];
+    size_t i;
+    memset(blk, 0, sizeof blk);
+    for (i = 8; i < 264; i++) blk[i] = (uint8_t)(i * 7);
+    blk[0] = 7; blk[1] = 0x82; blk[2] = 2; blk[3] = 0; blk[4] = 0;
+    blk[5] = 0; blk[6] = 0; blk[7] = 0; blk[11] = 0;
+
+    CHECK(kbc_profile_block_set_mode(blk, 264, 2, 1, out, 264) == KBC_OK);
+    CHECK(out[0] == 7 && out[1] == 0x02 && out[2] == 2 && out[11] == 1);
+    for (i = 0; i < 264; i++) {
+        if (i == 1 || i == 11) continue;
+        CHECK(out[i] == blk[i]);              /* everything else untouched */
+    }
+    CHECK(kbc_profile_block_set_mode(blk, 264, 2, 12, out, 264) == KBC_OK);
+    CHECK(kbc_profile_block_set_mode(blk, 264, 2, 11, out, 264) == KBC_ERR_RANGE);
+    CHECK(kbc_profile_block_set_mode(blk, 264, 2, 13, out, 264) == KBC_ERR_RANGE);
+    CHECK(kbc_profile_block_set_mode(blk, 264, 2, 15, out, 264) == KBC_ERR_RANGE);
+    CHECK(kbc_profile_block_set_mode(blk, 264, 3, 1, out, 264) == KBC_ERR_PROTOCOL);  /* wrong profile */
+    CHECK(kbc_profile_block_set_mode(blk, 264, 0, 1, out, 264) == KBC_ERR_RANGE);
+    CHECK(kbc_profile_block_set_mode(blk, 263, 2, 1, out, 264) == KBC_ERR_PROTOCOL);
+    blk[1] = 0x02;
+    CHECK(kbc_profile_block_set_mode(blk, 264, 2, 1, out, 264) == KBC_ERR_PROTOCOL);  /* not a 0x82 reply */
+    blk[1] = 0x82; blk[11] = 0x77;
+    CHECK(kbc_profile_block_set_mode(blk, 264, 2, 1, out, 264) == KBC_ERR_PROTOCOL);  /* implausible layout */
+    blk[11] = 11;                                  /* currently game mode: to_write must still work */
+    CHECK(kbc_profile_block_to_write(blk, 264, 2, out, 264) == KBC_OK && out[11] == 11);
+}
+
+static void test_profile_block_fields(void)
+{
+    uint8_t blk[264], out[264];
+    size_t i, changed;
+
+    memset(blk, 0, sizeof blk);
+    for (i = 8; i < 264; i++) blk[i] = (uint8_t)(i * 3);
+    blk[0] = 7; blk[1] = 0x82; blk[2] = 1;
+    for (i = 3; i < 8; i++) blk[i] = 0;
+    blk[11] = 0; blk[12] = 0; blk[19] = 0x66;
+
+    /* brightness: only offset 12 changes */
+    CHECK(kbc_profile_block_set_field(blk, 264, 1, KBC_FIELD_BRIGHTNESS, 10, out, 264) == KBC_OK);
+    changed = 0;
+    for (i = 3; i < 264; i++) if (out[i] != blk[i]) { changed++; CHECK(i == 12); }
+    CHECK(changed == 1 && out[12] == 10 && out[1] == 0x02);
+    CHECK(kbc_profile_block_set_field(blk, 264, 1, KBC_FIELD_BRIGHTNESS, 11, out, 264) == KBC_ERR_RANGE);
+
+    /* speed: slot = 19 + current effect */
+    CHECK(kbc_profile_block_set_field(blk, 264, 1, KBC_FIELD_SPEED, 2, out, 264) == KBC_OK);
+    CHECK(out[19] == 2);
+    changed = 0;
+    for (i = 3; i < 264; i++) if (out[i] != blk[i]) changed++;
+    CHECK(changed == 1);
+    blk[11] = 1;
+    CHECK(kbc_profile_block_set_field(blk, 264, 1, KBC_FIELD_SPEED, 102, out, 264) == KBC_OK);
+    CHECK(out[20] == 102 && out[19] == blk[19]);
+    CHECK(kbc_profile_block_set_field(blk, 264, 1, KBC_FIELD_SPEED, 1, out, 264) == KBC_ERR_RANGE);
+    CHECK(kbc_profile_block_set_field(blk, 264, 1, KBC_FIELD_SPEED, 103, out, 264) == KBC_ERR_RANGE);
+    blk[11] = 12;                                   /* lighting has no speed slot */
+    CHECK(kbc_profile_block_set_field(blk, 264, 1, KBC_FIELD_SPEED, 50, out, 264) == KBC_ERR_RANGE);
+    blk[11] = 15;                                   /* custom: no speed slot */
+    CHECK(kbc_profile_block_set_field(blk, 264, 1, KBC_FIELD_SPEED, 50, out, 264) == KBC_ERR_RANGE);
+    CHECK(kbc_profile_block_set_field(blk, 264, 1, (kbc_profile_field)9, 1, out, 264) == KBC_ERR_INVALID_ARGUMENT);
+}
+
 int main(void)
 {
     test_tv_f01(); test_tv_f02(); test_tv_f03(); test_tv_f04();
@@ -996,6 +1062,8 @@ int main(void)
     test_led_frame();
     test_read_requests();
     test_led_effect_names();
+    test_profile_block_write();
+    test_profile_block_fields();
     test_profile_invalid_limits();
     test_null_profile_args();
 

@@ -49,6 +49,8 @@ static void m_sleep(void *ctx, unsigned ms)
     if (m->nsleeps < 16) m->sleeps[m->nsleeps++] = ms;
 }
 
+static void m_sleep_nop(void *ctx, unsigned ms) { (void)ctx; (void)ms; }
+
 static void mock_init(struct mock *m, kbdd_dev_io_t *io)
 {
     memset(m, 0, sizeof(*m));
@@ -147,8 +149,121 @@ static void test_send_frame_errors(void)
     CHECK(kbdd_dev_send_frame(&io, frame, 70) == KBDD_DEV_EIO);
 }
 
+/* Stateful keyboard simulation for the effect change flow. */
+struct kb {
+    uint8_t block[264];
+    uint8_t active;
+    uint8_t last_op;
+    int ignore_write;
+    size_t nwrites;
+    uint8_t writes[4][264];
+};
+
+static ssize_t kb_set(void *ctx, const uint8_t *buf, size_t len)
+{
+    struct kb *k = ctx;
+    if (len != 264) return -1;
+    k->last_op = buf[1];
+    if (buf[1] == 0x02) {
+        if (k->nwrites < 4) memcpy(k->writes[k->nwrites], buf, len);
+        k->nwrites++;
+        if (!k->ignore_write) {
+            memcpy(k->block + 3, buf + 3, 261);   /* keyboard stores the data */
+        }
+    }
+    return (ssize_t)len;
+}
+
+static ssize_t kb_get(void *ctx, uint8_t *buf, size_t len)
+{
+    struct kb *k = ctx;
+    memset(buf, 0, len);
+    buf[0] = 0x07;
+    if (k->last_op == 0x81) { buf[1] = 0x81; buf[2] = k->active; return 264; }
+    memcpy(buf, k->block, len < 264 ? len : 264);
+    return 264;
+}
+
+static void kb_init(struct kb *k, kbdd_dev_io_t *io)
+{
+    size_t i;
+    memset(k, 0, sizeof(*k));
+    for (i = 8; i < 264; i++) k->block[i] = (uint8_t)(i * 5 + 1);
+    k->block[0] = 0x07; k->block[1] = 0x82; k->block[2] = 3; k->block[11] = 0;
+    k->active = 3;
+    io->ctx = k; io->set_feature = kb_set; io->get_feature = kb_get; io->sleep_ms = m_sleep_nop;
+}
+
+static void test_set_effect_ok(void)
+{
+    struct kb k; kbdd_dev_io_t io; uint8_t prof = 0; size_t i; uint8_t orig[264];
+    kb_init(&k, &io); memcpy(orig, k.block, 264);
+    CHECK(kbdd_dev_set_effect(&io, 1, &prof) == KBDD_DEV_OK);
+    CHECK(prof == 3 && k.nwrites == 1);
+    CHECK(k.writes[0][1] == 0x02 && k.writes[0][2] == 3 && k.writes[0][11] == 1);
+    for (i = 3; i < 264; i++) if (i != 11) CHECK(k.block[i] == orig[i]);
+    CHECK(k.block[11] == 1);
+}
+
+static void test_set_effect_rejects(void)
+{
+    struct kb k; kbdd_dev_io_t io;
+    kb_init(&k, &io);
+    CHECK(kbdd_dev_set_effect(&io, 11, NULL) == KBDD_DEV_EINVAL);
+    CHECK(kbdd_dev_set_effect(&io, 15, NULL) == KBDD_DEV_EINVAL);
+    CHECK(kbdd_dev_set_effect(&io, 99, NULL) == KBDD_DEV_EINVAL);
+    CHECK(k.nwrites == 0);
+    kb_init(&k, &io); k.active = 9;                       /* bogus active profile */
+    CHECK(kbdd_dev_set_effect(&io, 1, NULL) == KBDD_DEV_EPROTO && k.nwrites == 0);
+    kb_init(&k, &io); k.block[11] = 0x77;                 /* implausible layout */
+    CHECK(kbdd_dev_set_effect(&io, 1, NULL) == KBDD_DEV_EPROTO && k.nwrites == 0);
+    kb_init(&k, &io); k.block[2] = 1;                     /* reply for another profile */
+    CHECK(kbdd_dev_set_effect(&io, 1, NULL) == KBDD_DEV_EPROTO && k.nwrites == 0);
+}
+
+static void test_set_effect_rollback(void)
+{
+    struct kb k; kbdd_dev_io_t io;
+    kb_init(&k, &io); k.ignore_write = 1;                 /* keyboard drops the write */
+    CHECK(kbdd_dev_set_effect(&io, 1, NULL) == KBDD_DEV_EVERIFY);
+    CHECK(k.nwrites == 2);                                /* write + rollback */
+    CHECK(k.writes[1][11] == 0);                          /* rollback restores old effect */
+}
+
+static void test_set_field(void)
+{
+    struct kb k; kbdd_dev_io_t io; uint8_t orig[264]; size_t i, changed;
+
+    kb_init(&k, &io); memcpy(orig, k.block, 264);
+    CHECK(kbdd_dev_set_field(&io, KBC_FIELD_BRIGHTNESS, 7, NULL) == KBDD_DEV_OK);
+    changed = 0;
+    for (i = 3; i < 264; i++) if (k.block[i] != orig[i]) { changed++; CHECK(i == 12); }
+    CHECK(changed == 1 && k.block[12] == 7 && k.nwrites == 1);
+
+    kb_init(&k, &io); k.block[11] = 1; memcpy(orig, k.block, 264);   /* breath active */
+    CHECK(kbdd_dev_set_field(&io, KBC_FIELD_SPEED, 40, NULL) == KBDD_DEV_OK);
+    changed = 0;
+    for (i = 3; i < 264; i++) if (k.block[i] != orig[i]) { changed++; CHECK(i == 20); }
+    CHECK(changed == 1 && k.block[20] == 40);
+
+    kb_init(&k, &io);                                    /* out-of-range values never reach the device */
+    CHECK(kbdd_dev_set_field(&io, KBC_FIELD_BRIGHTNESS, 11, NULL) == KBDD_DEV_EINVAL);
+    CHECK(kbdd_dev_set_field(&io, KBC_FIELD_SPEED, 1, NULL) == KBDD_DEV_EINVAL);
+    CHECK(kbdd_dev_set_field(&io, KBC_FIELD_SPEED, 200, NULL) == KBDD_DEV_EINVAL);
+    CHECK(kbdd_dev_set_field(&io, 42, 1, NULL) == KBDD_DEV_EINVAL);
+    CHECK(k.nwrites == 0);
+
+    kb_init(&k, &io); k.ignore_write = 1;                /* dropped write -> rollback */
+    CHECK(kbdd_dev_set_field(&io, KBC_FIELD_BRIGHTNESS, 5, NULL) == KBDD_DEV_EVERIFY);
+    CHECK(k.nwrites == 2 && k.writes[1][12] == k.block[12]);
+}
+
 int main(void)
 {
+    test_set_field();
+    test_set_effect_ok();
+    test_set_effect_rejects();
+    test_set_effect_rollback();
     test_query_active();
     test_query_block();
     test_query_allowlist();

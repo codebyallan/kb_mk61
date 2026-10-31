@@ -175,3 +175,64 @@ const char *kbc_led_effect_name(uint8_t mode)
     if (mode == 15) return "custom";
     return NULL;
 }
+
+kbc_status kbc_profile_block_to_write(const uint8_t *block, size_t block_len,
+                                      uint8_t profile, uint8_t *out, size_t out_len)
+{
+    if (block == NULL || out == NULL) return KBC_ERR_INVALID_ARGUMENT;
+    if (block_len != KBC_FEATURE_REPORT_SIZE || out_len != KBC_FEATURE_REPORT_SIZE) {
+        return KBC_ERR_PROTOCOL;
+    }
+    if (profile < 1 || profile > 4) return KBC_ERR_RANGE;
+    if (block[0] != KBC_FEATURE_REPORT_ID || block[1] != KBC_OP_READ_PROFILE_BLOCK ||
+        block[2] != profile) {
+        return KBC_ERR_PROTOCOL;
+    }
+    /* sanity: the current effect byte must be a valid effect index */
+    if (block[KBC_PBLK_OFF_MODE] > KBC_LED_EFFECT_LIGHTING && block[KBC_PBLK_OFF_MODE] != 15) {
+        return KBC_ERR_PROTOCOL;
+    }
+    memcpy(out, block, KBC_FEATURE_REPORT_SIZE);
+    out[1] = KBC_OP_PROFILE_PARAMS;
+    out[2] = profile;
+    return KBC_OK;
+}
+
+kbc_status kbc_profile_block_set_field(const uint8_t *block, size_t block_len,
+                                       uint8_t profile, kbc_profile_field field,
+                                       uint8_t value, uint8_t *out, size_t out_len)
+{
+    kbc_status st;
+    size_t off;
+
+    switch (field) {
+    case KBC_FIELD_MODE:
+        if (value > KBC_LED_EFFECT_LIGHTING || value == 11) return KBC_ERR_RANGE;
+        off = KBC_PBLK_OFF_MODE;
+        break;
+    case KBC_FIELD_BRIGHTNESS:
+        if (value > KBC_BRIGHTNESS_RAW_MAX) return KBC_ERR_RANGE;
+        off = KBC_PBLK_OFF_BRIGHTNESS;
+        break;
+    case KBC_FIELD_SPEED:
+        if (value < KBC_SPEED_RAW_MIN || value > KBC_SPEED_RAW_MAX) return KBC_ERR_RANGE;
+        if (block == NULL || block_len != KBC_FEATURE_REPORT_SIZE) return KBC_ERR_PROTOCOL;
+        if (block[KBC_PBLK_OFF_MODE] > 11) return KBC_ERR_RANGE; /* no speed slot (lighting/custom) */
+        off = KBC_PBLK_OFF_SPEED_TABLE + block[KBC_PBLK_OFF_MODE];
+        break;
+    default:
+        return KBC_ERR_INVALID_ARGUMENT;
+    }
+    st = kbc_profile_block_to_write(block, block_len, profile, out, out_len);
+    if (st != KBC_OK) return st;
+    out[off] = value;
+    return KBC_OK;
+}
+
+kbc_status kbc_profile_block_set_mode(const uint8_t *block, size_t block_len,
+                                      uint8_t profile, uint8_t mode,
+                                      uint8_t *out, size_t out_len)
+{
+    return kbc_profile_block_set_field(block, block_len, profile, KBC_FIELD_MODE,
+                                       mode, out, out_len);
+}

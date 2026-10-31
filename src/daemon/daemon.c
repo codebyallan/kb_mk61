@@ -219,13 +219,20 @@ static int kbdd_handle_led(kbdd_ctx_t *k, const kbdd_ipc_message_t *req,
     }
     count = matrix < stride ? matrix : stride;
 
-    memset(k->led_frame, 0, sizeof(k->led_frame));
-    memset(k->led_base_frame, 0, sizeof(k->led_base_frame));
     if (mode == KBDD_LED_MODE_SOLID) {
+        memset(k->led_frame, 0, sizeof(k->led_frame));
+        memset(k->led_base_frame, 0, sizeof(k->led_base_frame));
         kbc_led_frame_fill(k->led_base_frame, stride, count, r, g, b);
+    } else if (mode == KBDD_LED_MODE_CLEAR) {
+        memset(k->led_frame, 0, sizeof(k->led_frame));
+        memset(k->led_base_frame, 0, sizeof(k->led_base_frame));
     } else if (mode == KBDD_LED_MODE_POS) {
         if (pos >= count) {
             return kbdd_reply_text(resp, "error: position out of range");
+        }
+        if (!k->led_active || k->led_stride != stride) {
+            memset(k->led_frame, 0, sizeof(k->led_frame));
+            memset(k->led_base_frame, 0, sizeof(k->led_base_frame));
         }
         kbc_led_frame_set(k->led_base_frame, stride, pos, r, g, b);
     } else {

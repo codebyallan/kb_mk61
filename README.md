@@ -119,10 +119,18 @@ LED commands are available when LED support has been explicitly enabled:
 kbctl led effects
 kbctl led solid FF0000
 kbctl led off
-kbctl led pos 12 00FF00 --once
+kbctl led clear
+kbctl led pos 12 00FF00
+kbctl led pos 24 FF0000
 kbctl led sweep --delay 100 --color 0000FF
 kbctl led release
 ```
+
+`led pos` changes one position while preserving the colors already selected
+in the host-controlled frame, allowing different colors on different keys.
+Use `led clear` to clear all positions before building a new custom layout.
+The `--once` option sends the frame once without periodic streaming; omit it
+for continuous refresh.
 
 For the complete command list and option syntax:
 

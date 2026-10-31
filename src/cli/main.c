@@ -34,7 +34,8 @@ static void usage(FILE *f)
     fputs("  diff-block <a.bin> <b.bin>    Compare two saved dump-block files\n", f);
     fputs("  led solid <RRGGBB> [opts]     All keys one colour (needs KBDD_ENABLE_LED=1)\n", f);
     fputs("  led off [opts]                All keys black\n", f);
-    fputs("  led pos <n> <RRGGBB> [opts]   Light only matrix position n\n", f);
+    fputs("  led pos <n> <RRGGBB> [opts]   Set one position, preserving other colors\n", f);
+    fputs("  led clear [opts]              Clear all customized colors\n", f);
     fputs("  led sweep [opts]              Light positions one by one to map keys\n", f);
     fputs("  led release                   Stop streaming frames\n", f);
     fputs("  led effects                   List the keyboard built-in effects (offline)\n", f);
@@ -570,6 +571,14 @@ static int cmd_led(int argc, char **argv)
         if (led_parse_opts(argc, argv, next, &o) != 0) { usage(stderr); return 2; }
         rc = led_call(o.flags, (unsigned)o.stride, KBDD_LED_MODE_SOLID, 0, r, g, b,
                       msg, sizeof(msg));
+        if (rc < 0) return 1;
+        fprintf(rc ? stderr : stdout, "%s\n", msg);
+        return rc;
+    }
+    if (strcmp(sub, "clear") == 0) {
+        if (led_parse_opts(argc, argv, 3, &o) != 0) { usage(stderr); return 2; }
+        rc = led_call(o.flags, (unsigned)o.stride, KBDD_LED_MODE_CLEAR, 0,
+                      0, 0, 0, msg, sizeof(msg));
         if (rc < 0) return 1;
         fprintf(rc ? stderr : stdout, "%s\n", msg);
         return rc;

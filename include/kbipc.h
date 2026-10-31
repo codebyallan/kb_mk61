@@ -31,5 +31,6 @@
 #define KBDD_LED_MODE_SOLID 0u       /* all matrix positions = (r,g,b) */
 #define KBDD_LED_MODE_POS 1u         /* only matrix position `pos` = (r,g,b) */
 #define KBDD_LED_MODE_RELEASE 2u     /* stop streaming (no frame sent) */
+#define KBDD_LED_MODE_CLEAR 3u       /* clear the host-controlled color frame */
 
 #endif /* KBIPC_H */

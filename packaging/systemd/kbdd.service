@@ -1,0 +1,35 @@
+[Unit]
+Description=Keyboard daemon (kbdd)
+PartOf=graphical-session.target
+After=graphical-session.target
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/kbdd
+Restart=on-failure
+RestartSec=2
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=read-only
+# O daemon grava o lock e o socket em $XDG_RUNTIME_DIR (%t); sem isto,
+# ProtectSystem=strict torna /run somente leitura e o kbdd sai com status 1.
+ReadWritePaths=%t
+PrivateTmp=yes
+RestrictAddressFamilies=AF_UNIX
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+SystemCallFilter=@system-service
+SystemCallErrorNumber=EPERM
+CapabilityBoundingSet=
+AmbientCapabilities=
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+RestrictNamespaces=yes
+RestrictRealtime=yes
+
+[Install]
+WantedBy=graphical-session.target

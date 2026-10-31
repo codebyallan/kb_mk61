@@ -1,0 +1,13 @@
+# kbdd - acesso do usuário logado (uaccess) às interfaces hidraw dos teclados
+# suportados. Somente hidraw: o daemon não lê /dev/input e não precisa de
+# acesso aos eventos de teclado (evita superfície de keylogger).
+SUBSYSTEM=="hidraw", ATTRS{idVendor}=="1ea7", ATTRS{idProduct}=="9018", TAG+="uaccess"
+SUBSYSTEM=="hidraw", ATTRS{idVendor}=="1ea7", ATTRS{idProduct}=="9050", TAG+="uaccess"
+SUBSYSTEM=="hidraw", ATTRS{idVendor}=="2442", ATTRS{idProduct}=="0011", TAG+="uaccess"
+SUBSYSTEM=="hidraw", ATTRS{idVendor}=="2442", ATTRS{idProduct}=="b011", TAG+="uaccess"
+SUBSYSTEM=="hidraw", ATTRS{idVendor}=="2442", ATTRS{idProduct}=="b014", TAG+="uaccess"
+
+# /dev/uinput (injeção de teclas) NÃO é liberado por padrão. Só descomente se
+# for usar KBDD_ENABLE_UINPUT=1, sabendo que qualquer processo da sessão
+# poderá injetar teclas.
+#SUBSYSTEM=="misc", KERNEL=="uinput", TAG+="uaccess"

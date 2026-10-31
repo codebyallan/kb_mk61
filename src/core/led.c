@@ -109,3 +109,69 @@ kbc_status kbc_led_encode_game_mode(const uint8_t *colors, size_t colors_len,
     }
     return kbc_build_feature_report(KBC_OP_LED_DATA, hw_profile, 0, params, data, KBC_FEATURE_DATA_SIZE, buf, buf_len);
 }
+
+static int led_stride_ok(size_t stride)
+{
+    return stride >= 1 && stride <= KBC_MAX_LED_COUNT &&
+           3 * stride <= KBC_LED_BUFFER_SIZE;
+}
+
+size_t kbc_led_frame_page_count(size_t stride)
+{
+    if (!led_stride_ok(stride)) return 0;
+    return (3 * stride + KBC_PAGE_SIZE - 1) / KBC_PAGE_SIZE;
+}
+
+kbc_status kbc_led_frame_set(uint8_t *frame, size_t stride, size_t pos,
+                             uint8_t r, uint8_t g, uint8_t b)
+{
+    if (frame == NULL) return KBC_ERR_INVALID_ARGUMENT;
+    if (!led_stride_ok(stride) || pos >= stride) return KBC_ERR_RANGE;
+    frame[pos] = r;
+    frame[stride + pos] = g;
+    frame[2 * stride + pos] = b;
+    return KBC_OK;
+}
+
+kbc_status kbc_led_frame_fill(uint8_t *frame, size_t stride, size_t count,
+                              uint8_t r, uint8_t g, uint8_t b)
+{
+    size_t i;
+    if (frame == NULL) return KBC_ERR_INVALID_ARGUMENT;
+    if (!led_stride_ok(stride) || count > stride) return KBC_ERR_RANGE;
+    for (i = 0; i < count; i++) {
+        frame[i] = r;
+        frame[stride + i] = g;
+        frame[2 * stride + i] = b;
+    }
+    return KBC_OK;
+}
+
+kbc_status kbc_build_read_request(uint8_t opcode, uint8_t profile,
+                                  uint8_t *buf, size_t buf_len)
+{
+    uint8_t params[KBC_FEATURE_PARAMS_SIZE] = {0, 0, 0, 0};
+
+    if (buf == NULL) return KBC_ERR_INVALID_ARGUMENT;
+    if (buf_len != KBC_FEATURE_REPORT_SIZE) return KBC_ERR_PROTOCOL;
+    if (opcode == KBC_OP_READ_ACTIVE_PROFILE) {
+        profile = 0;
+    } else if (opcode == KBC_OP_READ_PROFILE_BLOCK) {
+        if (profile < 1 || profile > 4) return KBC_ERR_RANGE;
+    } else {
+        return KBC_ERR_INVALID_ARGUMENT;
+    }
+    return kbc_build_feature_report(opcode, profile, 0, params, NULL, 0,
+                                    buf, buf_len);
+}
+
+const char *kbc_led_effect_name(uint8_t mode)
+{
+    static const char *const names[KBC_LED_EFFECT_COUNT] = {
+        "wave", "breath", "cycle", "starlight", "encounter", "rain", "pulse",
+        "cross", "trigger", "ripple", "blossom", "game_mode", "lighting"
+    };
+    if (mode < KBC_LED_EFFECT_COUNT) return names[mode];
+    if (mode == 15) return "custom";
+    return NULL;
+}

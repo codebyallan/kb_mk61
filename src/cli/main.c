@@ -5,6 +5,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
 #include <sys/un.h>
@@ -26,6 +27,17 @@ static void usage(FILE *f)
     fputs("  write-profile <index> <file>  (not implemented: disabled until hardware validation)\n", f);
     fputs("  read-config                   Read daemon configuration summary\n", f);
     fputs("  enable-notifications          Enable input notifications\n", f);
+    fputs("  active-profile                Ask the keyboard which profile is active (0x81)\n", f);
+    fputs("  dump-block <1-4> [file]       Read the profile parameter block (0x82), hex dump\n", f);
+    fputs("  diff-block <a.bin> <b.bin>    Compare two saved dump-block files\n", f);
+    fputs("  led solid <RRGGBB> [opts]     All keys one colour (needs KBDD_ENABLE_LED=1)\n", f);
+    fputs("  led off [opts]                All keys black\n", f);
+    fputs("  led pos <n> <RRGGBB> [opts]   Light only matrix position n\n", f);
+    fputs("  led sweep [opts]              Light positions one by one to map keys\n", f);
+    fputs("  led release                   Stop streaming frames\n", f);
+    fputs("  led effects                   List the keyboard built-in effects (offline)\n", f);
+    fputs("    opts: --once (send one frame, no streaming)  --stride N (frame layout, default = matrix size)\n", f);
+    fputs("          sweep: --delay MS  --color RRGGBB  --from N\n", f);
     fputs("  help                          Show this help\n", f);
     fputs("  version                       Show version\n", f);
 }
@@ -285,6 +297,290 @@ static int read_file(const char *path, uint8_t **out_buf, size_t *out_len)
     return 0;
 }
 
+/* ---- LED / read helpers ------------------------------------------------ */
+
+static int parse_rgb(const char *s, uint8_t *r, uint8_t *g, uint8_t *b)
+{
+    unsigned v = 0;
+    size_t i, n;
+    if (s != NULL && s[0] == '#') s++;
+    if (s == NULL) return -1;
+    n = strlen(s);
+    if (n != 6) return -1;
+    for (i = 0; i < n; i++) {
+        char c = s[i];
+        unsigned d;
+        if (c >= '0' && c <= '9') d = (unsigned)(c - '0');
+        else if (c >= 'a' && c <= 'f') d = (unsigned)(c - 'a') + 10u;
+        else if (c >= 'A' && c <= 'F') d = (unsigned)(c - 'A') + 10u;
+        else return -1;
+        v = (v << 4) | d;
+    }
+    *r = (uint8_t)(v >> 16);
+    *g = (uint8_t)(v >> 8);
+    *b = (uint8_t)v;
+    return 0;
+}
+
+static int parse_uint(const char *s, unsigned long max, unsigned long *out)
+{
+    char *end = NULL;
+    unsigned long v;
+    if (s == NULL || s[0] == '\0') return -1;
+    v = strtoul(s, &end, 10);
+    if (end == NULL || *end != '\0' || v > max) return -1;
+    *out = v;
+    return 0;
+}
+
+static void sleep_ms(unsigned long ms)
+{
+    struct timespec ts;
+    ts.tv_sec = (time_t)(ms / 1000UL);
+    ts.tv_nsec = (long)(ms % 1000UL) * 1000000L;
+    nanosleep(&ts, NULL);
+}
+
+/* Sends LED_SET. Returns 0 ok, 1 daemon error (message in msg), -1 transport. */
+static int led_call(unsigned flags, unsigned stride, unsigned mode, unsigned pos,
+                    uint8_t r, uint8_t g, uint8_t b, char *msg, size_t msgsz)
+{
+    uint8_t payload[KBDD_LED_PAYLOAD_SIZE];
+    uint8_t *resp = NULL;
+    uint32_t rlen = 0;
+    int is_err;
+
+    payload[0] = (uint8_t)flags;
+    payload[1] = (uint8_t)stride;
+    payload[2] = (uint8_t)mode;
+    payload[3] = (uint8_t)pos;
+    payload[4] = r;
+    payload[5] = g;
+    payload[6] = b;
+    if (ipc_request(KBDD_IPC_OP_LED_SET, payload, sizeof(payload), &resp, &rlen) != 0) {
+        free(resp);
+        return -1;
+    }
+    msg[0] = '\0';
+    if (resp != NULL && rlen > 0) {
+        size_t n = rlen < msgsz ? rlen : msgsz - 1;
+        memcpy(msg, resp, n);
+        msg[n] = '\0';
+    }
+    is_err = (strncmp(msg, "error:", 6) == 0);
+    free(resp);
+    return is_err ? 1 : 0;
+}
+
+struct led_opts {
+    unsigned flags;
+    unsigned long stride;
+    unsigned long delay;
+    unsigned long from;
+    uint8_t r, g, b;
+    int have_color;
+};
+
+/* Parses --once/--stride/--delay/--color/--from from argv[start..]. */
+static int led_parse_opts(int argc, char **argv, int start, struct led_opts *o)
+{
+    int i;
+    for (i = start; i < argc; i++) {
+        if (strcmp(argv[i], "--once") == 0) {
+            o->flags = 0;
+        } else if (strcmp(argv[i], "--stride") == 0 && i + 1 < argc) {
+            if (parse_uint(argv[++i], 144, &o->stride) != 0) return -1;
+        } else if (strcmp(argv[i], "--delay") == 0 && i + 1 < argc) {
+            if (parse_uint(argv[++i], 60000, &o->delay) != 0) return -1;
+        } else if (strcmp(argv[i], "--from") == 0 && i + 1 < argc) {
+            if (parse_uint(argv[++i], 143, &o->from) != 0) return -1;
+        } else if (strcmp(argv[i], "--color") == 0 && i + 1 < argc) {
+            if (parse_rgb(argv[++i], &o->r, &o->g, &o->b) != 0) return -1;
+            o->have_color = 1;
+        } else {
+            return -1;
+        }
+    }
+    return 0;
+}
+
+static int cmd_led(int argc, char **argv)
+{
+    struct led_opts o;
+    char msg[256];
+    const char *sub = (argc >= 3) ? argv[2] : "";
+    int rc;
+
+    memset(&o, 0, sizeof(o));
+    o.flags = KBDD_LED_FLAG_HOLD;
+    o.delay = 800;
+
+    if (strcmp(sub, "effects") == 0) {
+        unsigned m;
+        printf("indice  efeito\n");
+        for (m = 0; m < KBC_LED_EFFECT_COUNT; m++) {
+            printf("%5u   %s%s\n", m, kbc_led_effect_name((uint8_t)m),
+                   m == KBC_LED_EFFECT_LIGHTING ? "  (cor fixa)" : "");
+        }
+        printf("   15   custom\n");
+        printf("velocidade %d..%d, brilho %d..%d\n", KBC_LED_SPEED_MIN,
+               KBC_LED_SPEED_MAX, KBC_LED_BRIGHTNESS_MIN, KBC_LED_BRIGHTNESS_MAX);
+        return 0;
+    }
+    if (strcmp(sub, "release") == 0) {
+        rc = led_call(0, 0, KBDD_LED_MODE_RELEASE, 0, 0, 0, 0, msg, sizeof(msg));
+        if (rc < 0) return 1;
+        fprintf(rc ? stderr : stdout, "%s\n", msg);
+        return rc;
+    }
+    if (strcmp(sub, "solid") == 0 || strcmp(sub, "off") == 0) {
+        uint8_t r = 0, g = 0, b = 0;
+        int next = 3;
+        if (strcmp(sub, "solid") == 0) {
+            if (argc < 4 || parse_rgb(argv[3], &r, &g, &b) != 0) {
+                fprintf(stderr, "kbctl: led solid needs a colour like FF8800\n");
+                return 2;
+            }
+            next = 4;
+        }
+        if (led_parse_opts(argc, argv, next, &o) != 0) { usage(stderr); return 2; }
+        rc = led_call(o.flags, (unsigned)o.stride, KBDD_LED_MODE_SOLID, 0, r, g, b,
+                      msg, sizeof(msg));
+        if (rc < 0) return 1;
+        fprintf(rc ? stderr : stdout, "%s\n", msg);
+        return rc;
+    }
+    if (strcmp(sub, "pos") == 0) {
+        unsigned long pos;
+        uint8_t r, g, b;
+        if (argc < 5 || parse_uint(argv[3], 143, &pos) != 0 ||
+            parse_rgb(argv[4], &r, &g, &b) != 0) {
+            fprintf(stderr, "kbctl: led pos <n> <RRGGBB>\n");
+            return 2;
+        }
+        if (led_parse_opts(argc, argv, 5, &o) != 0) { usage(stderr); return 2; }
+        rc = led_call(o.flags, (unsigned)o.stride, KBDD_LED_MODE_POS, (unsigned)pos,
+                      r, g, b, msg, sizeof(msg));
+        if (rc < 0) return 1;
+        fprintf(rc ? stderr : stdout, "%s\n", msg);
+        return rc;
+    }
+    if (strcmp(sub, "sweep") == 0) {
+        unsigned long i;
+        if (led_parse_opts(argc, argv, 3, &o) != 0) { usage(stderr); return 2; }
+        if (!o.have_color) { o.r = 255; o.g = 255; o.b = 255; }
+        printf("Anote qual tecla acende em cada posicao. Ctrl+C para parar.\n");
+        for (i = o.from; i <= 143; i++) {
+            rc = led_call(KBDD_LED_FLAG_HOLD, (unsigned)o.stride, KBDD_LED_MODE_POS,
+                          (unsigned)i, o.r, o.g, o.b, msg, sizeof(msg));
+            if (rc < 0) return 1;
+            if (rc == 1) {
+                if (strstr(msg, "out of range") != NULL) break; /* end of matrix */
+                fprintf(stderr, "%s\n", msg);
+                return 1;
+            }
+            printf("posicao %lu\n", i);
+            fflush(stdout);
+            sleep_ms(o.delay);
+        }
+        (void)led_call(0, 0, KBDD_LED_MODE_RELEASE, 0, 0, 0, 0, msg, sizeof(msg));
+        printf("fim do sweep\n");
+        return 0;
+    }
+    fprintf(stderr, "kbctl: unknown led subcommand '%s'\n", sub);
+    usage(stderr);
+    return 2;
+}
+
+static void hexdump_block(const uint8_t *d, size_t n)
+{
+    size_t off, j;
+    for (off = 0; off < n; off += 16) {
+        printf("%04zx: ", off);
+        for (j = 0; j < 16; j++) {
+            if (off + j < n) printf("%02x ", d[off + j]);
+            else printf("   ");
+            if (j == 7) printf(" ");
+        }
+        printf("\n");
+    }
+}
+
+static int cmd_dump_block(int argc, char **argv)
+{
+    unsigned long prof;
+    uint8_t payload[1];
+    uint8_t *resp = NULL;
+    uint32_t rlen = 0;
+
+    if (argc < 3 || argc > 4 || parse_uint(argv[2], 4, &prof) != 0 || prof < 1) {
+        fprintf(stderr, "kbctl: dump-block <1-4> [file]\n");
+        return 2;
+    }
+    payload[0] = (uint8_t)prof;
+    if (ipc_request(KBDD_IPC_OP_READ_BLOCK, payload, 1, &resp, &rlen) != 0) {
+        free(resp);
+        return 1;
+    }
+    if (rlen != 264 || resp[0] != 0x07) {
+        int e = print_reply(resp, rlen);
+        free(resp);
+        return e ? 1 : 1;
+    }
+    printf("perfil %lu, 264 bytes (cabecalho 0..7, dados 8..263)\n", prof);
+    hexdump_block(resp, rlen);
+    {
+        const char *na = kbc_led_effect_name(resp[7]);
+        const char *nb = kbc_led_effect_name(resp[11]);
+        printf("candidatos (spec Q8, NAO confirmados):\n"
+               "  A: rate=[4]=%u  efeito=[7]=%u (%s)\n"
+               "  B: efeito=[11]=%u (%s)  brilho=[12]=%u  veloc=[13]=%u\n",
+               resp[4], resp[7], na ? na : "?", resp[11], nb ? nb : "?",
+               resp[12], resp[13]);
+    }
+    if (argc == 4) {
+        FILE *f = fopen(argv[3], "wb");
+        if (f == NULL || fwrite(resp, 1, rlen, f) != rlen) {
+            fprintf(stderr, "kbctl: cannot write %s: %s\n", argv[3], strerror(errno));
+            if (f != NULL) fclose(f);
+            free(resp);
+            return 1;
+        }
+        fclose(f);
+        printf("salvo em %s\n", argv[3]);
+    }
+    free(resp);
+    return 0;
+}
+
+static int cmd_diff_block(int argc, char **argv)
+{
+    uint8_t a[264], b[264];
+    FILE *fa, *fb;
+    size_t i, diffs = 0;
+
+    if (argc != 4) { fprintf(stderr, "kbctl: diff-block <a.bin> <b.bin>\n"); return 2; }
+    fa = fopen(argv[2], "rb");
+    fb = fopen(argv[3], "rb");
+    if (fa == NULL || fb == NULL || fread(a, 1, 264, fa) != 264 ||
+        fread(b, 1, 264, fb) != 264) {
+        fprintf(stderr, "kbctl: cannot read two 264-byte dumps\n");
+        if (fa != NULL) fclose(fa);
+        if (fb != NULL) fclose(fb);
+        return 1;
+    }
+    fclose(fa);
+    fclose(fb);
+    for (i = 0; i < 264; i++) {
+        if (a[i] != b[i]) {
+            printf("offset %3zu (0x%02zx): 0x%02x -> 0x%02x\n", i, i, a[i], b[i]);
+            diffs++;
+        }
+    }
+    printf("%zu byte(s) diferente(s)\n", diffs);
+    return 0;
+}
+
 int main(int argc, char **argv)
 {
     if (argc < 2) {
@@ -434,6 +730,22 @@ int main(int argc, char **argv)
         free(resp);
         return 0;
     }
+
+    if (strcmp(cmd, "active-profile") == 0) {
+        uint8_t *resp = NULL;
+        uint32_t rlen = 0;
+        if (argc != 2) { usage(stderr); return 2; }
+        if (ipc_request(KBDD_IPC_OP_READ_ACTIVE, NULL, 0, &resp, &rlen) != 0) {
+            free(resp);
+            return 1;
+        }
+        int perr = print_reply(resp, rlen);
+        free(resp);
+        return perr;
+    }
+    if (strcmp(cmd, "dump-block") == 0) return cmd_dump_block(argc, argv);
+    if (strcmp(cmd, "diff-block") == 0) return cmd_diff_block(argc, argv);
+    if (strcmp(cmd, "led") == 0) return cmd_led(argc, argv);
 
     fprintf(stderr, "kbctl: unknown command '%s'\n", cmd);
     usage(stderr);

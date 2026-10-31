@@ -39,6 +39,27 @@ ssize_t kbdd_hidraw_get_feature(const kbdd_hid_device_t *dev, uint8_t *buf, size
 ssize_t kbdd_hidraw_set_feature(const kbdd_hid_device_t *dev, const uint8_t *buf, size_t len);
 ssize_t kbdd_hidraw_read(const kbdd_hid_device_t *dev, uint8_t *buf, size_t len);
 
+/* device layer: the only code allowed to talk to the control interface.
+ * Allowlist: query opcodes 0x81/0x82 and LED frame pages (opcode 0x07).
+ * No other opcode can be sent through this layer. */
+typedef struct kbdd_dev_io {
+    void *ctx;
+    ssize_t (*set_feature)(void *ctx, const uint8_t *buf, size_t len);
+    ssize_t (*get_feature)(void *ctx, uint8_t *buf, size_t len);
+    void (*sleep_ms)(void *ctx, unsigned ms);
+} kbdd_dev_io_t;
+
+#define KBDD_DEV_OK 0
+#define KBDD_DEV_EINVAL (-1)
+#define KBDD_DEV_EIO (-2)
+#define KBDD_DEV_EPROTO (-3)
+
+void kbdd_dev_io_init_hidraw(kbdd_dev_io_t *io, const kbdd_hid_device_t *dev);
+int kbdd_dev_query(const kbdd_dev_io_t *io, uint8_t opcode, uint8_t profile,
+                   uint8_t out[264]);
+int kbdd_dev_send_frame(const kbdd_dev_io_t *io, const uint8_t frame[432],
+                        size_t stride);
+
 /* uinput module */
 typedef struct kbdd_uinput kbdd_uinput_t;
 kbdd_uinput_t *kbdd_uinput_open(const char *path);

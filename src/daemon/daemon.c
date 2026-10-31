@@ -1,5 +1,7 @@
 #include "kbdd.h"
 
+#include "kbcore.h"
+
 #include <errno.h>
 #include <fcntl.h>
 #include <poll.h>
@@ -129,7 +131,137 @@ static int kbdd_acquire_lock(void)
 typedef struct {
     const kbdd_hid_device_t *devices;
     size_t count;
+    int allow_led;                       /* KBDD_ENABLE_LED=1 */
+    int led_hold;                        /* streaming active */
+    uint8_t led_frame[KBC_LED_BUFFER_SIZE];
+    size_t led_stride;
+    int led_fail;
+    long long led_next_ms;
 } kbdd_ctx_t;
+
+static int kbdd_reply_text(kbdd_ipc_message_t *resp, const char *msg);
+
+static long long kbdd_now_ms(void)
+{
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (long long)ts.tv_sec * 1000LL + ts.tv_nsec / 1000000L;
+}
+
+/* First control interface (usage ff01/0001) of a known model, opened. */
+static const kbdd_hid_device_t *kbdd_control_dev(const kbdd_ctx_t *k)
+{
+    size_t i;
+    if (k == NULL) return NULL;
+    for (i = 0; i < k->count; i++) {
+        const kbdd_hid_device_t *d = &k->devices[i];
+        if (d->role == 0 && d->fd >= 0 && d->model != NULL) return d;
+    }
+    return NULL;
+}
+
+static int kbdd_reply_bytes(kbdd_ipc_message_t *resp, const uint8_t *data, size_t n)
+{
+    resp->payload = malloc(n > 0 ? n : 1);
+    if (resp->payload == NULL) return -1;
+    memcpy(resp->payload, data, n);
+    resp->payload_len = (uint32_t)n;
+    return 0;
+}
+
+static const char *kbdd_dev_err(int rc)
+{
+    switch (rc) {
+    case KBDD_DEV_EINVAL: return "error: invalid request";
+    case KBDD_DEV_EIO:    return "error: device I/O failed (is the keyboard connected and the udev rule installed?)";
+    case KBDD_DEV_EPROTO: return "error: unexpected response from the device";
+    default:              return "error: unknown";
+    }
+}
+
+static int kbdd_handle_led(kbdd_ctx_t *k, const kbdd_ipc_message_t *req,
+                           kbdd_ipc_message_t *resp)
+{
+    const uint8_t *p = req->payload;
+    const kbdd_hid_device_t *dev;
+    kbdd_dev_io_t io;
+    size_t matrix, stride, count;
+    uint8_t flags, mode, pos, r, g, b;
+    int rc;
+
+    if (!k->allow_led) {
+        return kbdd_reply_text(resp,
+            "error: LED control is disabled. Start kbdd with KBDD_ENABLE_LED=1");
+    }
+    if (p == NULL || req->payload_len != KBDD_LED_PAYLOAD_SIZE) {
+        return kbdd_reply_text(resp, "error: bad LED payload");
+    }
+    flags = p[0]; mode = p[2]; pos = p[3]; r = p[4]; g = p[5]; b = p[6];
+
+    if (mode == KBDD_LED_MODE_RELEASE) {
+        k->led_hold = 0;
+        return kbdd_reply_text(resp, "ok: LED streaming stopped");
+    }
+    dev = kbdd_control_dev(k);
+    if (dev == NULL) {
+        return kbdd_reply_text(resp, "error: no keyboard control interface available");
+    }
+    matrix = dev->model->matrix_size;
+    stride = p[1] != 0 ? (size_t)p[1] : matrix;
+    if (kbc_led_frame_page_count(stride) == 0) {
+        return kbdd_reply_text(resp, "error: invalid stride (1..144)");
+    }
+    count = matrix < stride ? matrix : stride;
+
+    memset(k->led_frame, 0, sizeof(k->led_frame));
+    if (mode == KBDD_LED_MODE_SOLID) {
+        kbc_led_frame_fill(k->led_frame, stride, count, r, g, b);
+    } else if (mode == KBDD_LED_MODE_POS) {
+        if (pos >= count) {
+            return kbdd_reply_text(resp, "error: position out of range");
+        }
+        kbc_led_frame_set(k->led_frame, stride, pos, r, g, b);
+    } else {
+        return kbdd_reply_text(resp, "error: unknown LED mode");
+    }
+
+    kbdd_dev_io_init_hidraw(&io, dev);
+    rc = kbdd_dev_send_frame(&io, k->led_frame, stride);
+    if (rc != KBDD_DEV_OK) {
+        k->led_hold = 0;
+        return kbdd_reply_text(resp, kbdd_dev_err(rc));
+    }
+    k->led_stride = stride;
+    k->led_fail = 0;
+    k->led_next_ms = kbdd_now_ms() + 40;
+    k->led_hold = (flags & KBDD_LED_FLAG_HOLD) ? 1 : 0;
+    return kbdd_reply_text(resp, k->led_hold
+        ? "ok: LED frame sent, streaming every 40 ms (kbctl led release to stop)"
+        : "ok: LED frame sent once");
+}
+
+static void kbdd_led_tick(kbdd_ctx_t *k)
+{
+    const kbdd_hid_device_t *dev;
+    kbdd_dev_io_t io;
+    long long now;
+
+    if (!k->led_hold) return;
+    now = kbdd_now_ms();
+    if (now < k->led_next_ms) return;
+    dev = kbdd_control_dev(k);
+    if (dev == NULL) { k->led_hold = 0; return; }
+    kbdd_dev_io_init_hidraw(&io, dev);
+    if (kbdd_dev_send_frame(&io, k->led_frame, k->led_stride) != KBDD_DEV_OK) {
+        if (++k->led_fail >= 5) {
+            k->led_hold = 0;
+            fprintf(stderr, "kbdd: LED streaming stopped after repeated I/O errors\n");
+        }
+    } else {
+        k->led_fail = 0;
+    }
+    k->led_next_ms = now + 40;
+}
 
 static int kbdd_reply_text(kbdd_ipc_message_t *resp, const char *msg)
 {
@@ -146,7 +278,7 @@ static int kbdd_reply_text(kbdd_ipc_message_t *resp, const char *msg)
 static int kbdd_ipc_handle(const kbdd_ipc_message_t *req, kbdd_ipc_message_t *resp,
                            void *ctx)
 {
-    const kbdd_ctx_t *kctx = (const kbdd_ctx_t *)ctx;
+    kbdd_ctx_t *kctx = (kbdd_ctx_t *)ctx;
     if (req == NULL || resp == NULL) {
         return -1;
     }
@@ -239,6 +371,51 @@ static int kbdd_ipc_handle(const kbdd_ipc_message_t *req, kbdd_ipc_message_t *re
             resp->payload_len = (uint32_t)(n + 1);
             return 0;
         }
+        case KBDD_IPC_OP_READ_ACTIVE: {
+            const kbdd_hid_device_t *dev = kbdd_control_dev(kctx);
+            kbdd_dev_io_t io;
+            uint8_t out[264];
+            char buf[160];
+            int rc;
+            if (dev == NULL) {
+                return kbdd_reply_text(resp, "error: no keyboard control interface available");
+            }
+            kbdd_dev_io_init_hidraw(&io, dev);
+            rc = kbdd_dev_query(&io, KBC_OP_READ_ACTIVE_PROFILE, 0, out);
+            if (rc != KBDD_DEV_OK) {
+                return kbdd_reply_text(resp, kbdd_dev_err(rc));
+            }
+            if (out[1] >= 1 && out[1] <= 4) {
+                snprintf(buf, sizeof(buf), "active profile: %u", (unsigned)out[1]);
+            } else {
+                snprintf(buf, sizeof(buf),
+                         "unexpected profile byte 0x%02x; first bytes: "
+                         "%02x %02x %02x %02x %02x %02x %02x %02x",
+                         out[1], out[0], out[1], out[2], out[3], out[4],
+                         out[5], out[6], out[7]);
+            }
+            return kbdd_reply_text(resp, buf);
+        }
+        case KBDD_IPC_OP_READ_BLOCK: {
+            const kbdd_hid_device_t *dev = kbdd_control_dev(kctx);
+            kbdd_dev_io_t io;
+            uint8_t out[264];
+            int rc;
+            if (req->payload == NULL || req->payload_len != 1) {
+                return kbdd_reply_text(resp, "error: payload must be [profile]");
+            }
+            if (dev == NULL) {
+                return kbdd_reply_text(resp, "error: no keyboard control interface available");
+            }
+            kbdd_dev_io_init_hidraw(&io, dev);
+            rc = kbdd_dev_query(&io, KBC_OP_READ_PROFILE_BLOCK, req->payload[0], out);
+            if (rc != KBDD_DEV_OK) {
+                return kbdd_reply_text(resp, kbdd_dev_err(rc));
+            }
+            return kbdd_reply_bytes(resp, out, sizeof(out));
+        }
+        case KBDD_IPC_OP_LED_SET:
+            return kbdd_handle_led(kctx, req, resp);
         default: {
             const char *msg = "error: unsupported command";
             size_t n = strlen(msg);
@@ -304,17 +481,26 @@ int kbdd_run(int argc, char **argv)
         /* ensure 0700 */
     }
 
-    kbdd_ctx_t kctx = {devices, device_count};
+    kbdd_ctx_t kctx;
+    memset(&kctx, 0, sizeof(kctx));
+    kctx.devices = devices;
+    kctx.count = device_count;
+    {
+        const char *want_led = getenv("KBDD_ENABLE_LED");
+        kctx.allow_led = (want_led != NULL && strcmp(want_led, "1") == 0);
+    }
 
     /* main loop */
     while (!kbdd_stop_flag) {
         if (ipc != NULL) {
-            kbdd_ipc_server_poll(ipc, 50, kbdd_ipc_handle, &kctx);
+            kbdd_ipc_server_poll(ipc, kctx.led_hold ? 20 : 50, kbdd_ipc_handle, &kctx);
         } else {
             /* sleep briefly */
             struct timespec ts = {0, 50000000L};
             nanosleep(&ts, NULL);
         }
+
+        kbdd_led_tick(&kctx);
 
         /* read input reports from devices (nonblocking) */
         for (size_t i = 0; i < device_count; i++) {

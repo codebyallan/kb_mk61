@@ -60,7 +60,7 @@ ASAN_LDFLAGS    := -fsanitize=address,undefined
 ASAN_CORE_OBJS  := $(patsubst src/%.c,$(ASAN_DIR)/obj/%.o,$(CORE_SRCS))
 ASAN_TEST_OBJS  := $(patsubst tests/%.c,$(ASAN_DIR)/obj/tests/%.o,$(TEST_SRCS))
 
-DEPFILES := $(CORE_OBJS:.o=.d) $(DAEMON_OBJS:.o=.d) $(CLI_OBJS:.o=.d) \
+DEPFILES := $(OBJ_DIR)/tests/device/test_device.d $(ASAN_DIR)/obj/tests/device/test_device.d $(CORE_OBJS:.o=.d) $(DAEMON_OBJS:.o=.d) $(CLI_OBJS:.o=.d) \
             $(TEST_OBJS:.o=.d) $(ASAN_CORE_OBJS:.o=.d) $(ASAN_TEST_OBJS:.o=.d)
 
 .PHONY: all core daemon cli test asan asan-run install clean check-arch help
@@ -74,9 +74,10 @@ daemon: check-arch $(BIN_DIR)/kbdd
 
 cli: check-arch $(BIN_DIR)/kbctl
 
-test: check-arch $(BIN_DIR)/test-core
+test: check-arch $(BIN_DIR)/test-core $(BIN_DIR)/test-device
 	@echo "==> running unit tests"
 	@$(BIN_DIR)/test-core
+	@$(BIN_DIR)/test-device
 
 asan: check-arch
 	@mkdir -p $(BUILD_DIR)
@@ -91,11 +92,14 @@ asan: check-arch
 		$(MAKE) --no-print-directory test; \
 	fi
 
-asan-run: check-arch $(ASAN_DIR)/test-core
+asan-run: check-arch $(ASAN_DIR)/test-core $(ASAN_DIR)/test-device
 	@echo "==> running ASan/UBSan tests"
 	@ASAN_OPTIONS=detect_leaks=1:abort_on_error=1 \
 	 UBSAN_OPTIONS=halt_on_error=1:print_stacktrace=1 \
 	 $(ASAN_DIR)/test-core
+	@ASAN_OPTIONS=detect_leaks=1:abort_on_error=1 \
+	 UBSAN_OPTIONS=halt_on_error=1:print_stacktrace=1 \
+	 $(ASAN_DIR)/test-device
 
 install: all
 	$(INSTALL) -d $(DESTDIR)$(BINDIR) $(DESTDIR)$(LIBDIR) \
@@ -160,6 +164,14 @@ $(BIN_DIR)/kbctl: $(CLI_OBJS) $(LIB_STATIC)
 	@echo "==> link $@"
 	$(CC) $(LDFLAGS) $(EXE_LDFLAGS) -o $@ $(CLI_OBJS) $(LIB_STATIC) $(LDLIBS)
 
+DEVTEST_OBJS := $(OBJ_DIR)/tests/device/test_device.o $(OBJ_DIR)/daemon/device.o \
+                $(OBJ_DIR)/daemon/hidraw.o
+
+$(BIN_DIR)/test-device: $(DEVTEST_OBJS) $(LIB_STATIC)
+	@mkdir -p $(BIN_DIR)
+	@echo "==> link $@"
+	$(CC) $(LDFLAGS) $(EXE_LDFLAGS) -o $@ $(DEVTEST_OBJS) $(LIB_STATIC) $(LDLIBS)
+
 $(BIN_DIR)/test-core: $(TEST_OBJS) $(LIB_STATIC)
 	@mkdir -p $(BIN_DIR)
 	@echo "==> link $@"
@@ -180,6 +192,14 @@ $(ASAN_DIR)/obj/%.o: src/%.c
 $(ASAN_DIR)/obj/tests/%.o: tests/%.c
 	@mkdir -p $(dir $@)
 	$(CC) $(CPPFLAGS) $(ASAN_FLAGS) -MMD -MP -c $< -o $@
+
+ASAN_DEVTEST_OBJS := $(ASAN_DIR)/obj/tests/device/test_device.o \
+                     $(ASAN_DIR)/obj/daemon/device.o $(ASAN_DIR)/obj/daemon/hidraw.o
+
+$(ASAN_DIR)/test-device: $(ASAN_DEVTEST_OBJS) $(ASAN_CORE_OBJS)
+	@mkdir -p $(dir $@)
+	@echo "==> link $@"
+	$(CC) $(ASAN_LDFLAGS) -o $@ $(ASAN_DEVTEST_OBJS) $(ASAN_CORE_OBJS) $(LDLIBS)
 
 $(ASAN_DIR)/test-core: $(ASAN_TEST_OBJS) $(ASAN_CORE_OBJS)
 	@mkdir -p $(dir $@)

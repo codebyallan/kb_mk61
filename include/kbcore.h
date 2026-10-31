@@ -307,6 +307,27 @@ KBCORE_API kbc_status kbc_led_encode_page(const uint8_t *buf, size_t buf_len, si
 KBCORE_API kbc_status kbc_led_encode_page_observed_single(const uint8_t *buf, size_t buf_len, uint8_t *out, size_t out_len);
 KBCORE_API kbc_status kbc_led_encode_game_mode(const uint8_t *colors, size_t colors_len, uint8_t hw_profile, uint8_t *buf, size_t buf_len);
 
+/* Planar LED frame with a configurable stride (positions per colour plane).
+ * Layout: R plane at [0, stride), G plane at [stride, 2*stride), B plane at
+ * [2*stride, 3*stride).  The frame buffer is always KBC_LED_BUFFER_SIZE bytes.
+ * stride 1..KBC_MAX_LED_COUNT and 3*stride <= KBC_LED_BUFFER_SIZE. */
+KBCORE_API size_t kbc_led_frame_page_count(size_t stride);
+KBCORE_API kbc_status kbc_led_frame_set(uint8_t *frame, size_t stride, size_t pos, uint8_t r, uint8_t g, uint8_t b);
+KBCORE_API kbc_status kbc_led_frame_fill(uint8_t *frame, size_t stride, size_t count, uint8_t r, uint8_t g, uint8_t b);
+
+/* Built-in LED effects (hardware mode index 0..12; 15 = custom). */
+#define KBC_LED_EFFECT_COUNT   13
+#define KBC_LED_EFFECT_LIGHTING 12   /* constant single colour */
+#define KBC_LED_SPEED_MIN       1
+#define KBC_LED_SPEED_MAX       3
+#define KBC_LED_BRIGHTNESS_MIN  0
+#define KBC_LED_BRIGHTNESS_MAX  5
+KBCORE_API const char *kbc_led_effect_name(uint8_t mode);
+
+/* Query requests: opcode 0x81 (active profile) or 0x82 (profile block,
+ * profile 1..4).  Builds a 264-byte feature report. */
+KBCORE_API kbc_status kbc_build_read_request(uint8_t opcode, uint8_t profile, uint8_t *buf, size_t buf_len);
+
 
 #ifdef __cplusplus
 }

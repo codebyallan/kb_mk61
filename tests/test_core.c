@@ -897,6 +897,77 @@ static void test_profile_invalid_ranges_feature(void)
 }
 
 
+
+/* ---------- LED frame + read requests ---------- */
+
+static void test_led_frame(void)
+{
+    uint8_t frame[KBC_LED_BUFFER_SIZE];
+    uint8_t rep[KBC_FEATURE_REPORT_SIZE];
+    size_t i;
+
+    CHECK(kbc_led_frame_page_count(70) == 1);   /* 210 bytes fit in one page */
+    CHECK(kbc_led_frame_page_count(75) == 1);   /* 225 */
+    CHECK(kbc_led_frame_page_count(85) == 1);   /* 255 */
+    CHECK(kbc_led_frame_page_count(86) == 2);   /* 258 */
+    CHECK(kbc_led_frame_page_count(144) == 2);  /* 432 */
+    CHECK(kbc_led_frame_page_count(0) == 0);
+    CHECK(kbc_led_frame_page_count(145) == 0);
+
+    zero_buf(frame, sizeof frame);
+    CHECK(kbc_led_frame_fill(frame, 70, 70, 0x11, 0x22, 0x33) == KBC_OK);
+    for (i = 0; i < 70; i++) {
+        CHECK(frame[i] == 0x11);
+        CHECK(frame[70 + i] == 0x22);
+        CHECK(frame[140 + i] == 0x33);
+    }
+    CHECK(frame[210] == 0);
+
+    zero_buf(frame, sizeof frame);
+    CHECK(kbc_led_frame_set(frame, 70, 5, 1, 2, 3) == KBC_OK);
+    CHECK(frame[5] == 1 && frame[75] == 2 && frame[145] == 3);
+    CHECK(kbc_led_frame_set(frame, 70, 70, 1, 2, 3) == KBC_ERR_RANGE);
+    CHECK(kbc_led_frame_set(NULL, 70, 0, 1, 2, 3) == KBC_ERR_INVALID_ARGUMENT);
+    CHECK(kbc_led_frame_fill(frame, 70, 71, 0, 0, 0) == KBC_ERR_RANGE);
+
+    /* page 0 of a 70-stride frame carries the planes at data offset 8 */
+    CHECK(kbc_led_encode_page(frame, sizeof frame, 0, rep, sizeof rep) == KBC_OK);
+    CHECK(rep[0] == 0x07 && rep[1] == 0x07 && rep[2] == 0);
+    CHECK(rep[8 + 5] == 1 && rep[8 + 75] == 2 && rep[8 + 145] == 3);
+}
+
+static void test_read_requests(void)
+{
+    uint8_t buf[KBC_FEATURE_REPORT_SIZE];
+    size_t i;
+
+    CHECK(kbc_build_read_request(0x81, 3, buf, sizeof buf) == KBC_OK);
+    CHECK(buf[0] == 0x07 && buf[1] == 0x81 && buf[2] == 0);
+    for (i = 3; i < sizeof buf; i++) CHECK(buf[i] == 0);
+
+    CHECK(kbc_build_read_request(0x82, 2, buf, sizeof buf) == KBC_OK);
+    CHECK(buf[0] == 0x07 && buf[1] == 0x82 && buf[2] == 2);
+    for (i = 3; i < sizeof buf; i++) CHECK(buf[i] == 0);
+
+    CHECK(kbc_build_read_request(0x82, 0, buf, sizeof buf) == KBC_ERR_RANGE);
+    CHECK(kbc_build_read_request(0x82, 5, buf, sizeof buf) == KBC_ERR_RANGE);
+    /* only query opcodes are accepted */
+    CHECK(kbc_build_read_request(0x02, 1, buf, sizeof buf) == KBC_ERR_INVALID_ARGUMENT);
+    CHECK(kbc_build_read_request(0x03, 1, buf, sizeof buf) == KBC_ERR_INVALID_ARGUMENT);
+    CHECK(kbc_build_read_request(0x82, 1, buf, 263) == KBC_ERR_PROTOCOL);
+    CHECK(kbc_build_read_request(0x82, 1, NULL, sizeof buf) == KBC_ERR_INVALID_ARGUMENT);
+}
+
+static void test_led_effect_names(void)
+{
+    CHECK(strcmp(kbc_led_effect_name(0), "wave") == 0);
+    CHECK(strcmp(kbc_led_effect_name(12), "lighting") == 0);
+    CHECK(strcmp(kbc_led_effect_name(15), "custom") == 0);
+    CHECK(kbc_led_effect_name(13) == NULL);
+    CHECK(kbc_led_effect_name(255) == NULL);
+    CHECK(KBC_LED_EFFECT_LIGHTING == 12);
+}
+
 int main(void)
 {
     test_tv_f01(); test_tv_f02(); test_tv_f03(); test_tv_f04();
@@ -922,6 +993,9 @@ int main(void)
     test_macro_roundtrip();
     test_macro_limits();
     test_led_pagination();
+    test_led_frame();
+    test_read_requests();
+    test_led_effect_names();
     test_profile_invalid_limits();
     test_null_profile_args();
 

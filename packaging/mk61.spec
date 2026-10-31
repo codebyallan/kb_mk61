@@ -2,7 +2,7 @@ Name:           mk61
 Version:        0.1.0
 Release:        1%{?dist}
 Summary:        Clean-room keyboard stack for Linux (library, daemon and CLI)
-License:        MIT
+License:        GPL-2.0-only
 URL:            https://github.com/example/mk61
 Source0:        %{name}-%{version}.tar.gz
 

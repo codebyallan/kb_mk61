@@ -9,15 +9,9 @@ ExecStart=/usr/bin/kbdd
 Restart=on-failure
 RestartSec=2
 NoNewPrivileges=yes
-ProtectSystem=strict
-ProtectHome=read-only
-# O daemon grava o lock e o socket em $XDG_RUNTIME_DIR (%t); sem isto,
-# ProtectSystem=strict torna /run somente leitura e o kbdd sai com status 1.
 # The daemon persists LED mode, brightness, and effect speeds here.
 # %h/.config/kbdd stores the persistent configuration, while %t contains
 # the runtime socket and lock.
-ReadWritePaths=%t %h/.config/kbdd
-PrivateTmp=yes
 RestrictAddressFamilies=AF_UNIX
 RestrictRealtime=yes
 RestrictSUIDSGID=yes
@@ -25,13 +19,6 @@ LockPersonality=yes
 MemoryDenyWriteExecute=yes
 SystemCallFilter=@system-service
 SystemCallErrorNumber=EPERM
-CapabilityBoundingSet=
-AmbientCapabilities=
-ProtectKernelTunables=yes
-ProtectKernelModules=yes
-ProtectKernelLogs=yes
-ProtectControlGroups=yes
-RestrictNamespaces=yes
 RestrictRealtime=yes
 
 [Install]

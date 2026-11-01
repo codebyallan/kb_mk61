@@ -992,7 +992,7 @@ static int kbdd_ipc_handle(const kbdd_ipc_message_t *req, kbdd_ipc_message_t *re
             return 0;
         }
         case KBDD_IPC_OP_GET_VERSION: {
-            const char *msg = "kbdd 0.3.0";
+            const char *msg = "kbdd 0.3.1";
             size_t n = strlen(msg);
             resp->payload = malloc(n + 1);
             if (resp->payload == NULL) {
@@ -1033,7 +1033,7 @@ static int kbdd_ipc_handle(const kbdd_ipc_message_t *req, kbdd_ipc_message_t *re
                 "error: write-profile not implemented (disabled until hardware validation)");
         case KBDD_IPC_OP_STATUS: {
             char buf[96];
-            snprintf(buf, sizeof(buf), "kbdd 0.3.0: running, %zu hid interface(s)",
+            snprintf(buf, sizeof(buf), "kbdd 0.3.1: running, %zu hid interface(s)",
                      kctx != NULL ? kctx->count : (size_t)0);
             return kbdd_reply_text(resp, buf);
         }

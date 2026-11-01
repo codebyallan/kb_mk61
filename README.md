@@ -122,8 +122,7 @@ kbctl status
 ```
 
 After updating an existing installation, rerun `./install.sh` so the user
-service receives the `ReadWritePaths` permission required to persist LED
-settings.
+service is reloaded with the current unit definition.
 
 ## Usage
 

@@ -352,6 +352,20 @@ KBCORE_API kbc_status kbc_profile_block_set_mode(const uint8_t *block, size_t bl
 #define KBC_LED_BRIGHTNESS_MAX  5
 KBCORE_API const char *kbc_led_effect_name(uint8_t mode);
 
+/* Host-computed animations (streamed as 0x07 frames at 25 fps by kbdd).
+ * Pure functions: no I/O. Colour planes use the same stride layout as frames. */
+typedef enum { KBC_ANIM_BREATH = 1, KBC_ANIM_CYCLE = 2, KBC_ANIM_RAINBOW = 3 } kbc_led_anim;
+#define KBC_MATRIX_ROWS        5        /* matrix index = column * 5 + row */
+#define KBC_ANIM_PERIOD_MIN    200u
+#define KBC_ANIM_PERIOD_MAX    60000u
+KBCORE_API uint32_t kbc_led_anim_default_period(kbc_led_anim kind);
+/* Renders the frame at time t_ms. breath: (r,g,b) pulsing; cycle: whole keyboard
+ * hue rotation; rainbow: hue moving across the matrix columns. `count` positions
+ * (<= stride) are written; the rest of the 3*stride bytes are zeroed. */
+KBCORE_API kbc_status kbc_led_anim_render(kbc_led_anim kind, uint32_t t_ms, uint32_t period_ms,
+                                          uint8_t r, uint8_t g, uint8_t b,
+                                          uint8_t *frame, size_t stride, size_t count);
+
 /* 0x01 select profile (1..4 only; the factory-reset value 0xFF is rejected). */
 KBCORE_API kbc_status kbc_build_select_profile(uint8_t profile, uint8_t *buf, size_t buf_len);
 

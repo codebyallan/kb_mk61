@@ -264,3 +264,71 @@ kbc_status kbc_build_select_profile(uint8_t profile, uint8_t *buf, size_t buf_le
     return kbc_build_feature_report(KBC_OP_SELECT_PROFILE, profile, 0, params, NULL, 0,
                                     buf, buf_len);
 }
+
+uint32_t kbc_led_anim_default_period(kbc_led_anim kind)
+{
+    switch (kind) {
+    case KBC_ANIM_BREATH:  return 4000u;
+    case KBC_ANIM_CYCLE:   return 8000u;
+    case KBC_ANIM_RAINBOW: return 6000u;
+    default:               return 0u;
+    }
+}
+
+/* hue 0..1023 at full saturation/value */
+static void anim_hue_rgb(unsigned hue, uint8_t *r, uint8_t *g, uint8_t *b)
+{
+    unsigned h6 = (hue % 1024u) * 6u;
+    unsigned sector = h6 / 1024u, f = h6 % 1024u;
+    uint8_t q = (uint8_t)(255u * (1024u - f) / 1024u);
+    uint8_t t = (uint8_t)(255u * f / 1024u);
+
+    switch (sector) {
+    case 0:  *r = 255; *g = t;   *b = 0;   break;
+    case 1:  *r = q;   *g = 255; *b = 0;   break;
+    case 2:  *r = 0;   *g = 255; *b = t;   break;
+    case 3:  *r = 0;   *g = q;   *b = 255; break;
+    case 4:  *r = t;   *g = 0;   *b = 255; break;
+    default: *r = 255; *g = 0;   *b = q;   break;
+    }
+}
+
+kbc_status kbc_led_anim_render(kbc_led_anim kind, uint32_t t_ms, uint32_t period_ms,
+                               uint8_t r, uint8_t g, uint8_t b,
+                               uint8_t *frame, size_t stride, size_t count)
+{
+    unsigned phase, ncols;
+    size_t i;
+
+    if (frame == NULL) return KBC_ERR_INVALID_ARGUMENT;
+    if (kind != KBC_ANIM_BREATH && kind != KBC_ANIM_CYCLE && kind != KBC_ANIM_RAINBOW) {
+        return KBC_ERR_INVALID_ARGUMENT;
+    }
+    if (!led_stride_ok(stride) || count > stride) return KBC_ERR_RANGE;
+    if (period_ms < KBC_ANIM_PERIOD_MIN || period_ms > KBC_ANIM_PERIOD_MAX) return KBC_ERR_RANGE;
+
+    memset(frame, 0, 3 * stride);
+    phase = (unsigned)(((uint64_t)(t_ms % period_ms) * 1024u) / period_ms);   /* 0..1023 */
+
+    if (kind == KBC_ANIM_BREATH) {
+        unsigned x = phase <= 512u ? phase * 2u : (1024u - phase) * 2u;       /* triangle 0..1024, peak at half period */
+        unsigned s = (x * x * (3072u - 2u * x)) >> 20;                        /* smoothstep 0..1024 */
+        uint8_t pr = (uint8_t)(r * s / 1024u), pg = (uint8_t)(g * s / 1024u),
+                pb = (uint8_t)(b * s / 1024u);
+        for (i = 0; i < count; i++) kbc_led_frame_set(frame, stride, i, pr, pg, pb);
+    } else if (kind == KBC_ANIM_CYCLE) {
+        uint8_t cr, cg, cb;
+        anim_hue_rgb(phase, &cr, &cg, &cb);
+        for (i = 0; i < count; i++) kbc_led_frame_set(frame, stride, i, cr, cg, cb);
+    } else {
+        ncols = (unsigned)((count + KBC_MATRIX_ROWS - 1) / KBC_MATRIX_ROWS);
+        if (ncols == 0) ncols = 1;
+        for (i = 0; i < count; i++) {
+            unsigned col = (unsigned)(i / KBC_MATRIX_ROWS);
+            uint8_t cr, cg, cb;
+            anim_hue_rgb(phase + col * 1024u / ncols, &cr, &cg, &cb);
+            kbc_led_frame_set(frame, stride, i, cr, cg, cb);
+        }
+    }
+    return KBC_OK;
+}

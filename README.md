@@ -35,6 +35,7 @@ target keyboard.
 - LED color, position, sweep, brightness, speed, and built-in effect commands.
   The `led brightness` value also scales host-driven solid colors, which are
   sent as direct RGB frames instead of using the keyboard's built-in effect.
+- Host-computed LED animations (`breath`, `cycle`, `rainbow`) streamed at 25 fps.
 - Optional virtual keyboard input through `uinput`.
 - Unix-socket IPC between `kbctl` and `kbdd`.
 - Automatic keyboard reconnect after USB unplug/replug while `kbdd` stays running.
@@ -185,6 +186,9 @@ kbctl led pos 12 00FF00
 kbctl led pos 24 FF0000
 kbctl led off
 kbctl led sweep --delay 100 --color 0000FF
+kbctl led anim breath --color FF0000 --period 3000
+kbctl led anim cycle
+kbctl led anim rainbow --period 4000
 kbctl led release
 kbctl led effect lighting
 kbctl led brightness 8
@@ -198,6 +202,19 @@ kbctl led speed 50
   other colors, allowing a multicolor custom layout.
 - `led sweep` lights positions sequentially to map physical keys. Use
   `--delay MS`, `--color RRGGBB`, and `--from N`.
+- `led anim <breath|cycle|rainbow>` runs an animation computed by `kbdd` and
+  streamed as frames at 25 fps (every 40 ms), independent of the key map:
+  - `breath` pulses one color smoothly (`--color RRGGBB`, default white).
+  - `cycle` rotates the hue of the whole keyboard.
+  - `rainbow` moves a rainbow across the matrix columns (matrix index =
+    column * 5 + row, so a column is one color at a given instant).
+  `--period MS` sets one full loop (200-60000 ms; defaults: breath 4000,
+  cycle 8000, rainbow 6000). `led brightness` scales animations like other host
+  colors. The animation type, period, color, stride, and brightness are saved
+  and restored after a reconnect or daemon restart. Any other `led` frame
+  command or effect/profile change replaces the saved animation; use
+  `led clear` to remove the saved visual configuration.
+  Requires `KBDD_ENABLE_LED=1`.
 - `led release` stops periodic LED frame streaming.
 - `led effects` lists the built-in effects supported by the keyboard.
 - `led effect <name|index>` changes the active profile effect.

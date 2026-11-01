@@ -135,6 +135,11 @@ typedef struct {
     int allow_profile_write;             /* KBDD_ENABLE_PROFILE_WRITE=1 */
     int led_hold;                        /* streaming active */
     int led_active;                      /* a host-controlled frame is installed */
+    int led_anim;                        /* 0 none, else kbc_led_anim */
+    uint32_t led_anim_period;
+    uint8_t led_anim_rgb[3];
+    size_t led_anim_count;
+    long long led_anim_start_ms;
     uint8_t led_frame[KBC_LED_BUFFER_SIZE];
     uint8_t led_base_frame[KBC_LED_BUFFER_SIZE];
     uint8_t led_brightness;              /* host-frame scale, 0..10 */
@@ -148,6 +153,9 @@ typedef struct {
     uint8_t config_solid[3];
     uint8_t config_positions[KBC_MAX_MATRIX_SIZE][3];
     size_t config_stride;
+    uint8_t config_anim;
+    uint32_t config_anim_period;
+    uint8_t config_anim_rgb[3];
     int restore_pending;
     unsigned restore_attempts;
     long long restore_next_ms;
@@ -157,6 +165,7 @@ typedef struct {
 #define KBDD_CONFIG_EFFECT 1u
 #define KBDD_CONFIG_SOLID 2u
 #define KBDD_CONFIG_POSITIONS 3u
+#define KBDD_CONFIG_ANIMATION 4u
 
 static int kbdd_save_config(const kbdd_ctx_t *k);
 static int kbdd_load_config(kbdd_ctx_t *k);
@@ -245,6 +254,9 @@ static void kbdd_config_defaults(kbdd_ctx_t *k)
     k->config_effect = 0;
     k->config_brightness = KBC_BRIGHTNESS_RAW_MAX;
     k->config_stride = 0;
+    k->config_anim = 0;
+    k->config_anim_period = 0;
+    memset(k->config_anim_rgb, 0, sizeof(k->config_anim_rgb));
     for (i = 0; i < KBC_LED_EFFECT_COUNT; i++) {
         k->config_speed[i] = 50;
     }
@@ -266,7 +278,7 @@ static int kbdd_load_config(kbdd_ctx_t *k)
     if (f == NULL) return errno == ENOENT ? 0 : -1;
     while (fscanf(f, "%31s", key) == 1) {
         if (strcmp(key, "mode") == 0) {
-            if (fscanf(f, "%u", &value) != 1 || value > KBDD_CONFIG_POSITIONS) {
+            if (fscanf(f, "%u", &value) != 1 || value > KBDD_CONFIG_ANIMATION) {
                 fclose(f);
                 kbdd_config_defaults(k);
                 return -1;
@@ -278,6 +290,21 @@ static int kbdd_load_config(kbdd_ctx_t *k)
                 return -1;
             }
             k->config_effect = (uint8_t)value;
+        } else if (strcmp(key, "animation") == 0) {
+            if (fscanf(f, "%u %u %u %u %u", &value, &speed_effect,
+                       &r, &g, &b) != 5 ||
+                value < KBC_ANIM_BREATH || value > KBC_ANIM_RAINBOW ||
+                speed_effect < KBC_ANIM_PERIOD_MIN ||
+                speed_effect > KBC_ANIM_PERIOD_MAX ||
+                r > 255 || g > 255 || b > 255) {
+                fclose(f);
+                return -1;
+            }
+            k->config_anim = (uint8_t)value;
+            k->config_anim_period = speed_effect;
+            k->config_anim_rgb[0] = (uint8_t)r;
+            k->config_anim_rgb[1] = (uint8_t)g;
+            k->config_anim_rgb[2] = (uint8_t)b;
         } else if (strcmp(key, "brightness") == 0) {
             if (fscanf(f, "%u", &value) != 1 || value > KBC_BRIGHTNESS_RAW_MAX) {
                 fclose(f);
@@ -359,6 +386,18 @@ static int kbdd_save_config(const kbdd_ctx_t *k)
             unlink(tmp);
             return -1;
         }
+        if (k->config_mode == KBDD_CONFIG_ANIMATION) {
+            if (fprintf(f, "animation %u %u %u %u %u\n",
+                        (unsigned)k->config_anim,
+                        (unsigned)k->config_anim_period,
+                        (unsigned)k->config_anim_rgb[0],
+                        (unsigned)k->config_anim_rgb[1],
+                        (unsigned)k->config_anim_rgb[2]) < 0) {
+                fclose(f);
+                unlink(tmp);
+                return -1;
+            }
+        }
     }
     if (k->config_mode == KBDD_CONFIG_SOLID) {
         fprintf(f, "solid %u %u %u\nstride %zu\n",
@@ -435,6 +474,7 @@ static int kbdd_handle_led(kbdd_ctx_t *k, const kbdd_ipc_message_t *req,
     }
     flags = p[0]; mode = p[2]; pos = p[3]; r = p[4]; g = p[5]; b = p[6];
 
+    k->led_anim = 0;      /* any non-animation LED command ends a running animation */
     if (mode == KBDD_LED_MODE_RELEASE) {
         k->led_hold = 0;
         k->led_active = 0;
@@ -533,6 +573,7 @@ static int kbdd_handle_effect(kbdd_ctx_t *k, const kbdd_ipc_message_t *req,
     }
     k->led_hold = 0; /* stop host streaming so the effect is visible */
     k->led_active = 0;
+    k->led_anim = 0;
     kbdd_dev_io_init_hidraw(&io, dev);
     rc = kbdd_dev_set_effect(&io, req->payload[0], &prof);
     if (rc != KBDD_DEV_OK) {
@@ -582,6 +623,83 @@ static int kbdd_handle_profile(kbdd_ctx_t *k, const kbdd_ipc_message_t *req,
     }
     snprintf(buf, sizeof(buf), changed ? "ok: profile %u is now active (confirmed by 0x81)"
                                        : "ok: profile %u was already active", p);
+    return kbdd_reply_text(resp, buf);
+}
+
+static int kbdd_handle_anim(kbdd_ctx_t *k, const kbdd_ipc_message_t *req,
+                            kbdd_ipc_message_t *resp)
+{
+    static const char *const names[] = {"?", "breath", "cycle", "rainbow"};
+    const uint8_t *p = req->payload;
+    const kbdd_hid_device_t *dev;
+    kbdd_dev_io_t io;
+    size_t matrix, stride, count;
+    uint32_t period;
+    char buf[160];
+    int rc;
+
+    if (!k->allow_led) {
+        return kbdd_reply_text(resp,
+            "error: LED control is disabled. Start kbdd with KBDD_ENABLE_LED=1");
+    }
+    if (p == NULL || req->payload_len != KBDD_ANIM_PAYLOAD_SIZE || p[0] < 1 || p[0] > 3) {
+        return kbdd_reply_text(resp, "error: bad animation payload");
+    }
+    dev = kbdd_control_dev(k);
+    if (dev == NULL) {
+        return kbdd_reply_text(resp, "error: no keyboard control interface available");
+    }
+    matrix = dev->model->matrix_size;
+    stride = p[1] != 0 ? (size_t)p[1] : matrix;
+    if (kbc_led_frame_page_count(stride) == 0) {
+        return kbdd_reply_text(resp, "error: invalid stride (1..144)");
+    }
+    count = matrix < stride ? matrix : stride;
+    period = ((uint32_t)p[2] << 8) | p[3];
+    if (period == 0) period = kbc_led_anim_default_period((kbc_led_anim)p[0]);
+
+    memset(k->led_base_frame, 0, sizeof(k->led_base_frame));
+    if (kbc_led_anim_render((kbc_led_anim)p[0], 0, period, p[4], p[5], p[6],
+                            k->led_base_frame, stride, count) != KBC_OK) {
+        return kbdd_reply_text(resp, "error: invalid animation period (200..60000 ms)");
+    }
+    memcpy(k->led_frame, k->led_base_frame, sizeof(k->led_frame));
+    if (kbc_led_frame_apply_brightness(k->led_frame, stride, k->led_brightness) != KBC_OK) {
+        return kbdd_reply_text(resp, "error: invalid LED brightness");
+    }
+    kbdd_dev_io_init_hidraw(&io, dev);
+    rc = kbdd_dev_send_frame(&io, k->led_frame, stride);
+    if (rc != KBDD_DEV_OK) {
+        k->led_hold = 0;
+        k->led_anim = 0;
+        return kbdd_reply_text(resp, kbdd_dev_err(rc));
+    }
+    k->led_stride = stride;
+    k->led_active = 1;
+    k->led_fail = 0;
+    k->led_anim = p[0];
+    k->led_anim_period = period;
+    k->led_anim_rgb[0] = p[4];
+    k->led_anim_rgb[1] = p[5];
+    k->led_anim_rgb[2] = p[6];
+    k->led_anim_count = count;
+    k->led_anim_start_ms = kbdd_now_ms();
+    k->led_next_ms = k->led_anim_start_ms + 40;
+    k->led_hold = 1;
+    k->config_mode = KBDD_CONFIG_ANIMATION;
+    k->config_anim = p[0];
+    k->config_anim_period = period;
+    k->config_anim_rgb[0] = p[4];
+    k->config_anim_rgb[1] = p[5];
+    k->config_anim_rgb[2] = p[6];
+    k->config_stride = stride;
+    if (kbdd_save_config(k) != 0) {
+        return kbdd_reply_text(resp,
+            "error: animation started but configuration could not be saved");
+    }
+    snprintf(buf, sizeof(buf),
+             "ok: %s animation started (25 fps, period %u ms); kbctl led release to stop",
+             names[p[0]], (unsigned)period);
     return kbdd_reply_text(resp, buf);
 }
 
@@ -653,6 +771,7 @@ static int kbdd_restore_config(kbdd_ctx_t *k)
     int rc;
 
     if (k == NULL || k->config_mode == KBDD_CONFIG_NONE) return 0;
+    k->led_anim = 0;      /* restoring the saved mode replaces any animation */
     dev = kbdd_control_dev(k);
     if (dev == NULL) return 0;
     kbdd_dev_io_init_hidraw(&io, dev);
@@ -693,6 +812,15 @@ static int kbdd_restore_config(kbdd_ctx_t *k)
         kbc_led_frame_fill(k->led_base_frame, stride, count,
                            k->config_solid[0], k->config_solid[1],
                            k->config_solid[2]);
+    } else if (k->config_mode == KBDD_CONFIG_ANIMATION) {
+        if (kbc_led_anim_render((kbc_led_anim)k->config_anim, 0,
+                                k->config_anim_period,
+                                k->config_anim_rgb[0],
+                                k->config_anim_rgb[1],
+                                k->config_anim_rgb[2],
+                                k->led_base_frame, stride, count) != KBC_OK) {
+            return -1;
+        }
     } else {
         for (i = 0; i < count; i++) {
             kbc_led_frame_set(k->led_base_frame, stride, i,
@@ -715,6 +843,15 @@ static int kbdd_restore_config(kbdd_ctx_t *k)
     k->led_active = 1;
     k->led_hold = 1;
     k->led_next_ms = kbdd_now_ms() + 40;
+    if (k->config_mode == KBDD_CONFIG_ANIMATION) {
+        k->led_anim = k->config_anim;
+        k->led_anim_period = k->config_anim_period;
+        memcpy(k->led_anim_rgb, k->config_anim_rgb, sizeof(k->led_anim_rgb));
+        k->led_anim_count = count;
+        k->led_anim_start_ms = kbdd_now_ms();
+    } else {
+        k->led_anim = 0;
+    }
     return 0;
 }
 
@@ -748,11 +885,21 @@ static void kbdd_led_tick(kbdd_ctx_t *k)
     kbdd_dev_io_t io;
     long long now;
 
+    if (k->led_anim && !k->led_active) k->led_anim = 0;   /* another mode took over */
     if (!k->led_hold) return;
     now = kbdd_now_ms();
     if (now < k->led_next_ms) return;
     dev = kbdd_control_dev(k);
     if (dev == NULL) { k->led_hold = 0; return; }
+    if (k->led_anim) {
+        if (kbc_led_anim_render((kbc_led_anim)k->led_anim,
+                                (uint32_t)(now - k->led_anim_start_ms), k->led_anim_period,
+                                k->led_anim_rgb[0], k->led_anim_rgb[1], k->led_anim_rgb[2],
+                                k->led_base_frame, k->led_stride, k->led_anim_count) == KBC_OK) {
+            memcpy(k->led_frame, k->led_base_frame, sizeof(k->led_frame));
+            (void)kbc_led_frame_apply_brightness(k->led_frame, k->led_stride, k->led_brightness);
+        }
+    }
     kbdd_dev_io_init_hidraw(&io, dev);
     if (kbdd_dev_send_frame(&io, k->led_frame, k->led_stride) != KBDD_DEV_OK) {
         if (++k->led_fail >= 5) {
@@ -923,6 +1070,8 @@ static int kbdd_ipc_handle(const kbdd_ipc_message_t *req, kbdd_ipc_message_t *re
             return kbdd_handle_effect(kctx, req, resp);
         case KBDD_IPC_OP_SET_PROFILE:
             return kbdd_handle_profile(kctx, req, resp);
+        case KBDD_IPC_OP_LED_ANIM:
+            return kbdd_handle_anim(kctx, req, resp);
         case KBDD_IPC_OP_SET_FIELD:
             return kbdd_handle_field(kctx, req, resp);
         default: {

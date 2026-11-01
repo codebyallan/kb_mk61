@@ -38,6 +38,7 @@ static void usage(FILE *f)
     fputs("  led pos <n> <RRGGBB> [opts]   Set one position, preserving other colors\n", f);
     fputs("  led clear [opts]              Clear all customized colors\n", f);
     fputs("  led sweep [opts]              Light positions one by one to map keys\n", f);
+    fputs("  led anim <breath|cycle|rainbow> [opts]  Animate colors from the computer (25 fps)\n", f);
     fputs("  led release                   Stop streaming frames\n", f);
     fputs("  led effects                   List the keyboard built-in effects (offline)\n", f);
     fputs("  led effect <name|index>       Set the active profile effect (needs KBDD_ENABLE_PROFILE_WRITE=1)\n", f);
@@ -114,6 +115,12 @@ static void usage_led(FILE *f, const char *subcommand)
               "Set position n (zero-based) to a color while preserving other positions.\n", f);
     } else if (strcmp(subcommand, "clear") == 0) {
         fputs("Usage: kbctl led clear [--once] [--stride N]\n\nClear every position in the host-controlled frame.\n", f);
+    } else if (strcmp(subcommand, "anim") == 0) {
+        fputs("Usage: kbctl led anim <breath|cycle|rainbow> [--color RRGGBB] [--period MS] [--stride N]\n\n"
+              "Stream a host-computed animation at 25 fps (period 200-60000 ms; --color applies to breath,\n"
+              "default white). Brightness scales it. The selected animation is saved and restored after reconnect;\n"
+              "use 'led clear' to remove the saved visual configuration.\n"
+              "Requires KBDD_ENABLE_LED=1.\n", f);
     } else if (strcmp(subcommand, "sweep") == 0) {
         fputs("Usage: kbctl led sweep [--delay MS] [--color RRGGBB] [--from N]\n\n"
               "Light one position at a time to map matrix positions. Press Ctrl+C to stop.\n", f);
@@ -469,6 +476,7 @@ struct led_opts {
     unsigned long stride;
     unsigned long delay;
     unsigned long from;
+    unsigned long period;
     uint8_t r, g, b;
     int have_color;
 };
@@ -484,6 +492,8 @@ static int led_parse_opts(int argc, char **argv, int start, struct led_opts *o)
             if (parse_uint(argv[++i], 144, &o->stride) != 0) return -1;
         } else if (strcmp(argv[i], "--delay") == 0 && i + 1 < argc) {
             if (parse_uint(argv[++i], 60000, &o->delay) != 0) return -1;
+        } else if (strcmp(argv[i], "--period") == 0 && i + 1 < argc) {
+            if (parse_uint(argv[++i], KBC_ANIM_PERIOD_MAX, &o->period) != 0) return -1;
         } else if (strcmp(argv[i], "--from") == 0 && i + 1 < argc) {
             if (parse_uint(argv[++i], 143, &o->from) != 0) return -1;
         } else if (strcmp(argv[i], "--color") == 0 && i + 1 < argc) {
@@ -695,6 +705,33 @@ static int cmd_led(int argc, char **argv)
         if (rc < 0) return 1;
         fprintf(rc ? stderr : stdout, "%s\n", msg);
         return rc;
+    }
+    if (strcmp(sub, "anim") == 0) {
+        static const char *const kinds[] = {"", "breath", "cycle", "rainbow"};
+        uint8_t payload[KBDD_ANIM_PAYLOAD_SIZE];
+        uint8_t *resp = NULL;
+        uint32_t rlen = 0;
+        int kind = 0, k, perr;
+        for (k = 1; k <= 3 && argc >= 4; k++) {
+            if (strcasecmp(argv[3], kinds[k]) == 0) kind = k;
+        }
+        if (kind == 0 || led_parse_opts(argc, argv, 4, &o) != 0) {
+            fprintf(stderr, "kbctl: led anim <breath|cycle|rainbow> [--color RRGGBB] [--period MS] [--stride N]\n");
+            return 2;
+        }
+        if (!o.have_color) { o.r = 255; o.g = 255; o.b = 255; }
+        payload[0] = (uint8_t)kind;
+        payload[1] = (uint8_t)o.stride;
+        payload[2] = (uint8_t)(o.period >> 8);
+        payload[3] = (uint8_t)o.period;
+        payload[4] = o.r; payload[5] = o.g; payload[6] = o.b;
+        if (ipc_request(KBDD_IPC_OP_LED_ANIM, payload, sizeof(payload), &resp, &rlen) != 0) {
+            free(resp);
+            return 1;
+        }
+        perr = print_reply(resp, rlen);
+        free(resp);
+        return perr;
     }
     if (strcmp(sub, "sweep") == 0) {
         unsigned long i;

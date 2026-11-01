@@ -1068,6 +1068,58 @@ static void test_select_profile_builder(void)
     CHECK(kbc_build_select_profile(1, NULL, sizeof b) == KBC_ERR_INVALID_ARGUMENT);
 }
 
+static void test_led_anim(void)
+{
+    uint8_t f[KBC_LED_BUFFER_SIZE];
+    size_t i;
+    const size_t stride = 70, count = 70;
+
+    /* breath: black at t=0, full colour at half period, smooth in between */
+    CHECK(kbc_led_anim_render(KBC_ANIM_BREATH, 0, 4000, 200, 100, 50, f, stride, count) == KBC_OK);
+    for (i = 0; i < count; i++) CHECK(f[i] == 0 && f[stride + i] == 0 && f[2 * stride + i] == 0);
+    CHECK(kbc_led_anim_render(KBC_ANIM_BREATH, 2000, 4000, 200, 100, 50, f, stride, count) == KBC_OK);
+    for (i = 0; i < count; i++) CHECK(f[i] == 200 && f[stride + i] == 100 && f[2 * stride + i] == 50);
+    CHECK(kbc_led_anim_render(KBC_ANIM_BREATH, 1000, 4000, 200, 100, 50, f, stride, count) == KBC_OK);
+    CHECK(f[0] == 100 && f[stride] == 50);                    /* quarter period = half intensity */
+    CHECK(kbc_led_anim_render(KBC_ANIM_BREATH, 4000 + 2000, 4000, 200, 100, 50, f, stride, count) == KBC_OK);
+    CHECK(f[0] == 200);                                       /* periodic */
+
+    /* cycle: whole keyboard one hue; red at 0, green at 1/3, blue at 2/3 */
+    CHECK(kbc_led_anim_render(KBC_ANIM_CYCLE, 0, 6000, 0, 0, 0, f, stride, count) == KBC_OK);
+    CHECK(f[0] == 255 && f[stride] == 0 && f[2 * stride] == 0);
+    for (i = 1; i < count; i++) CHECK(f[i] == f[0] && f[stride + i] == f[stride]);
+    CHECK(kbc_led_anim_render(KBC_ANIM_CYCLE, 2000, 6000, 0, 0, 0, f, stride, count) == KBC_OK);
+    CHECK(f[0] <= 1 && f[stride] >= 254 && f[2 * stride] <= 1);
+    CHECK(kbc_led_anim_render(KBC_ANIM_CYCLE, 4000, 6000, 0, 0, 0, f, stride, count) == KBC_OK);
+    CHECK(f[0] <= 1 && f[stride] <= 1 && f[2 * stride] >= 254);
+
+    /* rainbow: same column = same colour, different columns differ */
+    CHECK(kbc_led_anim_render(KBC_ANIM_RAINBOW, 0, 6000, 0, 0, 0, f, stride, count) == KBC_OK);
+    for (i = 1; i < KBC_MATRIX_ROWS; i++) CHECK(f[i] == f[0] && f[stride + i] == f[stride]);
+    CHECK(f[0] != f[7 * KBC_MATRIX_ROWS] || f[stride] != f[stride + 7 * KBC_MATRIX_ROWS]);
+    CHECK(f[0] == 255);                                       /* column 0 starts at red */
+
+    /* positions beyond count stay black; bytes after the planes are untouched */
+    memset(f, 0xAA, sizeof f);
+    CHECK(kbc_led_anim_render(KBC_ANIM_CYCLE, 0, 6000, 0, 0, 0, f, stride, 61) == KBC_OK);
+    CHECK(f[61] == 0 && f[stride + 61] == 0 && f[2 * stride + 69] == 0);
+    CHECK(f[3 * stride] == 0xAA);
+
+    /* validation */
+    CHECK(kbc_led_anim_render(KBC_ANIM_BREATH, 0, 199, 1, 1, 1, f, stride, count) == KBC_ERR_RANGE);
+    CHECK(kbc_led_anim_render(KBC_ANIM_BREATH, 0, 60001, 1, 1, 1, f, stride, count) == KBC_ERR_RANGE);
+    CHECK(kbc_led_anim_render(KBC_ANIM_BREATH, 0, 4000, 1, 1, 1, f, stride, 71) == KBC_ERR_RANGE);
+    CHECK(kbc_led_anim_render(KBC_ANIM_BREATH, 0, 4000, 1, 1, 1, f, 145, 70) == KBC_ERR_RANGE);
+    CHECK(kbc_led_anim_render((kbc_led_anim)0, 0, 4000, 1, 1, 1, f, stride, count) == KBC_ERR_INVALID_ARGUMENT);
+    CHECK(kbc_led_anim_render((kbc_led_anim)9, 0, 4000, 1, 1, 1, f, stride, count) == KBC_ERR_INVALID_ARGUMENT);
+    CHECK(kbc_led_anim_render(KBC_ANIM_BREATH, 0, 4000, 1, 1, 1, NULL, stride, count) == KBC_ERR_INVALID_ARGUMENT);
+    CHECK(kbc_led_anim_default_period(KBC_ANIM_BREATH) == 4000);
+    CHECK(kbc_led_anim_default_period((kbc_led_anim)0) == 0);
+    /* every default period is accepted */
+    CHECK(kbc_led_anim_render(KBC_ANIM_CYCLE, 123456789u, kbc_led_anim_default_period(KBC_ANIM_CYCLE),
+                              0, 0, 0, f, stride, count) == KBC_OK);
+}
+
 int main(void)
 {
     test_tv_f01(); test_tv_f02(); test_tv_f03(); test_tv_f04();
@@ -1096,6 +1148,7 @@ int main(void)
     test_led_frame();
     test_led_frame_brightness();
     test_read_requests();
+    test_led_anim();
     test_select_profile_builder();
     test_led_effect_names();
     test_profile_block_write();

@@ -71,6 +71,10 @@ Run the sanitizer test suite when the compiler runtime is available:
 make asan
 ```
 
+GitHub Actions runs the build, unit tests, and sanitizer tests on pushes and
+pull requests. Publishing a GitHub release also builds Fedora RPM and source
+RPM packages and attaches them to that release for download.
+
 Build outputs are placed under `build/`; the libraries are produced as
 `libkbcore.a` and `libkbcore.so`.
 

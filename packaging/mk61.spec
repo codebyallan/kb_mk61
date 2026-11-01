@@ -3,7 +3,7 @@ Version:        0.1.0
 Release:        1%{?dist}
 Summary:        Clean-room keyboard stack for Linux (library, daemon and CLI)
 License:        GPL-2.0-only
-URL:            https://github.com/example/mk61
+URL:            https://github.com/codebyallan/kb_mk61
 Source0:        %{name}-%{version}.tar.gz
 
 BuildRequires:  gcc

@@ -1,0 +1,98 @@
+name: CI
+
+on:
+  push:
+    branches: ["**"]
+    tags: ["v*"]
+  pull_request:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: Release tag to package (for example, v0.1.0)
+        required: true
+        default: v0.1.0
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: Test and build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Install build tools
+        run: sudo apt-get update && sudo apt-get install -y build-essential
+
+      - name: Build
+        run: make all
+
+      - name: Run unit tests
+        run: make test
+
+      - name: Run sanitizer tests
+        run: make asan
+
+  fedora-package:
+    name: Build Fedora RPM
+    if: github.event_name == 'release' || github.event_name == 'workflow_dispatch' || startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    container: fedora:latest
+    permissions:
+      contents: write
+    steps:
+      - name: Install Fedora build tools
+        run: dnf install -y git gh rpm-build gcc make systemd-rpm-macros
+
+      - name: Check out source
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.release.tag_name || inputs.release_tag || github.ref }}
+
+      - name: Build RPM and source RPM
+        env:
+          RELEASE_TAG: ${{ github.event.release.tag_name || inputs.release_tag || github.ref_name }}
+        run: |
+          set -eux
+          VERSION="${RELEASE_TAG#v}"
+          case "$VERSION" in
+            ''|*[!0-9.]*|.*|*.) exit 1 ;;
+          esac
+          sed -i -E "s/^Version:[[:space:]]+.*/Version:        ${VERSION}/" packaging/mk61.spec
+          mkdir -p "$HOME/rpmbuild"/{BUILD,BUILDROOT,RPMS,SOURCES,SPECS,SRPMS}
+          git config --global --add safe.directory "$GITHUB_WORKSPACE"
+          git archive --format=tar.gz \
+            --prefix="mk61-${VERSION}/" \
+            -o "$HOME/rpmbuild/SOURCES/mk61-${VERSION}.tar.gz" HEAD
+          cp packaging/mk61.spec "$HOME/rpmbuild/SPECS/"
+          rpmbuild -ba "$HOME/rpmbuild/SPECS/mk61.spec"
+          mkdir -p dist
+          cp "$HOME"/rpmbuild/RPMS/*/*.rpm dist/
+          cp "$HOME"/rpmbuild/SRPMS/*.src.rpm dist/
+
+      - name: Upload package artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: fedora-rpm
+          path: dist/*
+
+      - name: Create GitHub release for tag
+        if: (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')) || github.event_name == 'workflow_dispatch'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ inputs.release_tag || github.ref_name }}
+        run: |
+          if ! gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release create "$RELEASE_TAG" --generate-notes --repo "$GITHUB_REPOSITORY"
+          fi
+
+      - name: Upload packages to GitHub release
+        if: github.event_name == 'release' || github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v'))
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ github.event.release.tag_name || inputs.release_tag || github.ref_name }}
+        run: gh release upload "$RELEASE_TAG" dist/* --clobber --repo "$GITHUB_REPOSITORY"

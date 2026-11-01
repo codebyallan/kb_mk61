@@ -264,8 +264,8 @@ static void test_set_field(void)
     kb_init(&k, &io); k.block[11] = 1; memcpy(orig, k.block, 264);   /* breath active */
     CHECK(kbdd_dev_set_field(&io, KBC_FIELD_SPEED, 40, NULL) == KBDD_DEV_OK);
     changed = 0;
-    for (i = 3; i < 264; i++) if (k.block[i] != orig[i]) { changed++; CHECK(i == 20); }
-    CHECK(changed == 1 && k.block[20] == 40);
+    for (i = 3; i < 264; i++) if (k.block[i] != orig[i]) { changed++; CHECK(i == 19); }
+    CHECK(changed == 1 && k.block[19] == 40 && k.block[20] == orig[20]);
 
     kb_init(&k, &io);                                    /* out-of-range values never reach the device */
     CHECK(kbdd_dev_set_field(&io, KBC_FIELD_BRIGHTNESS, 11, NULL) == KBDD_DEV_EINVAL);

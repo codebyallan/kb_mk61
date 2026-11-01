@@ -1036,21 +1036,24 @@ static void test_profile_block_fields(void)
     CHECK(out[11] == KBC_LED_EFFECT_OBSERVED_14 && out[12] == 5);
     blk[11] = 0;
 
-    /* speed: slot = 19 + current effect */
-    CHECK(kbc_profile_block_set_field(blk, 264, 1, KBC_FIELD_SPEED, 2, out, 264) == KBC_OK);
-    CHECK(out[19] == 2);
-    changed = 0;
-    for (i = 3; i < 264; i++) if (out[i] != blk[i]) changed++;
-    CHECK(changed == 1);
-    blk[11] = 1;
-    CHECK(kbc_profile_block_set_field(blk, 264, 1, KBC_FIELD_SPEED, 102, out, 264) == KBC_OK);
-    CHECK(out[20] == 102 && out[19] == blk[19]);
+    /* speed: ONE byte (offset 19) for every effect; nothing else may change */
+    {
+        static const uint8_t modes[] = {0, 1, 5, 10, 11, 12, 14, 15};
+        size_t m;
+        for (m = 0; m < sizeof modes; m++) {
+            blk[11] = modes[m];
+            CHECK(kbc_profile_block_set_field(blk, 264, 1, KBC_FIELD_SPEED, 77, out, 264) == KBC_OK);
+            CHECK(out[19] == 77);
+            changed = 0;
+            for (i = 3; i < 264; i++) if (out[i] != blk[i]) changed++;
+            CHECK(changed == 1);
+            CHECK(out[20] == blk[20] && out[21] == blk[21] && out[30] == blk[30]);
+        }
+    }
+    CHECK(kbc_profile_block_set_field(blk, 264, 1, KBC_FIELD_SPEED, 2, out, 264) == KBC_OK && out[19] == 2);
+    CHECK(kbc_profile_block_set_field(blk, 264, 1, KBC_FIELD_SPEED, 102, out, 264) == KBC_OK && out[19] == 102);
     CHECK(kbc_profile_block_set_field(blk, 264, 1, KBC_FIELD_SPEED, 1, out, 264) == KBC_ERR_RANGE);
     CHECK(kbc_profile_block_set_field(blk, 264, 1, KBC_FIELD_SPEED, 103, out, 264) == KBC_ERR_RANGE);
-    blk[11] = 12;                                   /* lighting has no speed slot */
-    CHECK(kbc_profile_block_set_field(blk, 264, 1, KBC_FIELD_SPEED, 50, out, 264) == KBC_ERR_RANGE);
-    blk[11] = 15;                                   /* custom: no speed slot */
-    CHECK(kbc_profile_block_set_field(blk, 264, 1, KBC_FIELD_SPEED, 50, out, 264) == KBC_ERR_RANGE);
     CHECK(kbc_profile_block_set_field(blk, 264, 1, (kbc_profile_field)9, 1, out, 264) == KBC_ERR_INVALID_ARGUMENT);
 }
 

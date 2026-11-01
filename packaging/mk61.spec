@@ -1,5 +1,5 @@
 Name:           mk61
-Version:        0.3.1
+Version:        0.3.2
 Release:        1%{?dist}
 Summary:        Clean-room keyboard stack for Linux (library, daemon and CLI)
 License:        GPL-2.0-only
@@ -60,6 +60,9 @@ fi
 %config(noreplace) %{_sysconfdir}/systemd/user/kbdd.service.d/led.conf
 
 %changelog
+* Sun Nov 01 2026 mk61 maintainers - 0.3.2-1
+- Bump version for the latest fixes.
+
 * Sun Nov 01 2026 mk61 maintainers - 0.3.1-1
 - Fix user service startup and capability setup on restricted systemd user managers
 

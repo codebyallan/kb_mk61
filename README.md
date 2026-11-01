@@ -250,7 +250,9 @@ kbctl led speed 50
 - `led effects` lists the built-in effects supported by the keyboard.
 - `led effect <name|index>` changes the active profile effect.
 - `led brightness <0-10>` changes brightness; `0` is off and `10` is maximum.
-- `led speed <2-102>` changes raw effect speed; lower values are faster.
+- `led speed <2-102>` changes the raw effect speed; lower values are faster. It is
+  a single profile byte (block offset 19) shared by every effect, so it behaves the
+  same whichever effect is active.
 
 Frame commands accept `--once` to send one frame without periodic refresh and
 `--stride N` to override the frame layout (default: the detected matrix size).

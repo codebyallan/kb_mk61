@@ -25,8 +25,8 @@ extern "C" {
 
 #define KBCORE_VERSION_MAJOR 0
 #define KBCORE_VERSION_MINOR 3
-#define KBCORE_VERSION_PATCH 1
-#define KBCORE_VERSION_STRING "0.3.1"
+#define KBCORE_VERSION_PATCH 2
+#define KBCORE_VERSION_STRING "0.3.2"
 
 /* ------------------------------------------------------------------ */
 /* Opaque handles.  Definitions live in src/core and are private.       */
@@ -323,7 +323,7 @@ KBCORE_API kbc_status kbc_led_frame_apply_brightness(uint8_t *frame, size_t stri
 #define KBC_PBLK_OFF_RATE        8   /* observed 1 on a default profile (inferred: report rate index + 1) */
 #define KBC_PBLK_OFF_MODE        11  /* CONFIRMED on hardware: LED effect index */
 #define KBC_PBLK_OFF_BRIGHTNESS  12  /* CONFIRMED on hardware: linear 0..10, step 1 */
-#define KBC_PBLK_OFF_SPEED_TABLE 19  /* CONFIRMED for wave (effect 0); table of 12 entries, one per effect (inferred) */
+#define KBC_PBLK_OFF_SPEED       19  /* CONFIRMED on hardware (block[11]): ONE byte shared by all effects; inverted, lower = faster */
 #define KBC_BRIGHTNESS_RAW_MAX   10
 #define KBC_SPEED_RAW_MIN        2   /* fastest observed; lower value = faster */
 #define KBC_SPEED_RAW_MAX        102 /* slowest observed (0x66) */
@@ -334,7 +334,7 @@ typedef enum { KBC_FIELD_MODE = 1, KBC_FIELD_BRIGHTNESS = 2, KBC_FIELD_SPEED = 3
 /* Builds a 0x02 write report that changes exactly ONE byte of the block:
  *  MODE        effect index (same rules as kbc_profile_block_set_mode)
  *  BRIGHTNESS  0..KBC_BRIGHTNESS_RAW_MAX
- *  SPEED       raw KBC_SPEED_RAW_MIN..MAX for the CURRENT effect (0..10, 12... slot = 19 + mode,
+ *  SPEED       raw KBC_SPEED_RAW_MIN..MAX, one byte (KBC_PBLK_OFF_SPEED) for every effect;
  *              effects 0..11 only); lower = faster */
 KBCORE_API kbc_status kbc_profile_block_set_field(const uint8_t *block, size_t block_len, uint8_t profile, kbc_profile_field field, uint8_t value, uint8_t *out, size_t out_len);
 /* Same, and sets the LED effect. Allowed modes: 0..10 and 12 (11 = game mode

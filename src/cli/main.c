@@ -16,7 +16,7 @@
 #include "kbcore.h"
 #include "kbipc.h"
 
-#define KBCTL_VERSION "0.3.1"
+#define KBCTL_VERSION "0.3.2"
 #define KBCTL_MAX_FILE (4 * 1024 * 1024)
 
 static void usage(FILE *f)
@@ -46,7 +46,7 @@ static void usage(FILE *f)
     fputs("  led effects                   List the keyboard built-in effects (offline)\n", f);
     fputs("  led effect <name|index>       Set the active profile effect (needs KBDD_ENABLE_PROFILE_WRITE=1)\n", f);
     fputs("  led brightness <0-10>         Set brightness (also scales solid colors; 0 = off)\n", f);
-    fputs("  led speed <2-102>             Set the current effect speed (raw, lower = faster)\n", f);
+    fputs("  led speed <2-102>             Set the effect speed (raw, lower = faster; shared by all effects)\n", f);
     fputs("    opts: --once (send one frame, no streaming)  --stride N (frame layout, default = matrix size)\n", f);
     fputs("          sweep: --delay MS  --color RRGGBB  --from N\n", f);
     fputs("  help                          Show this help\n", f);
@@ -764,7 +764,7 @@ static int cmd_led(int argc, char **argv)
         return cmd_led_field(argc, argv, 2, 0, KBC_BRIGHTNESS_RAW_MAX, "(0 = off, 10 = max)");
     if (strcmp(sub, "speed") == 0)
         return cmd_led_field(argc, argv, 3, KBC_SPEED_RAW_MIN, KBC_SPEED_RAW_MAX,
-                             "(raw; lower = faster; applies to the current effect)");
+                             "(raw; lower = faster; one value shared by all effects)");
     if (strcmp(sub, "release") == 0) {
         rc = led_call(0, 0, KBDD_LED_MODE_RELEASE, 0, 0, 0, 0, msg, sizeof(msg));
         if (rc < 0) return 1;

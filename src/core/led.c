@@ -235,8 +235,7 @@ kbc_status kbc_profile_block_set_field(const uint8_t *block, size_t block_len,
     case KBC_FIELD_SPEED:
         if (value < KBC_SPEED_RAW_MIN || value > KBC_SPEED_RAW_MAX) return KBC_ERR_RANGE;
         if (block == NULL || block_len != KBC_FEATURE_REPORT_SIZE) return KBC_ERR_PROTOCOL;
-        if (block[KBC_PBLK_OFF_MODE] > 11) return KBC_ERR_RANGE; /* no speed slot (lighting/custom) */
-        off = KBC_PBLK_OFF_SPEED_TABLE + block[KBC_PBLK_OFF_MODE];
+        off = KBC_PBLK_OFF_SPEED;       /* single byte, independent of the effect */
         break;
     default:
         return KBC_ERR_INVALID_ARGUMENT;

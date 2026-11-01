@@ -109,6 +109,16 @@ To remove an installation made by the supplied script:
 ./uninstall.sh
 ```
 
+The Fedora RPM also installs the user-service configuration, enables LED and
+profile writes, and enables `kbdd` globally for user systemd managers. It
+reloads and starts the service for active user sessions; a new login session
+will start it automatically as well. Verify it with:
+
+```sh
+systemctl --user status kbdd
+kbctl status
+```
+
 After updating an existing installation, rerun `./install.sh` so the user
 service receives the `ReadWritePaths` permission required to persist LED
 settings.

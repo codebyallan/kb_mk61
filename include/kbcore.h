@@ -352,6 +352,9 @@ KBCORE_API kbc_status kbc_profile_block_set_mode(const uint8_t *block, size_t bl
 #define KBC_LED_BRIGHTNESS_MAX  5
 KBCORE_API const char *kbc_led_effect_name(uint8_t mode);
 
+/* 0x01 select profile (1..4 only; the factory-reset value 0xFF is rejected). */
+KBCORE_API kbc_status kbc_build_select_profile(uint8_t profile, uint8_t *buf, size_t buf_len);
+
 /* Query requests: opcode 0x81 (active profile) or 0x82 (profile block,
  * profile 1..4).  Builds a 264-byte feature report. */
 KBCORE_API kbc_status kbc_build_read_request(uint8_t opcode, uint8_t profile, uint8_t *buf, size_t buf_len);

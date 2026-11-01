@@ -29,6 +29,7 @@ static void usage(FILE *f)
     fputs("  write-profile <index> <file>  Write a profile file (index 0-3)\n", f);
     fputs("  read-config                   Read daemon configuration summary\n", f);
     fputs("  enable-notifications          Enable input notifications\n", f);
+    fputs("  profile <1-4>                 Switch the active profile (needs KBDD_ENABLE_PROFILE_WRITE=1)\n", f);
     fputs("  active-profile                Ask the keyboard which profile is active (0x81)\n", f);
     fputs("  dump-block <1-4> [file]       Read the profile parameter block (0x82), hex dump\n", f);
     fputs("  diff-block <a.bin> <b.bin>    Compare two saved dump-block files\n", f);
@@ -64,6 +65,9 @@ static void usage_command(FILE *f, const char *command)
         fputs("Usage: kbctl read-config\n\nRead the daemon configuration summary.\n", f);
     } else if (strcmp(command, "enable-notifications") == 0) {
         fputs("Usage: kbctl enable-notifications\n\nEnable keyboard input notifications through kbdd.\n", f);
+    } else if (strcmp(command, "profile") == 0) {
+        fputs("Usage: kbctl profile <1-4>\n\nSwitch the keyboard's active profile (hardware numbering 1-4) and confirm it with\n"
+              "a read-back. Requires KBDD_ENABLE_PROFILE_WRITE=1.\n", f);
     } else if (strcmp(command, "active-profile") == 0) {
         fputs("Usage: kbctl active-profile\n\nQuery the keyboard for its active profile.\n", f);
     } else if (strcmp(command, "dump-block") == 0) {
@@ -978,6 +982,25 @@ int main(int argc, char **argv)
         return 0;
     }
 
+    if (strcmp(cmd, "profile") == 0) {
+        unsigned long p;
+        uint8_t payload[1];
+        uint8_t *resp = NULL;
+        uint32_t rlen = 0;
+        int perr;
+        if (argc != 3 || parse_uint(argv[2], 4, &p) != 0 || p < 1) {
+            fprintf(stderr, "kbctl: profile <1-4>\n");
+            return 2;
+        }
+        payload[0] = (uint8_t)p;
+        if (ipc_request(KBDD_IPC_OP_SET_PROFILE, payload, 1, &resp, &rlen) != 0) {
+            free(resp);
+            return 1;
+        }
+        perr = print_reply(resp, rlen);
+        free(resp);
+        return perr;
+    }
     if (strcmp(cmd, "active-profile") == 0) {
         uint8_t *resp = NULL;
         uint32_t rlen = 0;

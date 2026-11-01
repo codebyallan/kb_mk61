@@ -30,7 +30,8 @@ target keyboard.
 - C11 implementation with a public, opaque-handle core API.
 - HID feature-report parsing and encoding.
 - Keyboard discovery through `hidraw`.
-- Profile inspection and active-profile queries.
+- Profile inspection, active-profile queries, and active-profile switching
+  (`kbctl profile <1-4>`, confirmed by a read-back).
 - LED color, position, sweep, brightness, speed, and built-in effect commands.
   The `led brightness` value also scales host-driven solid colors, which are
   sent as direct RGB frames instead of using the keyboard's built-in effect.
@@ -152,6 +153,7 @@ kbctl read-profile [index]
 kbctl write-profile <index> <file>
 kbctl dump-block <1-4> [file]
 kbctl diff-block <a.bin> <b.bin>
+kbctl profile <1-4>
 ```
 
 - `read-profile` reads a profile; without an index it reads profile `0`.
@@ -160,6 +162,16 @@ kbctl diff-block <a.bin> <b.bin>
 - `dump-block` reads and displays a raw 264-byte profile parameter block,
   optionally saving it to a file.
 - `diff-block` compares two saved 264-byte blocks and reports changed offsets.
+- `profile <1-4>` switches the keyboard's active profile using the hardware
+  numbering `1` through `4` (unlike `read-profile`/`write-profile`, which use
+  `0`-`3`). It requires `KBDD_ENABLE_PROFILE_WRITE=1` and works in three steps:
+  read the active profile with `0x81`, send `0x01` with the requested profile,
+  then read `0x81` again. If the keyboard does not confirm the change, `kbdd`
+  asks it to return to the previous profile and the command fails. Requesting
+  the profile that is already active sends nothing. Host-driven LED streaming
+  is stopped on a switch, because those frames belong to the previous
+  profile's lighting. The factory-reset value `0xFF` of opcode `0x01` is
+  rejected by the library and can never be sent.
 
 ### LED commands
 

@@ -155,6 +155,8 @@ struct kb {
     uint8_t active;
     uint8_t last_op;
     int ignore_write;
+    int ignore_select;
+    size_t nselects;
     size_t nwrites;
     uint8_t writes[4][264];
 };
@@ -164,6 +166,10 @@ static ssize_t kb_set(void *ctx, const uint8_t *buf, size_t len)
     struct kb *k = ctx;
     if (len != 264) return -1;
     k->last_op = buf[1];
+    if (buf[1] == 0x01) {
+        k->nselects++;
+        if (!k->ignore_select) k->active = buf[2];
+    }
     if (buf[1] == 0x02) {
         if (k->nwrites < 4) memcpy(k->writes[k->nwrites], buf, len);
         k->nwrites++;
@@ -258,8 +264,37 @@ static void test_set_field(void)
     CHECK(k.nwrites == 2 && k.writes[1][12] == k.block[12]);
 }
 
+static void test_switch_profile(void)
+{
+    struct kb k; kbdd_dev_io_t io; int changed = -1; uint8_t bad;
+
+    kb_init(&k, &io);                                   /* active = 3 */
+    CHECK(kbdd_dev_switch_profile(&io, 2, &changed) == KBDD_DEV_OK);
+    CHECK(changed == 1 && k.active == 2 && k.nselects == 1);
+
+    kb_init(&k, &io);                                   /* already active: no write */
+    CHECK(kbdd_dev_switch_profile(&io, 3, &changed) == KBDD_DEV_OK);
+    CHECK(changed == 0 && k.nselects == 0);
+
+    kb_init(&k, &io);                                   /* invalid values: no I/O at all */
+    for (bad = 0; bad < 255; bad++) {
+        if (bad >= 1 && bad <= 4) continue;
+        CHECK(kbdd_dev_switch_profile(&io, bad, NULL) == KBDD_DEV_EINVAL);
+    }
+    CHECK(kbdd_dev_switch_profile(&io, 0xFF, NULL) == KBDD_DEV_EINVAL);
+    CHECK(k.nselects == 0);
+
+    kb_init(&k, &io); k.ignore_select = 1;              /* keyboard ignores it: go back */
+    CHECK(kbdd_dev_switch_profile(&io, 2, &changed) == KBDD_DEV_EVERIFY);
+    CHECK(changed == 0 && k.active == 3 && k.nselects == 2);
+
+    kb_init(&k, &io); k.active = 9;                     /* bogus 0x81 reply */
+    CHECK(kbdd_dev_switch_profile(&io, 2, NULL) == KBDD_DEV_EPROTO && k.nselects == 0);
+}
+
 int main(void)
 {
+    test_switch_profile();
     test_set_field();
     test_set_effect_ok();
     test_set_effect_rejects();

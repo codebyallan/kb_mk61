@@ -254,3 +254,13 @@ kbc_status kbc_profile_block_set_mode(const uint8_t *block, size_t block_len,
     return kbc_profile_block_set_field(block, block_len, profile, KBC_FIELD_MODE,
                                        mode, out, out_len);
 }
+
+kbc_status kbc_build_select_profile(uint8_t profile, uint8_t *buf, size_t buf_len)
+{
+    uint8_t params[KBC_FEATURE_PARAMS_SIZE] = {0, 0, 0, 0};
+    if (buf == NULL) return KBC_ERR_INVALID_ARGUMENT;
+    if (buf_len != KBC_FEATURE_REPORT_SIZE) return KBC_ERR_PROTOCOL;
+    if (profile < 1 || profile > 4) return KBC_ERR_RANGE;
+    return kbc_build_feature_report(KBC_OP_SELECT_PROFILE, profile, 0, params, NULL, 0,
+                                    buf, buf_len);
+}

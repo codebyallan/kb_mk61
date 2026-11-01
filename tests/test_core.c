@@ -1054,6 +1054,20 @@ static void test_profile_block_fields(void)
     CHECK(kbc_profile_block_set_field(blk, 264, 1, (kbc_profile_field)9, 1, out, 264) == KBC_ERR_INVALID_ARGUMENT);
 }
 
+static void test_select_profile_builder(void)
+{
+    uint8_t b[264];
+    size_t i;
+    CHECK(kbc_build_select_profile(2, b, sizeof b) == KBC_OK);
+    CHECK(b[0] == 7 && b[1] == 0x01 && b[2] == 2);
+    for (i = 3; i < sizeof b; i++) CHECK(b[i] == 0);
+    CHECK(kbc_build_select_profile(0, b, sizeof b) == KBC_ERR_RANGE);
+    CHECK(kbc_build_select_profile(5, b, sizeof b) == KBC_ERR_RANGE);
+    CHECK(kbc_build_select_profile(0xFF, b, sizeof b) == KBC_ERR_RANGE);  /* factory reset never built */
+    CHECK(kbc_build_select_profile(1, b, 100) == KBC_ERR_PROTOCOL);
+    CHECK(kbc_build_select_profile(1, NULL, sizeof b) == KBC_ERR_INVALID_ARGUMENT);
+}
+
 int main(void)
 {
     test_tv_f01(); test_tv_f02(); test_tv_f03(); test_tv_f04();
@@ -1082,6 +1096,7 @@ int main(void)
     test_led_frame();
     test_led_frame_brightness();
     test_read_requests();
+    test_select_profile_builder();
     test_led_effect_names();
     test_profile_block_write();
     test_profile_block_fields();

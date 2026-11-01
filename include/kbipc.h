@@ -23,6 +23,7 @@
 
 #define KBDD_IPC_OP_SET_EFFECT 12u  /* payload [mode]: active profile effect (0x02, verified) */
 
+#define KBDD_IPC_OP_SET_PROFILE 14u /* payload [profile 1..4]: switch active profile (0x01, verified by 0x81) */
 #define KBDD_IPC_OP_SET_FIELD 13u   /* payload [field(1=effect,2=brightness,3=speed), value] */
 
 /* LED_SET payload: [flags, stride, mode, pos, r, g, b] */

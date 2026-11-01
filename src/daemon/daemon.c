@@ -548,6 +548,43 @@ static int kbdd_handle_effect(kbdd_ctx_t *k, const kbdd_ipc_message_t *req,
     return kbdd_reply_text(resp, buf);
 }
 
+static int kbdd_handle_profile(kbdd_ctx_t *k, const kbdd_ipc_message_t *req,
+                               kbdd_ipc_message_t *resp)
+{
+    const kbdd_hid_device_t *dev;
+    kbdd_dev_io_t io;
+    char buf[120];
+    int rc, changed = 0;
+    unsigned p;
+
+    if (!k->allow_profile_write) {
+        return kbdd_reply_text(resp,
+            "error: profile switching is disabled. Start kbdd with KBDD_ENABLE_PROFILE_WRITE=1");
+    }
+    if (req->payload == NULL || req->payload_len != 1 || req->payload[0] < 1 || req->payload[0] > 4) {
+        return kbdd_reply_text(resp, "error: payload must be [profile 1..4]");
+    }
+    p = req->payload[0];
+    dev = kbdd_control_dev(k);
+    if (dev == NULL) {
+        return kbdd_reply_text(resp, "error: no keyboard control interface available");
+    }
+    k->led_hold = 0;      /* host frames belong to the previous profile's lighting */
+    k->led_active = 0;
+    kbdd_dev_io_init_hidraw(&io, dev);
+    rc = kbdd_dev_switch_profile(&io, (uint8_t)p, &changed);
+    if (rc == KBDD_DEV_EVERIFY) {
+        return kbdd_reply_text(resp,
+            "error: the keyboard did not confirm the profile switch; previous profile requested back");
+    }
+    if (rc != KBDD_DEV_OK) {
+        return kbdd_reply_text(resp, kbdd_dev_err(rc));
+    }
+    snprintf(buf, sizeof(buf), changed ? "ok: profile %u is now active (confirmed by 0x81)"
+                                       : "ok: profile %u was already active", p);
+    return kbdd_reply_text(resp, buf);
+}
+
 static int kbdd_handle_field(kbdd_ctx_t *k, const kbdd_ipc_message_t *req,
                              kbdd_ipc_message_t *resp)
 {
@@ -884,6 +921,8 @@ static int kbdd_ipc_handle(const kbdd_ipc_message_t *req, kbdd_ipc_message_t *re
             return kbdd_handle_led(kctx, req, resp);
         case KBDD_IPC_OP_SET_EFFECT:
             return kbdd_handle_effect(kctx, req, resp);
+        case KBDD_IPC_OP_SET_PROFILE:
+            return kbdd_handle_profile(kctx, req, resp);
         case KBDD_IPC_OP_SET_FIELD:
             return kbdd_handle_field(kctx, req, resp);
         default: {

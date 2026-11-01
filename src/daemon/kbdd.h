@@ -68,6 +68,11 @@ int kbdd_dev_set_effect(const kbdd_dev_io_t *io, uint8_t mode, uint8_t *profile_
 /* Same flow for one field (kbc_profile_field): effect, brightness or speed. */
 int kbdd_dev_set_field(const kbdd_dev_io_t *io, int field, uint8_t value, uint8_t *profile_out);
 
+/* Switches the active profile (1..4): reads 0x81, sends 0x01, reads 0x81 again to
+ * confirm. Already-active profile = no write. On failure tries to go back to the
+ * previous profile (EVERIFY). *changed = 1 only if the profile actually changed. */
+int kbdd_dev_switch_profile(const kbdd_dev_io_t *io, uint8_t profile, int *changed);
+
 /* uinput module */
 typedef struct kbdd_uinput kbdd_uinput_t;
 kbdd_uinput_t *kbdd_uinput_open(const char *path);

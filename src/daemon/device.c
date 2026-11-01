@@ -135,3 +135,36 @@ int kbdd_dev_set_effect(const kbdd_dev_io_t *io, uint8_t mode, uint8_t *profile_
 {
     return kbdd_dev_set_field(io, KBC_FIELD_MODE, mode, profile_out);
 }
+
+int kbdd_dev_switch_profile(const kbdd_dev_io_t *io, uint8_t profile, int *changed)
+{
+    uint8_t act[264], req[KBC_FEATURE_REPORT_SIZE], prev;
+    int rc;
+
+    if (changed != NULL) *changed = 0;
+    if (io == NULL || kbc_build_select_profile(profile, req, sizeof(req)) != KBC_OK) {
+        return KBDD_DEV_EINVAL;
+    }
+    rc = kbdd_dev_query(io, KBC_OP_READ_ACTIVE_PROFILE, 0, act);
+    if (rc != KBDD_DEV_OK) return rc;
+    if (act[1] != KBC_OP_READ_ACTIVE_PROFILE) return KBDD_DEV_EPROTO;
+    prev = act[2];
+    if (prev < 1 || prev > 4) return KBDD_DEV_EPROTO;
+    if (prev == profile) return KBDD_DEV_OK;           /* nothing to do */
+
+    if (io->set_feature(io->ctx, req, sizeof(req)) < 0) return KBDD_DEV_EIO;
+    io->sleep_ms(io->ctx, 100u);
+
+    rc = kbdd_dev_query(io, KBC_OP_READ_ACTIVE_PROFILE, 0, act);
+    if (rc != KBDD_DEV_OK) return rc;
+    if (act[1] == KBC_OP_READ_ACTIVE_PROFILE && act[2] == profile) {
+        if (changed != NULL) *changed = 1;
+        return KBDD_DEV_OK;
+    }
+    /* not confirmed: best-effort return to the previous profile */
+    if (kbc_build_select_profile(prev, req, sizeof(req)) == KBC_OK) {
+        (void)io->set_feature(io->ctx, req, sizeof(req));
+        io->sleep_ms(io->ctx, 100u);
+    }
+    return KBDD_DEV_EVERIFY;
+}

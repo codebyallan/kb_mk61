@@ -29,6 +29,7 @@ static void usage(FILE *f)
     fputs("  write-profile <index> <file>  Write a profile file (index 0-3)\n", f);
     fputs("  read-config                   Read daemon configuration summary\n", f);
     fputs("  enable-notifications          Enable input notifications\n", f);
+    fputs("  watch                         Print keyboard profile/layer/effect events\n", f);
     fputs("  profile <1-4>                 Switch the active profile (needs KBDD_ENABLE_PROFILE_WRITE=1)\n", f);
     fputs("  active-profile                Ask the keyboard which profile is active (0x81)\n", f);
     fputs("  dump-block <1-4> [file]       Read the profile parameter block (0x82), hex dump\n", f);
@@ -66,6 +67,8 @@ static void usage_command(FILE *f, const char *command)
         fputs("Usage: kbctl read-config\n\nRead the daemon configuration summary.\n", f);
     } else if (strcmp(command, "enable-notifications") == 0) {
         fputs("Usage: kbctl enable-notifications\n\nEnable keyboard input notifications through kbdd.\n", f);
+    } else if (strcmp(command, "watch") == 0) {
+        fputs("Usage: kbctl watch\n\nPrint keyboard profile, layer, and effect events until Ctrl+C.\n", f);
     } else if (strcmp(command, "profile") == 0) {
         fputs("Usage: kbctl profile <1-4>\n\nSwitch the keyboard's active profile (hardware numbering 1-4) and confirm it with\n"
               "a read-back. Requires KBDD_ENABLE_PROFILE_WRITE=1.\n", f);
@@ -303,6 +306,102 @@ static int ipc_request(uint16_t opcode, const uint8_t *payload, uint32_t plen,
     close(fd);
     *out_payload = rbuf;
     *out_len = rplen;
+    return 0;
+}
+
+static int print_reply(const uint8_t *data, uint32_t len);
+
+static int ipc_open_socket(void)
+{
+    const char *runtime = getenv("XDG_RUNTIME_DIR");
+    char path[512];
+    struct sockaddr_un addr;
+    int fd;
+
+    if (runtime == NULL || runtime[0] == '\0' ||
+        snprintf(path, sizeof(path), "%s/kbdd.sock", runtime) >= (int)sizeof(path)) {
+        fprintf(stderr, "kbctl: cannot locate kbdd socket\n");
+        return -1;
+    }
+    fd = socket(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0);
+    if (fd < 0) return -1;
+    memset(&addr, 0, sizeof(addr));
+    addr.sun_family = AF_UNIX;
+    if (strlen(path) >= sizeof(addr.sun_path)) {
+        close(fd);
+        return -1;
+    }
+    strncpy(addr.sun_path, path, sizeof(addr.sun_path) - 1);
+    if (connect(fd, (struct sockaddr *)&addr, sizeof(addr)) != 0) {
+        fprintf(stderr, "kbctl: cannot connect to kbdd: %s\n", strerror(errno));
+        close(fd);
+        return -1;
+    }
+    return fd;
+}
+
+static int ipc_send_request_fd(int fd, uint16_t opcode)
+{
+    uint8_t header[KBDD_IPC_HEADER_SIZE] = {0};
+    uint32_t magic = KBDD_IPC_MAGIC;
+    header[0] = (uint8_t)magic; header[1] = (uint8_t)(magic >> 8);
+    header[2] = (uint8_t)(magic >> 16); header[3] = (uint8_t)(magic >> 24);
+    header[4] = KBDD_IPC_VERSION;
+    header[12] = (uint8_t)opcode; header[13] = (uint8_t)(opcode >> 8);
+    header[14] = 1;
+    return send_all(fd, header, sizeof(header));
+}
+
+static int ipc_watch(void)
+{
+    uint8_t header[KBDD_IPC_HEADER_SIZE];
+    uint8_t *payload;
+    uint32_t len;
+    int fd = ipc_open_socket();
+
+    if (fd < 0 || ipc_send_request_fd(fd, KBDD_IPC_OP_WATCH) != 0) {
+        if (fd >= 0) close(fd);
+        return 1;
+    }
+    if (recv_all(fd, header, sizeof(header)) != 0 ||
+        rd32(header) != KBDD_IPC_MAGIC) {
+        close(fd);
+        return 1;
+    }
+    len = rd32(header + 8);
+    if (len > KBDD_IPC_MAX_PAYLOAD) {
+        close(fd);
+        return 1;
+    }
+    payload = len > 0 ? malloc(len) : NULL;
+    if (len > 0 && (payload == NULL || recv_all(fd, payload, len) != 0)) {
+        free(payload);
+        close(fd);
+        return 1;
+    }
+    if (print_reply(payload, len) != 0) {
+        free(payload);
+        close(fd);
+        return 1;
+    }
+    free(payload);
+    for (;;) {
+        if (recv_all(fd, header, sizeof(header)) != 0) break;
+        if (rd32(header) != KBDD_IPC_MAGIC ||
+            (uint16_t)(header[12] | (header[13] << 8)) != KBDD_IPC_OP_EVENT) {
+            break;
+        }
+        len = rd32(header + 8);
+        if (len == 0 || len > KBDD_IPC_MAX_PAYLOAD) break;
+        payload = malloc(len);
+        if (payload == NULL || recv_all(fd, payload, len) != 0) {
+            free(payload);
+            break;
+        }
+        print_reply(payload, len);
+        free(payload);
+    }
+    close(fd);
     return 0;
 }
 
@@ -1017,6 +1116,14 @@ int main(int argc, char **argv)
         print_payload(resp, rlen);
         free(resp);
         return 0;
+    }
+
+    if (strcmp(cmd, "watch") == 0) {
+        if (argc != 2) {
+            usage(stderr);
+            return 2;
+        }
+        return ipc_watch();
     }
 
     if (strcmp(cmd, "profile") == 0) {

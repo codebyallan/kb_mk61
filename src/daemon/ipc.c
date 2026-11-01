@@ -23,6 +23,7 @@ struct kbdd_ipc_client {
     uint32_t expected_payload;
     time_t rl_window_start;
     unsigned int rl_count;
+    int watching;
 };
 
 struct kbdd_ipc_server {
@@ -293,6 +294,9 @@ static int kbdd_ipc_handle_client(struct kbdd_ipc_server *s, size_t idx,
         resp.version = KBDD_IPC_VERSION;
         resp.request_id = req.request_id;
         resp.opcode = req.opcode;
+        if (req.opcode == KBDD_IPC_OP_WATCH) {
+            c->watching = 1;
+        }
 
         /* simple per-client rate limiting (requests per second) */
         time_t now = time(NULL);
@@ -381,6 +385,57 @@ static int kbdd_ipc_handle_client(struct kbdd_ipc_server *s, size_t idx,
         }
     }
 
+    return 0;
+}
+
+int kbdd_ipc_server_publish(kbdd_ipc_server_t *s, const char *event)
+{
+    size_t i;
+    size_t len;
+
+    if (s == NULL || event == NULL) return -1;
+    len = strlen(event) + 1;
+    if (len > KBDD_IPC_MAX_PAYLOAD) return -1;
+    for (i = 0; i < s->client_count;) {
+        struct kbdd_ipc_client *c = &s->clients[i];
+        uint8_t header[KBDD_IPC_HEADER_SIZE];
+        uint32_t magic = KBDD_IPC_MAGIC;
+        uint16_t opcode = KBDD_IPC_OP_EVENT;
+        uint16_t request_id = 0;
+        size_t sent, payload_sent;
+
+        if (!c->watching) {
+            i++;
+            continue;
+        }
+        header[0] = (uint8_t)magic; header[1] = (uint8_t)(magic >> 8);
+        header[2] = (uint8_t)(magic >> 16); header[3] = (uint8_t)(magic >> 24);
+        header[4] = KBDD_IPC_VERSION; header[5] = 0;
+        header[6] = 0; header[7] = 0;
+        header[8] = (uint8_t)len; header[9] = (uint8_t)(len >> 8);
+        header[10] = (uint8_t)(len >> 16); header[11] = (uint8_t)(len >> 24);
+        header[12] = (uint8_t)opcode; header[13] = (uint8_t)(opcode >> 8);
+        header[14] = (uint8_t)request_id; header[15] = (uint8_t)(request_id >> 8);
+        sent = 0;
+        while (sent < sizeof(header)) {
+            ssize_t n = send(c->fd, header + sent, sizeof(header) - sent,
+                             MSG_NOSIGNAL);
+            if (n <= 0) break;
+            sent += (size_t)n;
+        }
+        payload_sent = 0;
+        while (sent == sizeof(header) && payload_sent < len) {
+            ssize_t n = send(c->fd, event + payload_sent, len - payload_sent,
+                             MSG_NOSIGNAL);
+            if (n <= 0) break;
+            payload_sent += (size_t)n;
+        }
+        if (sent != sizeof(header) || payload_sent != len) {
+            kbdd_ipc_client_close(s, i);
+            continue;
+        }
+        i++;
+    }
     return 0;
 }
 

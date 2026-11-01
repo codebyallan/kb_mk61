@@ -110,6 +110,21 @@ static void test_query_errors(void)
     CHECK(kbdd_dev_query(NULL, 0x81, 0, out) == KBDD_DEV_EINVAL);
 }
 
+static void test_enable_notifications(void)
+{
+    struct mock m;
+    kbdd_dev_io_t io;
+
+    mock_init(&m, &io);
+    CHECK(kbdd_dev_enable_notifications(&io) == KBDD_DEV_OK);
+    CHECK(m.nsent == 1);
+    CHECK(m.sent[0][0] == 0x07 && m.sent[0][1] == 0x06);
+    CHECK(m.sent[0][2] == 1);
+    CHECK(m.nsleeps == 1 && m.sleeps[0] == 100);
+    m.fail_set = 1;
+    CHECK(kbdd_dev_enable_notifications(&io) == KBDD_DEV_EIO);
+}
+
 static void test_send_frame_single_page(void)
 {
     struct mock m; kbdd_dev_io_t io; uint8_t frame[432];
@@ -303,6 +318,7 @@ int main(void)
     test_query_block();
     test_query_allowlist();
     test_query_errors();
+    test_enable_notifications();
     test_send_frame_single_page();
     test_send_frame_two_pages();
     test_send_frame_errors();

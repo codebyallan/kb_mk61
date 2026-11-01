@@ -60,6 +60,7 @@ int kbdd_dev_query(const kbdd_dev_io_t *io, uint8_t opcode, uint8_t profile,
                    uint8_t out[264]);
 int kbdd_dev_send_frame(const kbdd_dev_io_t *io, const uint8_t frame[432],
                         size_t stride);
+int kbdd_dev_enable_notifications(const kbdd_dev_io_t *io);
 
 /* Changes the LED effect of the ACTIVE profile: read 0x81, read 0x82, write
  * 0x02 with only the effect byte changed, read back and verify. On a failed
@@ -102,6 +103,7 @@ int kbdd_ipc_server_fd(const kbdd_ipc_server_t *s);
 int kbdd_ipc_server_accept(kbdd_ipc_server_t *s);
 int kbdd_ipc_server_poll(kbdd_ipc_server_t *s, int timeout_ms,
                          kbdd_ipc_handler_t handler, void *ctx);
+int kbdd_ipc_server_publish(kbdd_ipc_server_t *s, const char *event);
 
 /* daemon */
 int kbdd_run(int argc, char **argv);

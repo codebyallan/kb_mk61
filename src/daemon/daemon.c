@@ -159,6 +159,7 @@ typedef struct {
     int restore_pending;
     unsigned restore_attempts;
     long long restore_next_ms;
+    kbdd_ipc_server_t *ipc;
 } kbdd_ctx_t;
 
 #define KBDD_CONFIG_NONE 0u
@@ -171,6 +172,20 @@ static int kbdd_save_config(const kbdd_ctx_t *k);
 static int kbdd_load_config(kbdd_ctx_t *k);
 static int kbdd_restore_config(kbdd_ctx_t *k);
 static long long kbdd_now_ms(void);
+
+static void kbdd_enable_device_notifications(kbdd_hid_device_t *devices, size_t count)
+{
+    size_t i;
+    for (i = 0; i < count; i++) {
+        kbdd_dev_io_t io;
+        if (devices[i].role != 0 || devices[i].fd < 0) continue;
+        kbdd_dev_io_init_hidraw(&io, &devices[i]);
+        if (kbdd_dev_enable_notifications(&io) != KBDD_DEV_OK) {
+            fprintf(stderr, "kbdd: could not enable keyboard notifications on %s\n",
+                    devices[i].path);
+        }
+    }
+}
 
 static int kbdd_same_devices(const kbdd_hid_device_t *a, size_t acount,
                              const kbdd_hid_device_t *b, size_t bcount)
@@ -210,6 +225,7 @@ static int kbdd_refresh_devices(kbdd_ctx_t *k)
     for (size_t i = 0; i < found_count; i++) {
         (void)kbdd_hidraw_open(&found[i]);
     }
+    kbdd_enable_device_notifications(found, found_count);
     kbdd_hidraw_free(k->devices, k->count);
     k->devices = found;
     k->count = found_count;
@@ -227,6 +243,33 @@ static int kbdd_refresh_devices(kbdd_ctx_t *k)
 }
 
 static int kbdd_reply_text(kbdd_ipc_message_t *resp, const char *msg);
+
+static void kbdd_publish_input_event(kbdd_ctx_t *k, const uint8_t *buf, size_t len)
+{
+    kbc_input_report event;
+    char text[160];
+
+    if (k == NULL || k->ipc == NULL ||
+        kbc_parse_input_report(buf, len, &event) != KBC_OK ||
+        event.marker != 0xE1) {
+        return;
+    }
+    if (event.system_subtype == 0x01) {
+        snprintf(text, sizeof(text), "profile changed: %u", (unsigned)event.value);
+    } else if (event.system_subtype == 0x02) {
+        snprintf(text, sizeof(text), "layer changed: %u", (unsigned)event.value);
+    } else if (event.system_subtype == 0x08) {
+        snprintf(text, sizeof(text), "effect changed: %u (%s)",
+                 (unsigned)event.value, kbc_led_effect_name(event.value));
+    } else if (event.system_subtype == 0x11 || event.system_subtype == 0x12) {
+        snprintf(text, sizeof(text), "custom effect changed: subtype 0x%02x value %u",
+                 (unsigned)event.system_subtype, (unsigned)event.value);
+    } else {
+        snprintf(text, sizeof(text), "keyboard event: subtype 0x%02x value %u",
+                 (unsigned)event.system_subtype, (unsigned)event.value);
+    }
+    (void)kbdd_ipc_server_publish(k->ipc, text);
+}
 
 static long long kbdd_now_ms(void)
 {
@@ -1009,17 +1052,21 @@ static int kbdd_ipc_handle(const kbdd_ipc_message_t *req, kbdd_ipc_message_t *re
             return 0;
         }
         case KBDD_IPC_OP_ENABLE_NOTIFICATIONS: {
-            const char *msg = "notifications enabled";
-            size_t n = strlen(msg);
-            resp->payload = malloc(n + 1);
-            if (resp->payload == NULL) {
-                return -1;
+            size_t i;
+            int failed = 0;
+            for (i = 0; i < kctx->count; i++) {
+                kbdd_dev_io_t io;
+                if (kctx->devices[i].role != 0 || kctx->devices[i].fd < 0) continue;
+                kbdd_dev_io_init_hidraw(&io, &kctx->devices[i]);
+                if (kbdd_dev_enable_notifications(&io) != KBDD_DEV_OK) failed = 1;
             }
-            memcpy(resp->payload, msg, n);
-            resp->payload[n] = '\0';
-            resp->payload_len = (uint32_t)(n + 1);
-            return 0;
+            return kbdd_reply_text(resp, failed
+                ? "error: could not enable keyboard notifications"
+                : "notifications enabled");
         }
+        case KBDD_IPC_OP_WATCH:
+            return kbdd_reply_text(resp,
+                "watching keyboard system events (Ctrl+C to stop)");
         case KBDD_IPC_OP_READ_ACTIVE: {
             const kbdd_hid_device_t *dev = kbdd_control_dev(kctx);
             kbdd_dev_io_t io;
@@ -1118,6 +1165,7 @@ int kbdd_run(int argc, char **argv)
     for (size_t i = 0; i < device_count; i++) {
         kbdd_hidraw_open(&devices[i]);
     }
+    kbdd_enable_device_notifications(devices, device_count);
 
     /* uinput (optional, mockable) */
     /* Off by default: nothing uses the virtual keyboard yet, and creating it
@@ -1144,6 +1192,7 @@ int kbdd_run(int argc, char **argv)
     kctx.led_brightness = KBC_BRIGHTNESS_RAW_MAX;
     kctx.devices = devices;
     kctx.count = device_count;
+    kctx.ipc = ipc;
     kbdd_config_defaults(&kctx);
     if (kbdd_load_config(&kctx) != 0) {
         fprintf(stderr, "kbdd: invalid configuration; using defaults\n");
@@ -1190,7 +1239,7 @@ int kbdd_run(int argc, char **argv)
             uint8_t buf[256];
             ssize_t r = kbdd_hidraw_read(&kctx.devices[i], buf, sizeof(buf));
             if (r > 0) {
-                /* parse input report via libkbcore? skip logging */
+                kbdd_publish_input_event(&kctx, buf, (size_t)r);
             } else if (r < 0 &&
                        (errno == EBADF || errno == EIO ||
                         errno == ENODEV || errno == ENXIO)) {

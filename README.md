@@ -139,6 +139,7 @@ kbctl status
 kbctl version
 kbctl read-config
 kbctl enable-notifications
+kbctl watch
 kbctl active-profile
 ```
 
@@ -147,6 +148,8 @@ kbctl active-profile
 - `version` prints the `kbctl` and `libkbcore` versions.
 - `read-config` reads the daemon configuration summary.
 - `enable-notifications` enables keyboard input notifications.
+- `watch` subscribes to profile, layer, and LED effect events and prints them
+  until `Ctrl+C`.
 - `active-profile` queries the active profile from the keyboard.
 
 ### Profile commands

@@ -90,6 +90,21 @@ int kbdd_dev_send_frame(const kbdd_dev_io_t *io, const uint8_t frame[432],
     return KBDD_DEV_OK;
 }
 
+int kbdd_dev_enable_notifications(const kbdd_dev_io_t *io)
+{
+    uint8_t req[KBC_FEATURE_REPORT_SIZE];
+    static const uint8_t params[KBC_FEATURE_PARAMS_SIZE] = {0, 0, 0, 0};
+
+    if (io == NULL ||
+        kbc_build_feature_report(KBC_OP_ENABLE_INPUT, 1, 0, params, NULL, 0,
+                                 req, sizeof(req)) != KBC_OK) {
+        return KBDD_DEV_EINVAL;
+    }
+    if (io->set_feature(io->ctx, req, sizeof(req)) < 0) return KBDD_DEV_EIO;
+    io->sleep_ms(io->ctx, 100u);
+    return KBDD_DEV_OK;
+}
+
 int kbdd_dev_set_field(const kbdd_dev_io_t *io, int field, uint8_t value, uint8_t *profile_out)
 {
     uint8_t act[264], before[264], after[264], rep[264], undo[264];

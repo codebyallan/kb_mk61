@@ -28,8 +28,10 @@ sudo udevadm control --reload-rules
 sudo udevadm trigger --subsystem-match=hidraw
 
 if [ "${ENABLE_LED:-1}" = "1" ]; then
-  mkdir -p ~/.config/systemd/user/kbdd.service.d
+  mkdir -p ~/.config/kbdd ~/.config/systemd/user/kbdd.service.d
   printf '[Service]\nEnvironment=KBDD_ENABLE_LED=1\nEnvironment=KBDD_ENABLE_PROFILE_WRITE=1\n' > ~/.config/systemd/user/kbdd.service.d/led.conf
+else
+  mkdir -p ~/.config/kbdd
 fi
 
 systemctl --user daemon-reload

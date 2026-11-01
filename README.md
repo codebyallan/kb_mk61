@@ -103,6 +103,10 @@ To remove an installation made by the supplied script:
 ./uninstall.sh
 ```
 
+After updating an existing installation, rerun `./install.sh` so the user
+service receives the `ReadWritePaths` permission required to persist LED
+settings.
+
 ## Usage
 
 After `kbdd` is running, use `kbctl help` to list all commands. Detailed
@@ -190,6 +194,13 @@ kbctl led speed 50
 
 Frame commands accept `--once` to send one frame without periodic refresh and
 `--stride N` to override the frame layout (default: the detected matrix size).
+The daemon persists the selected lighting mode, custom colors, per-effect
+speed, and global brightness in `$XDG_CONFIG_HOME/kbdd/config` (or
+`~/.config/kbdd/config`). Selecting `solid`, `pos`, or `effect` replaces the
+other visual modes, so only one is restored after a keyboard reconnect or
+daemon restart. `led clear` removes all saved colors and disables the saved
+visual mode; brightness remains available as the global setting for the next
+mode.
 The `effect`, `brightness`, and `speed` commands require
 `KBDD_ENABLE_PROFILE_WRITE=1`; frame commands require `KBDD_ENABLE_LED=1`.
 

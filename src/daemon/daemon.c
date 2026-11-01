@@ -141,7 +141,27 @@ typedef struct {
     size_t led_stride;
     int led_fail;
     long long led_next_ms;
+    uint8_t config_mode;                 /* 0 none, 1 effect, 2 solid, 3 positions */
+    uint8_t config_effect;
+    uint8_t config_speed[KBC_LED_EFFECT_COUNT];
+    uint8_t config_brightness;
+    uint8_t config_solid[3];
+    uint8_t config_positions[KBC_MAX_MATRIX_SIZE][3];
+    size_t config_stride;
+    int restore_pending;
+    unsigned restore_attempts;
+    long long restore_next_ms;
 } kbdd_ctx_t;
+
+#define KBDD_CONFIG_NONE 0u
+#define KBDD_CONFIG_EFFECT 1u
+#define KBDD_CONFIG_SOLID 2u
+#define KBDD_CONFIG_POSITIONS 3u
+
+static int kbdd_save_config(const kbdd_ctx_t *k);
+static int kbdd_load_config(kbdd_ctx_t *k);
+static int kbdd_restore_config(kbdd_ctx_t *k);
+static long long kbdd_now_ms(void);
 
 static int kbdd_same_devices(const kbdd_hid_device_t *a, size_t acount,
                              const kbdd_hid_device_t *b, size_t bcount)
@@ -189,6 +209,11 @@ static int kbdd_refresh_devices(kbdd_ctx_t *k)
     k->led_fail = 0;
     fprintf(stderr, "kbdd: device set changed, now tracking %zu interface(s)\n",
             found_count);
+    if (found_count != 0 && k->config_mode != KBDD_CONFIG_NONE) {
+        k->restore_pending = 1;
+        k->restore_attempts = 0;
+        k->restore_next_ms = kbdd_now_ms() + 300;
+    }
     return 1;
 }
 
@@ -199,6 +224,164 @@ static long long kbdd_now_ms(void)
     struct timespec ts;
     clock_gettime(CLOCK_MONOTONIC, &ts);
     return (long long)ts.tv_sec * 1000LL + ts.tv_nsec / 1000000L;
+}
+
+static int kbdd_config_path(char *path, size_t size)
+{
+    char dir[512];
+    if (kbdd_config_dir(dir, sizeof(dir)) != 0 ||
+        snprintf(path, size, "%s/config", dir) >= (int)size) {
+        return -1;
+    }
+    return 0;
+}
+
+static void kbdd_config_defaults(kbdd_ctx_t *k)
+{
+    size_t i;
+    memset(k->config_solid, 0, sizeof(k->config_solid));
+    memset(k->config_positions, 0, sizeof(k->config_positions));
+    k->config_mode = KBDD_CONFIG_NONE;
+    k->config_effect = 0;
+    k->config_brightness = KBC_BRIGHTNESS_RAW_MAX;
+    k->config_stride = 0;
+    for (i = 0; i < KBC_LED_EFFECT_COUNT; i++) {
+        k->config_speed[i] = 50;
+    }
+}
+
+static int kbdd_load_config(kbdd_ctx_t *k)
+{
+    char path[768];
+    FILE *f;
+    char key[32];
+    unsigned value;
+    unsigned speed_effect;
+    size_t pos;
+    unsigned r, g, b;
+
+    if (k == NULL || kbdd_config_path(path, sizeof(path)) != 0) return -1;
+    kbdd_config_defaults(k);
+    f = fopen(path, "r");
+    if (f == NULL) return errno == ENOENT ? 0 : -1;
+    while (fscanf(f, "%31s", key) == 1) {
+        if (strcmp(key, "mode") == 0) {
+            if (fscanf(f, "%u", &value) != 1 || value > KBDD_CONFIG_POSITIONS) {
+                fclose(f);
+                kbdd_config_defaults(k);
+                return -1;
+            }
+            k->config_mode = (uint8_t)value;
+        } else if (strcmp(key, "effect") == 0) {
+            if (fscanf(f, "%u", &value) != 1 || value >= KBC_LED_EFFECT_COUNT) {
+                fclose(f);
+                return -1;
+            }
+            k->config_effect = (uint8_t)value;
+        } else if (strcmp(key, "brightness") == 0) {
+            if (fscanf(f, "%u", &value) != 1 || value > KBC_BRIGHTNESS_RAW_MAX) {
+                fclose(f);
+                return -1;
+            }
+            k->config_brightness = (uint8_t)value;
+        } else if (strcmp(key, "speed") == 0) {
+            if (fscanf(f, "%u", &value) != 1 || value >= KBC_LED_EFFECT_COUNT) {
+                fclose(f);
+                return -1;
+            }
+            speed_effect = value;
+            if (fscanf(f, "%u", &value) != 1 ||
+                value < KBC_SPEED_RAW_MIN || value > KBC_SPEED_RAW_MAX) {
+                fclose(f);
+                return -1;
+            }
+            k->config_speed[speed_effect] = (uint8_t)value;
+        } else if (strcmp(key, "solid") == 0) {
+            if (fscanf(f, "%u %u %u", &r, &g, &b) != 3 ||
+                r > 255 || g > 255 || b > 255) {
+                fclose(f);
+                return -1;
+            }
+            k->config_solid[0] = (uint8_t)r;
+            k->config_solid[1] = (uint8_t)g;
+            k->config_solid[2] = (uint8_t)b;
+        } else if (strcmp(key, "stride") == 0) {
+            if (fscanf(f, "%u", &value) != 1 || value > KBC_MAX_MATRIX_SIZE) {
+                fclose(f);
+                return -1;
+            }
+            k->config_stride = value;
+        } else if (strcmp(key, "pos") == 0) {
+            if (fscanf(f, "%zu %u %u %u", &pos, &r, &g, &b) != 4 ||
+                pos >= KBC_MAX_MATRIX_SIZE || r > 255 || g > 255 || b > 255) {
+                fclose(f);
+                return -1;
+            }
+            k->config_positions[pos][0] = (uint8_t)r;
+            k->config_positions[pos][1] = (uint8_t)g;
+            k->config_positions[pos][2] = (uint8_t)b;
+        } else {
+            fclose(f);
+            return -1;
+        }
+    }
+    fclose(f);
+    return 0;
+}
+
+static int kbdd_save_config(const kbdd_ctx_t *k)
+{
+    char path[768], tmp[800];
+    FILE *f;
+    size_t i;
+
+    if (k == NULL || kbdd_config_path(path, sizeof(path)) != 0 ||
+        snprintf(tmp, sizeof(tmp), "%s.tmp", path) >= (int)sizeof(tmp)) {
+        return -1;
+    }
+    f = fopen(tmp, "w");
+    if (f == NULL) return -1;
+    if (fchmod(fileno(f), 0600) != 0) {
+        fclose(f);
+        unlink(tmp);
+        return -1;
+    }
+    if (fprintf(f, "mode %u\neffect %u\nbrightness %u\n",
+                (unsigned)k->config_mode, (unsigned)k->config_effect,
+                (unsigned)k->config_brightness) < 0) {
+        fclose(f);
+        unlink(tmp);
+        return -1;
+    }
+    for (i = 0; i < KBC_LED_EFFECT_COUNT; i++) {
+        if (fprintf(f, "speed %zu %u\n", i, (unsigned)k->config_speed[i]) < 0) {
+            fclose(f);
+            unlink(tmp);
+            return -1;
+        }
+    }
+    if (k->config_mode == KBDD_CONFIG_SOLID) {
+        fprintf(f, "solid %u %u %u\nstride %zu\n",
+                (unsigned)k->config_solid[0], (unsigned)k->config_solid[1],
+                (unsigned)k->config_solid[2], k->config_stride);
+    } else if (k->config_mode == KBDD_CONFIG_POSITIONS) {
+        fprintf(f, "stride %zu\n", k->config_stride);
+        for (i = 0; i < KBC_MAX_MATRIX_SIZE; i++) {
+            if (k->config_positions[i][0] != 0 ||
+                k->config_positions[i][1] != 0 ||
+                k->config_positions[i][2] != 0) {
+                fprintf(f, "pos %zu %u %u %u\n", i,
+                        (unsigned)k->config_positions[i][0],
+                        (unsigned)k->config_positions[i][1],
+                        (unsigned)k->config_positions[i][2]);
+            }
+        }
+    }
+    if (fclose(f) != 0 || rename(tmp, path) != 0) {
+        unlink(tmp);
+        return -1;
+    }
+    return 0;
 }
 
 /* First control interface (usage ff01/0001) of a known model, opened. */
@@ -272,9 +455,17 @@ static int kbdd_handle_led(kbdd_ctx_t *k, const kbdd_ipc_message_t *req,
         memset(k->led_frame, 0, sizeof(k->led_frame));
         memset(k->led_base_frame, 0, sizeof(k->led_base_frame));
         kbc_led_frame_fill(k->led_base_frame, stride, count, r, g, b);
+        k->config_mode = KBDD_CONFIG_SOLID;
+        k->config_solid[0] = r;
+        k->config_solid[1] = g;
+        k->config_solid[2] = b;
+        memset(k->config_positions, 0, sizeof(k->config_positions));
     } else if (mode == KBDD_LED_MODE_CLEAR) {
         memset(k->led_frame, 0, sizeof(k->led_frame));
         memset(k->led_base_frame, 0, sizeof(k->led_base_frame));
+        k->config_mode = KBDD_CONFIG_NONE;
+        memset(k->config_solid, 0, sizeof(k->config_solid));
+        memset(k->config_positions, 0, sizeof(k->config_positions));
     } else if (mode == KBDD_LED_MODE_POS) {
         if (pos >= count) {
             return kbdd_reply_text(resp, "error: position out of range");
@@ -284,6 +475,14 @@ static int kbdd_handle_led(kbdd_ctx_t *k, const kbdd_ipc_message_t *req,
             memset(k->led_base_frame, 0, sizeof(k->led_base_frame));
         }
         kbc_led_frame_set(k->led_base_frame, stride, pos, r, g, b);
+        if (k->config_mode != KBDD_CONFIG_POSITIONS ||
+            k->config_stride != stride) {
+            memset(k->config_positions, 0, sizeof(k->config_positions));
+        }
+        k->config_mode = KBDD_CONFIG_POSITIONS;
+        k->config_positions[pos][0] = r;
+        k->config_positions[pos][1] = g;
+        k->config_positions[pos][2] = b;
     } else {
         return kbdd_reply_text(resp, "error: unknown LED mode");
     }
@@ -303,6 +502,10 @@ static int kbdd_handle_led(kbdd_ctx_t *k, const kbdd_ipc_message_t *req,
     k->led_fail = 0;
     k->led_next_ms = kbdd_now_ms() + 40;
     k->led_hold = (flags & KBDD_LED_FLAG_HOLD) ? 1 : 0;
+    k->config_stride = stride;
+    if (kbdd_save_config(k) != 0) {
+        return kbdd_reply_text(resp, "error: LED sent but configuration could not be saved");
+    }
     return kbdd_reply_text(resp, k->led_hold
         ? "ok: LED frame sent, streaming every 40 ms (kbctl led release to stop)"
         : "ok: LED frame sent once");
@@ -334,6 +537,11 @@ static int kbdd_handle_effect(kbdd_ctx_t *k, const kbdd_ipc_message_t *req,
     rc = kbdd_dev_set_effect(&io, req->payload[0], &prof);
     if (rc != KBDD_DEV_OK) {
         return kbdd_reply_text(resp, kbdd_dev_err(rc));
+    }
+    k->config_mode = KBDD_CONFIG_EFFECT;
+    k->config_effect = req->payload[0];
+    if (kbdd_save_config(k) != 0) {
+        return kbdd_reply_text(resp, "error: effect set but configuration could not be saved");
     }
     snprintf(buf, sizeof(buf), "ok: effect %s (%u) set on profile %u, verified by read-back",
              kbc_led_effect_name(req->payload[0]), (unsigned)req->payload[0], (unsigned)prof);
@@ -374,6 +582,7 @@ static int kbdd_handle_field(kbdd_ctx_t *k, const kbdd_ipc_message_t *req,
     }
     if (field == KBC_FIELD_BRIGHTNESS) {
         k->led_brightness = req->payload[1];
+        k->config_brightness = req->payload[1];
         if (k->led_active) {
             memcpy(k->led_frame, k->led_base_frame, sizeof(k->led_frame));
             if (kbc_led_frame_apply_brightness(k->led_frame, k->led_stride,
@@ -385,10 +594,115 @@ static int kbdd_handle_field(kbdd_ctx_t *k, const kbdd_ipc_message_t *req,
             k->led_next_ms = kbdd_now_ms() + 40;
             k->led_hold = resume_led;
         }
+    } else if (field == KBC_FIELD_SPEED) {
+        k->config_speed[k->config_effect] = req->payload[1];
+    } else if (field == KBC_FIELD_MODE) {
+        k->config_mode = KBDD_CONFIG_EFFECT;
+        k->config_effect = req->payload[1];
+    }
+    if (kbdd_save_config(k) != 0) {
+        return kbdd_reply_text(resp, "error: profile set but configuration could not be saved");
     }
     snprintf(buf, sizeof(buf), "ok: %s set to %u on profile %u, verified by read-back",
              names[field], (unsigned)req->payload[1], (unsigned)prof);
     return kbdd_reply_text(resp, buf);
+}
+
+static int kbdd_restore_config(kbdd_ctx_t *k)
+{
+    const kbdd_hid_device_t *dev;
+    kbdd_dev_io_t io;
+    size_t matrix, stride, count, i;
+    int rc;
+
+    if (k == NULL || k->config_mode == KBDD_CONFIG_NONE) return 0;
+    dev = kbdd_control_dev(k);
+    if (dev == NULL) return 0;
+    kbdd_dev_io_init_hidraw(&io, dev);
+    matrix = dev->model->matrix_size;
+
+    if (k->allow_profile_write) {
+        rc = kbdd_dev_set_field(&io, KBC_FIELD_BRIGHTNESS,
+                                k->config_brightness, NULL);
+        if (rc != KBDD_DEV_OK) {
+            fprintf(stderr, "kbdd: could not restore brightness (%d)\n", rc);
+            return -1;
+        }
+        if (k->config_mode == KBDD_CONFIG_EFFECT) {
+            rc = kbdd_dev_set_field(&io, KBC_FIELD_MODE,
+                                    k->config_effect, NULL);
+            if (rc == KBDD_DEV_OK) {
+                rc = kbdd_dev_set_field(&io, KBC_FIELD_SPEED,
+                                        k->config_speed[k->config_effect], NULL);
+            }
+            if (rc != KBDD_DEV_OK) {
+                fprintf(stderr, "kbdd: could not restore effect (%d)\n", rc);
+                return -1;
+            }
+        }
+    }
+    if (k->config_mode == KBDD_CONFIG_EFFECT) {
+        k->led_hold = 0;
+        k->led_active = 0;
+        return 0;
+    }
+    if (!k->allow_led) return 0;
+
+    stride = k->config_stride != 0 ? k->config_stride : matrix;
+    count = matrix < stride ? matrix : stride;
+    if (kbc_led_frame_page_count(stride) == 0) return -1;
+    memset(k->led_base_frame, 0, sizeof(k->led_base_frame));
+    if (k->config_mode == KBDD_CONFIG_SOLID) {
+        kbc_led_frame_fill(k->led_base_frame, stride, count,
+                           k->config_solid[0], k->config_solid[1],
+                           k->config_solid[2]);
+    } else {
+        for (i = 0; i < count; i++) {
+            kbc_led_frame_set(k->led_base_frame, stride, i,
+                              k->config_positions[i][0],
+                              k->config_positions[i][1],
+                              k->config_positions[i][2]);
+        }
+    }
+    memcpy(k->led_frame, k->led_base_frame, sizeof(k->led_frame));
+    if (kbc_led_frame_apply_brightness(k->led_frame, stride,
+                                       k->config_brightness) != KBC_OK ||
+        kbdd_dev_send_frame(&io, k->led_frame, stride) != KBDD_DEV_OK) {
+        fprintf(stderr, "kbdd: could not restore host LED configuration\n");
+        k->led_hold = 0;
+        k->led_active = 0;
+        return -1;
+    }
+    k->led_brightness = k->config_brightness;
+    k->led_stride = stride;
+    k->led_active = 1;
+    k->led_hold = 1;
+    k->led_next_ms = kbdd_now_ms() + 40;
+    return 0;
+}
+
+static void kbdd_restore_tick(kbdd_ctx_t *k)
+{
+    int rc;
+
+    if (k == NULL || !k->restore_pending ||
+        kbdd_now_ms() < k->restore_next_ms) {
+        return;
+    }
+    rc = kbdd_restore_config(k);
+    if (rc == 0) {
+        k->restore_pending = 0;
+        fprintf(stderr, "kbdd: restored saved LED configuration\n");
+        return;
+    }
+    k->restore_attempts++;
+    if (k->restore_attempts >= 10) {
+        k->restore_pending = 0;
+        fprintf(stderr, "kbdd: could not restore saved LED configuration after %u attempts\n",
+                k->restore_attempts);
+        return;
+    }
+    k->restore_next_ms = kbdd_now_ms() + 500;
 }
 
 static void kbdd_led_tick(kbdd_ctx_t *k)
@@ -642,11 +956,21 @@ int kbdd_run(int argc, char **argv)
     kctx.led_brightness = KBC_BRIGHTNESS_RAW_MAX;
     kctx.devices = devices;
     kctx.count = device_count;
+    kbdd_config_defaults(&kctx);
+    if (kbdd_load_config(&kctx) != 0) {
+        fprintf(stderr, "kbdd: invalid configuration; using defaults\n");
+        kbdd_config_defaults(&kctx);
+    }
+    kctx.led_brightness = kctx.config_brightness;
     {
         const char *want_led = getenv("KBDD_ENABLE_LED");
         const char *want_pw = getenv("KBDD_ENABLE_PROFILE_WRITE");
         kctx.allow_led = (want_led != NULL && strcmp(want_led, "1") == 0);
         kctx.allow_profile_write = (want_pw != NULL && strcmp(want_pw, "1") == 0);
+    }
+    if (kctx.count != 0) {
+        kctx.restore_pending = 1;
+        kctx.restore_next_ms = kbdd_now_ms() + 300;
     }
 
     /* main loop */
@@ -664,6 +988,7 @@ int kbdd_run(int argc, char **argv)
             (void)kbdd_refresh_devices(&kctx);
             next_device_scan_ms = kbdd_now_ms() + 500;
         }
+        kbdd_restore_tick(&kctx);
         kbdd_led_tick(&kctx);
 
         /* read input reports from devices (nonblocking) */

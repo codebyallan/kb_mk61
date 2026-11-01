@@ -35,6 +35,8 @@ target keyboard.
 - LED color, position, sweep, brightness, speed, and built-in effect commands.
   The `led brightness` value also scales host-driven solid colors, which are
   sent as direct RGB frames instead of using the keyboard's built-in effect.
+- Per-key LED colors by name (`led key w,a,s,d FF0000`, groups like `wasd`/`numbers`)
+  using the SK61L/MK61L matrix map confirmed on hardware.
 - Host-computed LED animations (`breath`, `cycle`, `rainbow`) streamed at 25 fps.
 - Optional virtual keyboard input through `uinput`.
 - Unix-socket IPC between `kbctl` and `kbdd`.
@@ -201,6 +203,9 @@ kbctl led solid FF0000
 kbctl led clear
 kbctl led pos 12 00FF00
 kbctl led pos 24 FF0000
+kbctl led key w,a,s,d FF0000
+kbctl led key esc,numbers 00AAFF
+kbctl led keys
 kbctl led off
 kbctl led sweep --delay 100 --color 0000FF
 kbctl led anim breath --color FF0000 --period 3000
@@ -217,7 +222,17 @@ kbctl led speed 50
 - `led clear` clears the host-controlled frame.
 - `led pos <n> <RRGGBB>` changes one zero-based position while preserving
   other colors, allowing a multicolor custom layout.
-- `led sweep` lights positions sequentially to map physical keys. Use
+- `led key <keys> <RRGGBB>` colors keys by name instead of matrix position. `<keys>`
+  is a comma-separated list of key names and/or groups (`wasd`, `numbers`,
+  `letters`, `mods`, `all`); other keys keep their colors. Names are
+  case-insensitive and have aliases (`escape`, `-`, `win`...); ambiguous names
+  (`shift`, `ctrl`, `alt`) are rejected, use `lshift`/`rshift` etc. It is a
+  convenience over `led pos`, so the same persistence rules apply.
+- `led keys` lists the 61 key names with their matrix positions (offline).
+  The matrix index is `column * 5 + row`; gaps (8, 19, 24, 34, 39, 44, 49, 62,
+  63) have no key, because wide keys occupy more than one column.
+- `led sweep` lights positions sequentially to map physical keys (it now prints
+  the key name next to each position). Use
   `--delay MS`, `--color RRGGBB`, and `--from N`.
 - `led anim <breath|cycle|rainbow>` runs an animation computed by `kbdd` and
   streamed as frames at 25 fps (every 40 ms), independent of the key map:

@@ -16,7 +16,7 @@
 #include "kbcore.h"
 #include "kbipc.h"
 
-#define KBCTL_VERSION "0.1.0"
+#define KBCTL_VERSION "0.3.0"
 #define KBCTL_MAX_FILE (4 * 1024 * 1024)
 
 static void usage(FILE *f)
@@ -40,6 +40,8 @@ static void usage(FILE *f)
     fputs("  led clear [opts]              Clear all customized colors\n", f);
     fputs("  led sweep [opts]              Light positions one by one to map keys\n", f);
     fputs("  led anim <breath|cycle|rainbow> [opts]  Animate colors from the computer (25 fps)\n", f);
+    fputs("  led key <keys> <RRGGBB>       Color keys by name: w,a,s,d | wasd | esc,numbers (see: led keys)\n", f);
+    fputs("  led keys                      List key names and matrix positions (offline)\n", f);
     fputs("  led release                   Stop streaming frames\n", f);
     fputs("  led effects                   List the keyboard built-in effects (offline)\n", f);
     fputs("  led effect <name|index>       Set the active profile effect (needs KBDD_ENABLE_PROFILE_WRITE=1)\n", f);
@@ -124,6 +126,10 @@ static void usage_led(FILE *f, const char *subcommand)
               "default white). Brightness scales it. The selected animation is saved and restored after reconnect;\n"
               "use 'led clear' to remove the saved visual configuration.\n"
               "Requires KBDD_ENABLE_LED=1.\n", f);
+    } else if (strcmp(subcommand, "key") == 0) {
+        fputs("Usage: kbctl led key <k1[,k2,...]> <RRGGBB> [--stride N]\n\n"
+              "Set the color of keys by name or group (wasd, numbers, letters, mods, all). Other keys keep\n"
+              "their colors. Names are case-insensitive; 'kbctl led keys' lists them. Needs KBDD_ENABLE_LED=1.\n", f);
     } else if (strcmp(subcommand, "sweep") == 0) {
         fputs("Usage: kbctl led sweep [--delay MS] [--color RRGGBB] [--from N]\n\n"
               "Light one position at a time to map matrix positions. Press Ctrl+C to stop.\n", f);
@@ -832,6 +838,48 @@ static int cmd_led(int argc, char **argv)
         free(resp);
         return perr;
     }
+    if (strcmp(sub, "keys") == 0) {
+        size_t i;
+        for (i = 0; i < KBC_KEY_POSITIONS; i++) {
+            if (kbc_key_name(i) != NULL) printf("%2zu  %s\n", i, kbc_key_name(i));
+        }
+        return 0;
+    }
+    if (strcmp(sub, "key") == 0) {
+        int pos[KBC_KEY_POSITIONS];
+        size_t n = 0, i, j;
+        uint8_t r, g, b;
+        char spec[256], *tok, *save = NULL;
+        if (argc < 5 || parse_rgb(argv[4], &r, &g, &b) != 0 || strlen(argv[3]) >= sizeof(spec)) {
+            fprintf(stderr, "kbctl: led key <k1[,k2,...]> <RRGGBB>  (see: kbctl led keys)\n");
+            return 2;
+        }
+        if (led_parse_opts(argc, argv, 5, &o) != 0) { usage(stderr); return 2; }
+        snprintf(spec, sizeof(spec), "%s", argv[3]);
+        for (tok = strtok_r(spec, ",", &save); tok != NULL; tok = strtok_r(NULL, ",", &save)) {
+            int tmp[KBC_KEY_POSITIONS];
+            size_t m = kbc_key_group(tok, tmp, KBC_KEY_POSITIONS);
+            int p = kbc_key_position(tok);
+            if (m == 0 && p >= 0) { tmp[0] = p; m = 1; }
+            if (m == 0) {
+                fprintf(stderr, "kbctl: unknown key '%s' (see: kbctl led keys)\n", tok);
+                return 2;
+            }
+            for (j = 0; j < m; j++) {
+                int dup = 0;
+                for (i = 0; i < n; i++) if (pos[i] == tmp[j]) dup = 1;
+                if (!dup && n < KBC_KEY_POSITIONS) pos[n++] = tmp[j];
+            }
+        }
+        for (i = 0; i < n; i++) {
+            rc = led_call(KBDD_LED_FLAG_HOLD, (unsigned)o.stride, KBDD_LED_MODE_POS,
+                          (unsigned)pos[i], r, g, b, msg, sizeof(msg));
+            if (rc < 0) return 1;
+            if (rc == 1) { fprintf(stderr, "%s\n", msg); return 1; }
+        }
+        printf("ok: %zu key(s) set\n", n);
+        return 0;
+    }
     if (strcmp(sub, "sweep") == 0) {
         unsigned long i;
         if (led_parse_opts(argc, argv, 3, &o) != 0) { usage(stderr); return 2; }
@@ -846,7 +894,10 @@ static int cmd_led(int argc, char **argv)
                 fprintf(stderr, "%s\n", msg);
                 return 1;
             }
-            printf("posicao %lu\n", i);
+            {
+                const char *kn = kbc_key_name(i);
+                printf("posicao %lu%s%s\n", i, kn ? "  " : "", kn ? kn : "");
+            }
             fflush(stdout);
             sleep_ms(o.delay);
         }

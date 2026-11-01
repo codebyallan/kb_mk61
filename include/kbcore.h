@@ -24,9 +24,9 @@ extern "C" {
 #endif
 
 #define KBCORE_VERSION_MAJOR 0
-#define KBCORE_VERSION_MINOR 1
+#define KBCORE_VERSION_MINOR 3
 #define KBCORE_VERSION_PATCH 0
-#define KBCORE_VERSION_STRING "0.1.0"
+#define KBCORE_VERSION_STRING "0.3.0"
 
 /* ------------------------------------------------------------------ */
 /* Opaque handles.  Definitions live in src/core and are private.       */
@@ -351,6 +351,17 @@ KBCORE_API kbc_status kbc_profile_block_set_mode(const uint8_t *block, size_t bl
 #define KBC_LED_BRIGHTNESS_MIN  0
 #define KBC_LED_BRIGHTNESS_MAX  5
 KBCORE_API const char *kbc_led_effect_name(uint8_t mode);
+
+/* MK61L/SK61L key names <-> matrix positions (index = column * 5 + row).
+ * Names are lowercase: esc tab caps lshift rshift lctrl rctrl lalt ralt lwin menu fn
+ * space enter backspace backslash, 1..0 a..z, minus equals lbracket rbracket
+ * semicolon quote comma period slash; many aliases ("-", "escape", "win"...) and
+ * case-insensitive. Ambiguous names (shift, ctrl, alt) return -1. */
+#define KBC_KEY_POSITIONS 70
+KBCORE_API int kbc_key_position(const char *name);        /* -1 if unknown */
+KBCORE_API const char *kbc_key_name(size_t pos);          /* NULL: no key at that position */
+/* Groups: wasd, numbers, letters, mods, all. Returns how many positions were written. */
+KBCORE_API size_t kbc_key_group(const char *group, int *out, size_t max);
 
 /* Host-computed animations (streamed as 0x07 frames at 25 fps by kbdd).
  * Pure functions: no I/O. Colour planes use the same stride layout as frames. */

@@ -1120,6 +1120,47 @@ static void test_led_anim(void)
                               0, 0, 0, f, stride, count) == KBC_OK);
 }
 
+static void test_keymap(void)
+{
+    int tmp[KBC_KEY_POSITIONS], pos[KBC_KEY_POSITIONS];
+    size_t i, n, count = 0;
+
+    /* positions confirmed on hardware (kbctl led sweep) */
+    CHECK(kbc_key_position("esc") == 0 && kbc_key_position("tab") == 1);
+    CHECK(kbc_key_position("w") == 11 && kbc_key_position("a") == 7);
+    CHECK(kbc_key_position("s") == 12 && kbc_key_position("d") == 17);
+    CHECK(kbc_key_position("space") == 29 && kbc_key_position("enter") == 67);
+    CHECK(kbc_key_position("fn") == 69 && kbc_key_position("menu") == 59);
+    CHECK(kbc_key_position("lshift") == 3 && kbc_key_position("rshift") == 68);
+    CHECK(kbc_key_position("0") == 50 && kbc_key_position("1") == 5);
+    CHECK(kbc_key_position("backspace") == 65 && kbc_key_position("backslash") == 66);
+
+    /* case-insensitive, aliases, ambiguity */
+    CHECK(kbc_key_position("W") == 11 && kbc_key_position("ESC") == 0);
+    CHECK(kbc_key_position("escape") == 0 && kbc_key_position("-") == 55 && kbc_key_position("win") == 9);
+    CHECK(kbc_key_position("shift") == -1 && kbc_key_position("ctrl") == -1 && kbc_key_position("alt") == -1);
+    CHECK(kbc_key_position("") == -1 && kbc_key_position(NULL) == -1 && kbc_key_position("nope") == -1);
+
+    /* 61 keys, each name round-trips, gaps have no name */
+    for (i = 0; i < KBC_KEY_POSITIONS; i++) {
+        const char *nm = kbc_key_name(i);
+        if (nm != NULL) { count++; CHECK(kbc_key_position(nm) == (int)i); }
+    }
+    CHECK(count == 61);
+    CHECK(kbc_key_name(8) == NULL && kbc_key_name(62) == NULL && kbc_key_name(63) == NULL);
+    CHECK(kbc_key_name(70) == NULL && kbc_key_name(9999) == NULL);
+
+    /* groups */
+    n = kbc_key_group("wasd", tmp, KBC_KEY_POSITIONS);
+    CHECK(n == 4 && tmp[0] == 11 && tmp[1] == 7 && tmp[2] == 12 && tmp[3] == 17);
+    CHECK(kbc_key_group("numbers", tmp, KBC_KEY_POSITIONS) == 10);
+    CHECK(kbc_key_group("letters", tmp, KBC_KEY_POSITIONS) == 26);
+    CHECK(kbc_key_group("all", pos, KBC_KEY_POSITIONS) == 61);
+    CHECK(kbc_key_group("mods", tmp, KBC_KEY_POSITIONS) == 9);
+    CHECK(kbc_key_group("nope", tmp, KBC_KEY_POSITIONS) == 0);
+    CHECK(kbc_key_group("wasd", tmp, 2) == 2);                 /* respects max */
+}
+
 int main(void)
 {
     test_tv_f01(); test_tv_f02(); test_tv_f03(); test_tv_f04();
@@ -1148,6 +1189,7 @@ int main(void)
     test_led_frame();
     test_led_frame_brightness();
     test_read_requests();
+    test_keymap();
     test_led_anim();
     test_select_profile_builder();
     test_led_effect_names();

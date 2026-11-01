@@ -1,5 +1,5 @@
 Name:           mk61
-Version:        0.2.1
+Version:        0.3.0
 Release:        1%{?dist}
 Summary:        Clean-room keyboard stack for Linux (library, daemon and CLI)
 License:        GPL-2.0-only
@@ -60,5 +60,8 @@ fi
 %config(noreplace) %{_sysconfdir}/systemd/user/kbdd.service.d/led.conf
 
 %changelog
+* Sun Nov 01 2026 mk61 maintainers - 0.3.0-1
+- Add per-key LED color commands and MK61L/SK61L key mapping
+
 * Fri Oct 30 2026 mk61 maintainers - 0.1.0-1
 - Initial package (CLI/daemon only, no GUI)

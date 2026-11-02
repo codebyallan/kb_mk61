@@ -26,7 +26,6 @@ static void usage(FILE *f)
     fputs("  list                          List devices known to kbdd\n", f);
     fputs("  status                        Show daemon status\n", f);
     fputs("  read-profile [profile]        Read a profile (profile 1-4)\n", f);
-    fputs("  write-profile <profile> <file> Write a profile file (profile 1-4)\n", f);
     fputs("  restore-profile <profile> <file> Restore a 264-byte profile backup (profile 1-4)\n", f);
     fputs("  read-config                   Read daemon configuration summary\n", f);
     fputs("  enable-notifications          Enable input notifications\n", f);
@@ -68,9 +67,6 @@ static void usage_command(FILE *f, const char *command)
         fputs("Usage: kbctl status\n\nShow daemon status, connected devices, and enabled capabilities.\n", f);
     } else if (strcmp(command, "read-profile") == 0) {
         fputs("Usage: kbctl read-profile [profile]\n\nRead a hardware profile (1-4). With no profile, read profile 1.\n", f);
-    } else if (strcmp(command, "write-profile") == 0) {
-        fputs("Usage: kbctl write-profile <profile> <file>\n\nWrite a 264-byte profile file to hardware profile 1-4. Profile writes require\n"
-              "KBDD_ENABLE_PROFILE_WRITE=1 and are backed up by kbctl first.\n", f);
     } else if (strcmp(command, "restore-profile") == 0) {
         fputs("Usage: kbctl restore-profile <profile> <file>\n\nRestore a 264-byte profile backup to hardware profile 1-4. The block is verified by read-back and rolled back on failure. Requires\n"
               "KBDD_ENABLE_PROFILE_WRITE=1.\n", f);
@@ -1236,54 +1232,6 @@ int main(int argc, char **argv)
         } else {
             perr = print_reply(resp, rlen);
         }
-        free(resp);
-        return perr;
-    }
-
-    if (strcmp(cmd, "write-profile") == 0) {
-        if (argc != 4) {
-            usage(stderr);
-            return 2;
-        }
-        long idx = 0;
-        if (parse_index(argv[2], &idx) != 0) {
-            fprintf(stderr, "kbctl: invalid profile (expected 1-4)\n");
-            return 2;
-        }
-        uint8_t *filebuf = NULL;
-        size_t filelen = 0;
-        if (read_file(argv[3], &filebuf, &filelen) != 0) {
-            fprintf(stderr, "kbctl: cannot read '%s': %s\n", argv[3], strerror(errno));
-            return 1;
-        }
-
-        size_t plen = 1 + filelen;
-        if (plen > KBDD_IPC_MAX_PAYLOAD) {
-            fprintf(stderr, "kbctl: profile file too large\n");
-            free(filebuf);
-            return 1;
-        }
-        uint8_t *payload = malloc(plen > 0 ? plen : 1);
-        if (payload == NULL) {
-            fprintf(stderr, "kbctl: out of memory\n");
-            free(filebuf);
-            return 1;
-        }
-        payload[0] = (uint8_t)idx;
-        if (filelen > 0) {
-            memcpy(payload + 1, filebuf, filelen);
-        }
-        free(filebuf);
-
-        uint8_t *resp = NULL;
-        uint32_t rlen = 0;
-        int rc = ipc_request(KBDD_IPC_OP_WRITE_PROFILE, payload, (uint32_t)plen, &resp, &rlen);
-        free(payload);
-        if (rc != 0) {
-            free(resp);
-            return 1;
-        }
-        int perr = print_reply(resp, rlen);
         free(resp);
         return perr;
     }

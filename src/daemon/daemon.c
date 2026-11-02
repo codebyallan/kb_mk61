@@ -1121,9 +1121,6 @@ static int kbdd_ipc_handle(const kbdd_ipc_message_t *req, kbdd_ipc_message_t *re
             }
             return kbdd_reply_text(resp, buf);
         }
-        case KBDD_IPC_OP_SAVE_PROFILE:
-            return kbdd_reply_text(resp,
-                "error: write-profile not implemented (disabled until hardware validation)");
         case KBDD_IPC_OP_STATUS: {
             char buf[96];
             snprintf(buf, sizeof(buf), "kbdd 0.4.0: running, %zu hid interface(s)",

@@ -262,6 +262,31 @@ static void test_set_effect_rollback(void)
     CHECK(k.writes[1][11] == 0);                          /* rollback restores old effect */
 }
 
+static void test_restore_profile(void)
+{
+    struct kb k; kbdd_dev_io_t io; uint8_t block[264]; uint8_t original[264];
+
+    kb_init(&k, &io);
+    memcpy(original, k.block, sizeof(original));
+    memcpy(block, k.block, sizeof(block));
+    block[12] = 7;
+    CHECK(kbdd_dev_restore_profile(&io, 3, block) == KBDD_DEV_OK);
+    CHECK(k.nwrites == 1 && k.block[12] == 7);
+
+    kb_init(&k, &io);
+    memcpy(block, k.block, sizeof(block));
+    block[2] = 2;
+    CHECK(kbdd_dev_restore_profile(&io, 3, block) == KBDD_DEV_EPROTO);
+    CHECK(k.nwrites == 0);
+
+    kb_init(&k, &io);
+    memcpy(block, k.block, sizeof(block));
+    block[12] = 8;
+    k.ignore_write = 1;
+    CHECK(kbdd_dev_restore_profile(&io, 3, block) == KBDD_DEV_EVERIFY);
+    CHECK(k.nwrites == 2 && memcmp(k.block, original, sizeof(original)) == 0);
+}
+
 static void test_set_field(void)
 {
     struct kb k; kbdd_dev_io_t io; uint8_t orig[264]; size_t i, changed;
@@ -412,6 +437,7 @@ int main(void)
     test_set_effect_ok();
     test_set_effect_rejects();
     test_set_effect_rollback();
+    test_restore_profile();
     test_query_active();
     test_query_block();
     test_query_allowlist();

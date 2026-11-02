@@ -170,6 +170,7 @@ Profile numbers use the hardware numbering `1` through `4`:
 ```sh
 kbctl read-profile [profile]
 kbctl write-profile <profile> <file>
+kbctl restore-profile <profile> <file>
 kbctl dump-block <1-4> [file]
 kbctl diff-block <a.bin> <b.bin>
 kbctl profile <1-4>
@@ -187,6 +188,10 @@ kbctl profile <1-4>
   Profile numbers are consistently `1..4`, matching the keyboard protocol.
 - `write-profile` writes a profile file and requires
   `KBDD_ENABLE_PROFILE_WRITE=1`. The CLI backs up the active profile first.
+- `restore-profile` restores a 264-byte file created by `dump-block`, verifies
+  the complete block by reading it back, and rolls back to the previous block
+  if verification fails. It changes RAM only and requires
+  `KBDD_ENABLE_PROFILE_WRITE=1`.
 - `dump-block` reads and displays a raw 264-byte profile parameter block,
   optionally saving it to a file.
 - `diff-block` compares two saved 264-byte blocks and reports changed offsets.

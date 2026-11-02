@@ -216,6 +216,48 @@ int kbdd_dev_set_colors(const kbdd_dev_io_t *io, const kbdd_color_edit_t *ce, ui
     return edit_profile(io, 0, 0, ce, profile_out);
 }
 
+int kbdd_dev_restore_profile(const kbdd_dev_io_t *io, uint8_t profile,
+                             const uint8_t block[264])
+{
+    uint8_t current[264], write[264], check[264], undo[264];
+    int rc;
+
+    if (io == NULL || block == NULL || profile < 1 || profile > 4) {
+        return KBDD_DEV_EINVAL;
+    }
+    if (block[0] != KBC_FEATURE_REPORT_ID ||
+        block[1] != KBC_OP_READ_PROFILE_BLOCK ||
+        block[2] != profile ||
+        kbc_profile_block_to_write(block, sizeof(write), profile,
+                                   write, sizeof(write)) != KBC_OK) {
+        return KBDD_DEV_EPROTO;
+    }
+
+    rc = kbdd_dev_query(io, KBC_OP_READ_PROFILE_BLOCK, profile, current);
+    if (rc != KBDD_DEV_OK) return rc;
+    if (io->set_feature(io->ctx, write, sizeof(write)) < 0) {
+        return KBDD_DEV_EIO;
+    }
+    io->sleep_ms(io->ctx, 300u);
+
+    rc = kbdd_dev_query(io, KBC_OP_READ_PROFILE_BLOCK, profile, check);
+    if (rc == KBDD_DEV_OK &&
+        memcmp(check + 3, block + 3, sizeof(check) - 3) == 0) {
+        return KBDD_DEV_OK;
+    }
+
+    if (kbc_profile_block_to_write(current, sizeof(current), profile,
+                                   undo, sizeof(undo)) == KBC_OK &&
+        io->set_feature(io->ctx, undo, sizeof(undo)) >= 0) {
+        io->sleep_ms(io->ctx, 300u);
+        if (kbdd_dev_query(io, KBC_OP_READ_PROFILE_BLOCK, profile, check) == KBDD_DEV_OK &&
+            memcmp(check + 3, current + 3, sizeof(check) - 3) == 0) {
+            return KBDD_DEV_EVERIFY;
+        }
+    }
+    return rc == KBDD_DEV_EIO ? KBDD_DEV_EIO : KBDD_DEV_EVERIFY;
+}
+
 int kbdd_dev_set_effect(const kbdd_dev_io_t *io, uint8_t mode, uint8_t *profile_out)
 {
     return kbdd_dev_set_field(io, KBC_FIELD_MODE, mode, profile_out);

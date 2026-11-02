@@ -1122,8 +1122,6 @@ static int kbdd_ipc_handle(const kbdd_ipc_message_t *req, kbdd_ipc_message_t *re
             return kbdd_reply_text(resp, buf);
         }
         case KBDD_IPC_OP_SAVE_PROFILE:
-            /* Disabled on purpose: the protocol is not yet validated on real
-             * hardware (spec/QUESTIONS.md Q1, Q5, Q8, Q10). Nothing is sent. */
             return kbdd_reply_text(resp,
                 "error: write-profile not implemented (disabled until hardware validation)");
         case KBDD_IPC_OP_STATUS: {
@@ -1227,6 +1225,37 @@ static int kbdd_ipc_handle(const kbdd_ipc_message_t *req, kbdd_ipc_message_t *re
                 return kbdd_reply_text(resp, kbdd_dev_err(rc));
             }
             return kbdd_reply_bytes(resp, out, sizeof(out));
+        }
+        case KBDD_IPC_OP_RESTORE_PROFILE: {
+            const kbdd_hid_device_t *dev;
+            kbdd_dev_io_t io;
+            uint8_t profile;
+            int rc;
+
+            if (!kctx->allow_profile_write) {
+                return kbdd_reply_text(resp,
+                    "error: profile writes are disabled. Start kbdd with KBDD_ENABLE_PROFILE_WRITE=1");
+            }
+            if (req->payload == NULL || req->payload_len != 265 ||
+                req->payload[0] < 1 || req->payload[0] > 4) {
+                return kbdd_reply_text(resp,
+                    "error: payload must be [profile 1..4, 264-byte read block]");
+            }
+            dev = kbdd_control_dev(kctx);
+            if (dev == NULL) {
+                return kbdd_reply_text(resp, "error: no keyboard control interface available");
+            }
+            profile = req->payload[0];
+            kctx->led_hold = 0;
+            kctx->led_active = 0;
+            kctx->led_anim = 0;
+            kbdd_dev_io_init_hidraw(&io, dev);
+            rc = kbdd_dev_restore_profile(&io, profile, req->payload + 1);
+            if (rc != KBDD_DEV_OK) {
+                return kbdd_reply_dev_err(resp, rc);
+            }
+            return kbdd_reply_text(resp,
+                "ok: profile restored and verified by read-back (RAM only; use 'led save' for the active profile)");
         }
         case KBDD_IPC_OP_LED_SET:
             return kbdd_handle_led(kctx, req, resp);

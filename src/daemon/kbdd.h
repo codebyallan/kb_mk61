@@ -78,6 +78,8 @@ int kbdd_dev_set_colors(const kbdd_dev_io_t *io, const kbdd_color_edit_t *ce, ui
 /* Human-readable detail of the last failed check in kbdd_dev_set_field (empty if none). */
 const char *kbdd_dev_last_diag(void);
 int kbdd_dev_set_field(const kbdd_dev_io_t *io, int field, uint8_t value, uint8_t *profile_out);
+int kbdd_dev_restore_profile(const kbdd_dev_io_t *io, uint8_t profile,
+                             const uint8_t block[264]);
 
 /* Switches the active profile (1..4): reads 0x81, sends 0x01, reads 0x81 again to
  * confirm. Already-active profile = no write. On failure tries to go back to the

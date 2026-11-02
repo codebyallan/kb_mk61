@@ -31,6 +31,7 @@
 #define KBDD_IPC_OP_SET_FIELD 13u   /* payload [field(1=effect,2=brightness,3=speed,4=direction,5=report rate), value] */
 #define KBDD_IPC_OP_WATCH 16u       /* subscribe the client to keyboard events */
 #define KBDD_IPC_OP_EVENT 17u       /* unsolicited daemon event: NUL-terminated text */
+#define KBDD_IPC_OP_RESTORE_PROFILE 20u /* payload [profile 1..4, raw 264-byte read block] */
 
 /* LED_SET payload: [flags, stride, mode, pos, r, g, b] */
 #define KBDD_LED_PAYLOAD_SIZE 7u

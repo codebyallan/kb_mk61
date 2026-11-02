@@ -27,6 +27,7 @@ static void usage(FILE *f)
     fputs("  status                        Show daemon status\n", f);
     fputs("  read-profile [profile]        Read a profile (profile 1-4)\n", f);
     fputs("  write-profile <profile> <file> Write a profile file (profile 1-4)\n", f);
+    fputs("  restore-profile <profile> <file> Restore a 264-byte profile backup (profile 1-4)\n", f);
     fputs("  read-config                   Read daemon configuration summary\n", f);
     fputs("  enable-notifications          Enable input notifications\n", f);
     fputs("  watch                         Print keyboard profile/layer/effect events\n", f);
@@ -70,6 +71,9 @@ static void usage_command(FILE *f, const char *command)
     } else if (strcmp(command, "write-profile") == 0) {
         fputs("Usage: kbctl write-profile <profile> <file>\n\nWrite a 264-byte profile file to hardware profile 1-4. Profile writes require\n"
               "KBDD_ENABLE_PROFILE_WRITE=1 and are backed up by kbctl first.\n", f);
+    } else if (strcmp(command, "restore-profile") == 0) {
+        fputs("Usage: kbctl restore-profile <profile> <file>\n\nRestore a 264-byte profile backup to hardware profile 1-4. The block is verified by read-back and rolled back on failure. Requires\n"
+              "KBDD_ENABLE_PROFILE_WRITE=1.\n", f);
     } else if (strcmp(command, "read-config") == 0) {
         fputs("Usage: kbctl read-config\n\nRead the daemon configuration summary.\n", f);
     } else if (strcmp(command, "enable-notifications") == 0) {
@@ -1274,6 +1278,51 @@ int main(int argc, char **argv)
         uint8_t *resp = NULL;
         uint32_t rlen = 0;
         int rc = ipc_request(KBDD_IPC_OP_WRITE_PROFILE, payload, (uint32_t)plen, &resp, &rlen);
+        free(payload);
+        if (rc != 0) {
+            free(resp);
+            return 1;
+        }
+        int perr = print_reply(resp, rlen);
+        free(resp);
+        return perr;
+    }
+
+    if (strcmp(cmd, "restore-profile") == 0) {
+        if (argc != 4) {
+            usage(stderr);
+            return 2;
+        }
+        long profile;
+        uint8_t *filebuf = NULL;
+        size_t filelen = 0;
+        if (parse_index(argv[2], &profile) != 0) {
+            fprintf(stderr, "kbctl: invalid profile (expected 1-4)\n");
+            return 2;
+        }
+        if (read_file(argv[3], &filebuf, &filelen) != 0) {
+            fprintf(stderr, "kbctl: cannot read '%s': %s\n", argv[3], strerror(errno));
+            return 1;
+        }
+        if (filelen != KBC_FEATURE_REPORT_SIZE) {
+            fprintf(stderr, "kbctl: recovery file must contain exactly 264 bytes\n");
+            free(filebuf);
+            return 2;
+        }
+        uint8_t *payload = malloc(1 + filelen);
+        if (payload == NULL) {
+            fprintf(stderr, "kbctl: out of memory\n");
+            free(filebuf);
+            return 1;
+        }
+        payload[0] = (uint8_t)profile;
+        memcpy(payload + 1, filebuf, filelen);
+        free(filebuf);
+
+        uint8_t *resp = NULL;
+        uint32_t rlen = 0;
+        int rc = ipc_request(KBDD_IPC_OP_RESTORE_PROFILE, payload,
+                             (uint32_t)(1 + filelen), &resp, &rlen);
         free(payload);
         if (rc != 0) {
             free(resp);

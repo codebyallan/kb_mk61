@@ -40,4 +40,4 @@ sudo udevadm control --reload-rules 2>/dev/null || true
 systemctl --user daemon-reload 2>/dev/null || true
 sudo systemctl daemon-reload 2>/dev/null || true
 
-echo "Removido. Abra um terminal novo (ou: hash -r)."
+echo "Removed. Open a new terminal (or run: hash -r)."

@@ -6,7 +6,7 @@ cd "$(dirname "$0")"
 
 command -v gcc >/dev/null && command -v make >/dev/null || sudo dnf install -y gcc make
 
-echo "==> limpando instalacoes antigas (todos os prefixos)"
+echo "==> removing old installations (all prefixes)"
 systemctl --user stop kbdd 2>/dev/null || true
 systemctl --user disable kbdd 2>/dev/null || true
 sudo rm -f /usr/local/bin/kbdd /usr/local/bin/kbctl /usr/local/include/kbcore.h \
@@ -17,12 +17,12 @@ sudo rm -f /usr/local/bin/kbdd /usr/local/bin/kbctl /usr/local/include/kbcore.h 
 rm -f ~/.local/bin/kbctl ~/.local/bin/kbdd ~/.config/systemd/user/kbdd.service
 rm -rf ~/.config/systemd/user/kbdd.service.d
 
-echo "==> compilando e testando"
+echo "==> building and testing"
 make clean >/dev/null
 make
 make test
 
-echo "==> instalando em /usr"
+echo "==> installing to /usr"
 sudo make install PREFIX=/usr LIBDIR=/usr/lib64
 sudo udevadm control --reload-rules
 sudo udevadm trigger --subsystem-match=hidraw
@@ -43,13 +43,13 @@ systemctl --user restart kbdd
 echo "==> verificando"
 fail() { echo "FALHOU: $1"; journalctl --user -u kbdd -n 15 --no-pager; exit 1; }
 EXEC=$(systemctl --user show kbdd -p ExecStart --value | sed -n 's/.*path=\([^ ;]*\).*/\1/p')
-[ "$EXEC" = "/usr/bin/kbdd" ] || fail "unit aponta para '$EXEC' (esperado /usr/bin/kbdd)"
+[ "$EXEC" = "/usr/bin/kbdd" ] || fail "unit points to '$EXEC' (expected /usr/bin/kbdd)"
 for _ in $(seq 1 10); do [ -S "${XDG_RUNTIME_DIR:-/run/user/$UID}/kbdd.sock" ] && break; sleep 0.5; done
-systemctl --user is-active --quiet kbdd || fail "kbdd nao esta ativo"
-/usr/bin/kbctl status || fail "kbctl nao conversa com o kbdd"
+systemctl --user is-active --quiet kbdd || fail "kbdd is not active"
+/usr/bin/kbctl status || fail "kbctl cannot communicate with kbdd"
 OUT=$(/usr/bin/kbctl list)
 echo "$OUT"
 case "$OUT" in
-  *"no devices"*) echo "AVISO: nenhum teclado visto. Reconecte o USB e rode: kbctl list" ;;
+  *"no devices"*) echo "WARNING: no keyboard found. Reconnect the USB device and run: kbctl list" ;;
 esac
-echo "PRONTO. Abra um terminal novo (ou rode: hash -r) e teste: kbctl led solid FF0000"
+echo "DONE. Open a new terminal (or run: hash -r) and test: kbctl led solid FF0000"

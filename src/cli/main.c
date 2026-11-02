@@ -787,13 +787,13 @@ static int cmd_led(int argc, char **argv)
 
     if (strcmp(sub, "effects") == 0) {
         unsigned m;
-        printf("indice  efeito\n");
+        printf("index  effect\n");
         for (m = 0; m < KBC_LED_EFFECT_COUNT; m++) {
             printf("%5u   %s%s\n", m, kbc_led_effect_name((uint8_t)m),
                    m == KBC_LED_EFFECT_LIGHTING ? "  (cor fixa)" : "");
         }
         printf("   15   custom\n");
-        printf("velocidade %d..%d, brilho %d..%d\n", KBC_LED_SPEED_MIN,
+        printf("speed %d..%d, brightness %d..%d\n", KBC_LED_SPEED_MIN,
                KBC_LED_SPEED_MAX, KBC_LED_BRIGHTNESS_MIN, KBC_LED_BRIGHTNESS_MAX);
         return 0;
     }
@@ -926,7 +926,7 @@ static int cmd_led(int argc, char **argv)
         unsigned long i;
         if (led_parse_opts(argc, argv, 3, &o) != 0) { usage(stderr); return 2; }
         if (!o.have_color) { o.r = 255; o.g = 255; o.b = 255; }
-        printf("Anote qual tecla acende em cada posicao. Ctrl+C para parar.\n");
+        printf("Note which key lights up at each position. Press Ctrl+C to stop.\n");
         for (i = o.from; i <= 143; i++) {
             rc = led_call(KBDD_LED_FLAG_HOLD, (unsigned)o.stride, KBDD_LED_MODE_POS,
                           (unsigned)i, o.r, o.g, o.b, msg, sizeof(msg));
@@ -938,13 +938,13 @@ static int cmd_led(int argc, char **argv)
             }
             {
                 const char *kn = kbc_key_name(i);
-                printf("posicao %lu%s%s\n", i, kn ? "  " : "", kn ? kn : "");
+                printf("position %lu%s%s\n", i, kn ? "  " : "", kn ? kn : "");
             }
             fflush(stdout);
             sleep_ms(o.delay);
         }
         (void)led_call(0, 0, KBDD_LED_MODE_RELEASE, 0, 0, 0, 0, msg, sizeof(msg));
-        printf("fim do sweep\n");
+        printf("sweep complete\n");
         return 0;
     }
     fprintf(stderr, "kbctl: unknown led subcommand '%s'\n", sub);
@@ -987,14 +987,14 @@ static int cmd_dump_block(int argc, char **argv)
         free(resp);
         return e ? 1 : 1;
     }
-    printf("perfil %lu, 264 bytes (cabecalho 0..7, dados 8..263)\n", prof);
+    printf("profile %lu, 264 bytes (header 0..7, data 8..263)\n", prof);
     hexdump_block(resp, rlen);
     {
         const char *na = kbc_led_effect_name(resp[7]);
         const char *nb = kbc_led_effect_name(resp[11]);
-        printf("campos (efeito/brilho/velocidade confirmados em hardware; [8] inferido):\n"
-               "  A: rate=[4]=%u  efeito=[7]=%u (%s)\n"
-               "  B: efeito=[11]=%u (%s)  brilho=[12]=%u  veloc(wave)=[19]=%u  rate?=[8]=%u\n",
+        printf("fields (effect/brightness/speed confirmed on hardware; [8] inferred):\n"
+               "  A: rate=[4]=%u  effect=[7]=%u (%s)\n"
+               "  B: effect=[11]=%u (%s)  brightness=[12]=%u  speed(wave)=[19]=%u  rate?=[8]=%u\n",
                resp[4], resp[7], na ? na : "?", resp[11], nb ? nb : "?",
                resp[12], resp[19], resp[8]);
     }
@@ -1007,7 +1007,7 @@ static int cmd_dump_block(int argc, char **argv)
             return 1;
         }
         fclose(f);
-        printf("salvo em %s\n", argv[3]);
+        printf("saved to %s\n", argv[3]);
     }
     free(resp);
     return 0;
@@ -1037,7 +1037,7 @@ static int cmd_diff_block(int argc, char **argv)
             diffs++;
         }
     }
-    printf("%zu byte(s) diferente(s)\n", diffs);
+    printf("%zu byte(s) differ\n", diffs);
     return 0;
 }
 

@@ -1,5 +1,5 @@
 Name:           mk61
-Version:        0.3.3
+Version:        0.4.0
 Release:        1%{?dist}
 Summary:        Clean-room keyboard stack for Linux (library, daemon and CLI)
 License:        GPL-2.0-only
@@ -60,6 +60,9 @@ fi
 %config(noreplace) %{_sysconfdir}/systemd/user/kbdd.service.d/led.conf
 
 %changelog
+* Mon Nov 02 2026 mk61 maintainers - 0.4.0-1
+- Add report-rate and animation-direction controls.
+
 * Sun Nov 01 2026 mk61 maintainers - 0.3.3-1
 - Add safe profile LED block persistence through kbctl.
 

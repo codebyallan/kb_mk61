@@ -16,7 +16,7 @@
 #include "kbcore.h"
 #include "kbipc.h"
 
-#define KBCTL_VERSION "0.3.3"
+#define KBCTL_VERSION "0.4.0"
 #define KBCTL_MAX_FILE (4 * 1024 * 1024)
 
 static void usage(FILE *f)

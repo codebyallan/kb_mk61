@@ -24,9 +24,9 @@ extern "C" {
 #endif
 
 #define KBCORE_VERSION_MAJOR 0
-#define KBCORE_VERSION_MINOR 3
-#define KBCORE_VERSION_PATCH 3
-#define KBCORE_VERSION_STRING "0.3.3"
+#define KBCORE_VERSION_MINOR 4
+#define KBCORE_VERSION_PATCH 0
+#define KBCORE_VERSION_STRING "0.4.0"
 
 /* ------------------------------------------------------------------ */
 /* Opaque handles.  Definitions live in src/core and are private.       */

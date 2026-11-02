@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# Instala/atualiza kbdd + kbctl e deixa tudo funcionando.
-# Rode na raiz do projeto: ./install.sh   (sem LED: ENABLE_LED=0 ./install.sh)
+# Install or update kbdd and kbctl and leave everything ready to use.
+# Run from the project root: ./install.sh   (without LED: ENABLE_LED=0 ./install.sh)
 set -euo pipefail
 cd "$(dirname "$0")"
 
@@ -32,6 +32,8 @@ if [ "${ENABLE_LED:-1}" = "1" ]; then
   printf '[Service]\nEnvironment=KBDD_ENABLE_LED=1\nEnvironment=KBDD_ENABLE_PROFILE_WRITE=1\n' > ~/.config/systemd/user/kbdd.service.d/led.conf
 else
   mkdir -p ~/.config/kbdd
+  rm -f ~/.config/systemd/user/kbdd.service.d/led.conf
+  rmdir ~/.config/systemd/user/kbdd.service.d 2>/dev/null || true
 fi
 
 systemctl --user daemon-reload

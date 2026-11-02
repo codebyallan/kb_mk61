@@ -41,10 +41,15 @@ static void test_tv_f02(void)
     uint8_t buf[KBC_FEATURE_REPORT_SIZE];
     kbc_feature_report rep;
     zero_buf(buf, sizeof buf);
-    buf[0] = 0x07; buf[1] = 0x01; buf[2] = 0xFF;
+    buf[0] = 0x07; buf[1] = 0x01; buf[2] = 0x01;
     CHECK(kbc_validate_feature_report(buf, sizeof buf) == KBC_OK);
     CHECK(kbc_parse_feature_report(buf, sizeof buf, &rep) == KBC_OK);
-    CHECK(rep.param0 == 0xFF);
+    CHECK(rep.param0 == 1);
+    /* factory reset value must never be valid for profile select */
+    zero_buf(buf, sizeof buf);
+    buf[0] = 0x07; buf[1] = 0x01; buf[2] = 0xFF;
+    CHECK(kbc_validate_feature_report(buf, sizeof buf) != KBC_OK);
+    CHECK(kbc_parse_feature_report(buf, sizeof buf, &rep) != KBC_OK);
 }
 
 static void test_tv_f03(void)
@@ -593,8 +598,8 @@ static void test_profile_select_encode(void)
     CHECK(buf[0] == 0x07 && buf[1] == 0x01 && buf[2] == 2);
     CHECK(kbc_profile_encode_select_logical(0, buf, sizeof buf) == KBC_OK);
     CHECK(buf[2] == 1);
-    CHECK(kbc_profile_encode_select(0xFF, buf, sizeof buf) == KBC_OK);
-    CHECK(buf[2] == 0xFF);
+    /* factory reset value must never be encodable for profile select */
+    CHECK(kbc_profile_encode_select(0xFF, buf, sizeof buf) != KBC_OK);
     CHECK(kbc_profile_encode_select(0, buf, sizeof buf) != KBC_OK);
 }
 
@@ -979,6 +984,31 @@ static void test_read_requests(void)
     CHECK(kbc_build_read_request(0x82, 1, NULL, sizeof buf) == KBC_ERR_INVALID_ARGUMENT);
 }
 
+static void test_read_active_profile_decode(void)
+{
+    uint8_t buf[KBC_FEATURE_REPORT_SIZE];
+    uint8_t hw = 0;
+
+    /* reply to 0x81 carries the active profile at byte 2 */
+    zero_buf(buf, sizeof buf);
+    buf[0] = 0x07; buf[1] = 0x81; buf[2] = 0x03;
+    CHECK(kbc_read_active_profile_decode(buf, sizeof buf, &hw) == KBC_OK);
+    CHECK(hw == 3);
+
+    /* reply to 0x82 (block read) is not an active-profile reply */
+    zero_buf(buf, sizeof buf);
+    buf[0] = 0x07; buf[1] = 0x82; buf[2] = 0x01;
+    CHECK(kbc_read_active_profile_decode(buf, sizeof buf, &hw) == KBC_ERR_PROTOCOL);
+
+    /* out-of-range active profile values are rejected */
+    zero_buf(buf, sizeof buf);
+    buf[0] = 0x07; buf[1] = 0x81; buf[2] = 0x00;
+    CHECK(kbc_read_active_profile_decode(buf, sizeof buf, &hw) == KBC_ERR_PROTOCOL);
+    zero_buf(buf, sizeof buf);
+    buf[0] = 0x07; buf[1] = 0x81; buf[2] = 0xFF;
+    CHECK(kbc_read_active_profile_decode(buf, sizeof buf, &hw) == KBC_ERR_PROTOCOL);
+}
+
 static void test_led_effect_names(void)
 {
     CHECK(strcmp(kbc_led_effect_name(0), "wave") == 0);
@@ -1300,6 +1330,7 @@ int main(void)
     test_led_frame();
     test_led_frame_brightness();
     test_read_requests();
+    test_read_active_profile_decode();
     test_effect_colors();
     test_commit_report();
     test_keymap();

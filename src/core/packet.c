@@ -59,7 +59,9 @@ kbc_status kbc_validate_feature_report(const uint8_t *buf, size_t len)
 
         if (op == KBC_OP_SELECT_PROFILE) {
             uint8_t p = buf[2];
-            if (p != 0xFF && (p < 1 || p > 4)) {
+            /* The factory-reset value (0xFF) must never be sent for profile
+             * selection; only hardware profiles 1..4 are valid. */
+            if (p < 1 || p > 4) {
                 return KBC_ERR_PROTOCOL;
             }
         } else if (op == KBC_OP_PROFILE_PARAMS || op == KBC_OP_KEY_MATRIX ||

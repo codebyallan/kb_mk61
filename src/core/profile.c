@@ -315,7 +315,7 @@ static kbc_status write_report(uint8_t opcode, uint8_t param0, uint8_t param1,
 kbc_status kbc_profile_encode_select(uint8_t hw_profile, uint8_t *buf, size_t buf_len)
 {
     uint8_t params[4] = {0,0,0,0};
-    if (hw_profile != 0xFF && (hw_profile < 1 || hw_profile > 4)) {
+    if (hw_profile < 1 || hw_profile > 4) {
         return KBC_ERR_RANGE;
     }
     return write_report(KBC_OP_SELECT_PROFILE, hw_profile, 0, params, NULL, 0, buf, buf_len);
@@ -597,8 +597,9 @@ kbc_status kbc_read_active_profile_decode(const uint8_t *buf, size_t len, uint8_
     if (buf == NULL || hw_profile == NULL) return KBC_ERR_INVALID_ARGUMENT;
     st = kbc_parse_feature_report(buf, len, &rep);
     if (st != KBC_OK) return st;
-    *hw_profile = rep.opcode;
-    if (*hw_profile < 1 || *hw_profile > 4) return KBC_ERR_PROTOCOL;
+    if (rep.opcode != KBC_OP_READ_ACTIVE_PROFILE) return KBC_ERR_PROTOCOL;
+    if (rep.param0 < 1 || rep.param0 > 4) return KBC_ERR_PROTOCOL;
+    *hw_profile = rep.param0;
     return KBC_OK;
 }
 

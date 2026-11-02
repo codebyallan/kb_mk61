@@ -10,7 +10,9 @@ Restart=on-failure
 RestartSec=2
 UMask=0077
 NoNewPrivileges=yes
-# The daemon persists LED mode, brightness, and effect speeds here.
+# uinput (virtual keyboard) is opt-in via KBDD_ENABLE_UINPUT=1 and requires
+# /dev/uinput access (see packaging/udev/60-kbdd.rules). The daemon runs
+# without it by default.
 # %h/.config/kbdd stores the persistent configuration, while %t contains
 # the runtime socket and lock.
 RestrictAddressFamilies=AF_UNIX

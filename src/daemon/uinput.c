@@ -86,6 +86,12 @@ int kbdd_uinput_send_key(kbdd_uinput_t *u, uint16_t code, int value)
     if (u == NULL || u->fd < 0) {
         return -1;
     }
+    if (code > KEY_MAX) {
+        return -1;
+    }
+    if (value != 0 && value != 1 && value != 2) {
+        return -1;
+    }
     struct input_event ev;
     memset(&ev, 0, sizeof(ev));
     ev.type = EV_KEY;

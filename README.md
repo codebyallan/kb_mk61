@@ -315,6 +315,13 @@ environment setting. Virtual keyboard input requires
 `KBDD_ENABLE_UINPUT=1`. These safeguards are intentional while hardware
 support is being validated.
 
+Enabling uinput grants the daemon the ability to inject keystrokes into the
+host, so it is disabled by default and should only be turned on on trusted,
+single-user machines. To use it, grant `/dev/uinput` access (see
+`packaging/udev/60-kbdd.rules` for a dedicated-group or uaccess rule), set
+`KBDD_ENABLE_UINPUT=1` in the daemon environment, and restart `kbdd`. Never
+enable it on shared or multi-user systems.
+
 ## Repository layout
 
 ```text

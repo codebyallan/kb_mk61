@@ -7,7 +7,20 @@ SUBSYSTEM=="hidraw", ATTRS{idVendor}=="2442", ATTRS{idProduct}=="0011", TAG+="ua
 SUBSYSTEM=="hidraw", ATTRS{idVendor}=="2442", ATTRS{idProduct}=="b011", TAG+="uaccess"
 SUBSYSTEM=="hidraw", ATTRS{idVendor}=="2442", ATTRS{idProduct}=="b014", TAG+="uaccess"
 
-# /dev/uinput (key injection) is NOT enabled by default. Uncomment only when
-# using KBDD_ENABLE_UINPUT=1, knowing that any process in the session could
-# inject keystrokes.
+# /dev/uinput (virtual keyboard / keystroke injection) is NOT enabled by
+# default. The feature is opt-in (KBDD_ENABLE_UINPUT=1) and experimental:
+# any process that can open /dev/uinput can inject keystrokes into the host.
+#
+# To enable it safely, pick ONE of:
+#   (a) Dedicated group (recommended): create a group, add only the trusted
+#       user, and grant that group rw access to /dev/uinput:
+#         sudo groupadd -f kbdd-uinput
+#         sudo usermod -aG kbdd-uinput $USER
+#         # then add a rule (uncomment + adapt):
+#         # SUBSYSTEM=="misc", KERNEL=="uinput", GROUP="kbdd-uinput", MODE="0660"
+#   (b) uaccess (convenience, grants the active session user):
+#         SUBSYSTEM=="misc", KERNEL=="uinput", TAG+="uaccess"
+# Uncomment the chosen rule, reload udev, and re-login. Never enable this on
+# shared/multi-user machines.
+#SUBSYSTEM=="misc", KERNEL=="uinput", GROUP="kbdd-uinput", MODE="0660"
 #SUBSYSTEM=="misc", KERNEL=="uinput", TAG+="uaccess"

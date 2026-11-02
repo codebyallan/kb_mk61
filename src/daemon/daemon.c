@@ -1315,6 +1315,9 @@ int kbdd_run(int argc, char **argv)
         uinput = kbdd_uinput_open(NULL);
         if (uinput != NULL) {
             kbdd_uinput_create_keyboard(uinput);
+            fprintf(stderr, "kbdd: uinput virtual keyboard enabled (keystroke injection active)\n");
+        } else {
+            fprintf(stderr, "kbdd: KBDD_ENABLE_UINPUT=1 but /dev/uinput unavailable\n");
         }
     }
 

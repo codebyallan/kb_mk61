@@ -68,6 +68,8 @@ int kbdd_dev_enable_notifications(const kbdd_dev_io_t *io);
  * verification the original block is written back (EVERIFY). */
 int kbdd_dev_set_effect(const kbdd_dev_io_t *io, uint8_t mode, uint8_t *profile_out);
 /* Same flow for one field (kbc_profile_field): effect, brightness or speed. */
+/* Human-readable detail of the last failed check in kbdd_dev_set_field (empty if none). */
+const char *kbdd_dev_last_diag(void);
 int kbdd_dev_set_field(const kbdd_dev_io_t *io, int field, uint8_t value, uint8_t *profile_out);
 
 /* Switches the active profile (1..4): reads 0x81, sends 0x01, reads 0x81 again to

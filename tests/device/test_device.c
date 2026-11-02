@@ -348,8 +348,28 @@ static void test_save_profile(void)
     CHECK(kbdd_dev_save_profile(&io, NULL) == KBDD_DEV_EPROTO && k.nwrites == 0);
 }
 
+static void test_set_field_diag(void)
+{
+    struct kb k; kbdd_dev_io_t io;
+
+    kb_init(&k, &io); k.ignore_write = 1;                 /* firmware ignores the write */
+    CHECK(kbdd_dev_set_field(&io, KBC_FIELD_BRIGHTNESS, 5, NULL) == KBDD_DEV_EVERIFY);
+    CHECK(strstr(kbdd_dev_last_diag(), "@12 want 0x05") != NULL);
+    CHECK(strstr(kbdd_dev_last_diag(), "restored (confirmed)") != NULL);
+    CHECK(strstr(kbdd_dev_last_diag(), "profile 3") != NULL);
+
+    kb_init(&k, &io); k.block[11] = 0x77;                 /* implausible layout */
+    CHECK(kbdd_dev_set_field(&io, KBC_FIELD_BRIGHTNESS, 5, NULL) == KBDD_DEV_EPROTO);
+    CHECK(strstr(kbdd_dev_last_diag(), "effect byte 119") != NULL);
+
+    kb_init(&k, &io);                                     /* success clears the diagnostic */
+    CHECK(kbdd_dev_set_field(&io, KBC_FIELD_BRIGHTNESS, 5, NULL) == KBDD_DEV_OK);
+    CHECK(kbdd_dev_last_diag()[0] == '\0');
+}
+
 int main(void)
 {
+    test_set_field_diag();
     test_save_profile();
     test_switch_profile();
     test_set_field();

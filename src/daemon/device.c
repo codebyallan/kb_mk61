@@ -2,6 +2,7 @@
 
 #include "kbcore.h"
 
+#include <stdio.h>
 #include <string.h>
 #include <time.h>
 
@@ -105,13 +106,40 @@ int kbdd_dev_enable_notifications(const kbdd_dev_io_t *io)
     return KBDD_DEV_OK;
 }
 
+static char g_diag[256];
+
+const char *kbdd_dev_last_diag(void)
+{
+    return g_diag;
+}
+
+/* Appends "@off want 0x.. got 0x.." for the first differences (bytes 3..263). */
+static void diag_append_diffs(const uint8_t *want, const uint8_t *got)
+{
+    size_t i, shown = 0, total = 0, len = strlen(g_diag);
+
+    for (i = 3; i < 264; i++) {
+        if (want[i] == got[i]) continue;
+        total++;
+        if (shown < 6 && len + 40 < sizeof(g_diag)) {
+            len += (size_t)snprintf(g_diag + len, sizeof(g_diag) - len,
+                                    "@%zu want 0x%02x got 0x%02x; ", i, want[i], got[i]);
+            shown++;
+        }
+    }
+    if (total > shown && len + 24 < sizeof(g_diag)) {
+        (void)snprintf(g_diag + len, sizeof(g_diag) - len, "(+%zu more) ", total - shown);
+    }
+}
+
 int kbdd_dev_set_field(const kbdd_dev_io_t *io, int field, uint8_t value, uint8_t *profile_out)
 {
-    uint8_t act[264], before[264], after[264], rep[264], undo[264];
+    uint8_t act[264], before[264], after[264], rep[264], undo[264], chk[264];
     uint8_t prof;
     kbc_status st;
     int rc;
 
+    g_diag[0] = '\0';
     if (io == NULL) return KBDD_DEV_EINVAL;
     rc = kbdd_dev_query(io, KBC_OP_READ_ACTIVE_PROFILE, 0, act);
     if (rc != KBDD_DEV_OK) return rc;
@@ -126,7 +154,13 @@ int kbdd_dev_set_field(const kbdd_dev_io_t *io, int field, uint8_t value, uint8_
     st = kbc_profile_block_set_field(before, sizeof(before), prof,
                                      (kbc_profile_field)field, value, rep, sizeof(rep));
     if (st == KBC_ERR_RANGE || st == KBC_ERR_INVALID_ARGUMENT) return KBDD_DEV_EINVAL;
-    if (st != KBC_OK) return KBDD_DEV_EPROTO;
+    if (st != KBC_OK) {
+        (void)snprintf(g_diag, sizeof(g_diag),
+                       "profile %u: reply header %02x %02x %02x, effect byte %u",
+                       (unsigned)prof, before[0], before[1], before[2],
+                       (unsigned)before[KBC_PBLK_OFF_MODE]);
+        return KBDD_DEV_EPROTO;
+    }
     if (profile_out != NULL) *profile_out = prof;
 
     if (io->set_feature(io->ctx, rep, sizeof(rep)) < 0) return KBDD_DEV_EIO;
@@ -138,10 +172,28 @@ int kbdd_dev_set_field(const kbdd_dev_io_t *io, int field, uint8_t value, uint8_
     /* the keyboard must now report exactly what we wrote (data + params) */
     if (memcmp(after + 3, rep + 3, sizeof(after) - 3) == 0) return KBDD_DEV_OK;
 
-    /* roll back to exactly what the keyboard reported before */
+    /* maybe the firmware was just slow: wait and read once more */
+    io->sleep_ms(io->ctx, 400u);
+    rc = kbdd_dev_query(io, KBC_OP_READ_PROFILE_BLOCK, prof, after);
+    if (rc != KBDD_DEV_OK) return rc;
+    if (memcmp(after + 3, rep + 3, sizeof(after) - 3) == 0) return KBDD_DEV_OK;
+
+    (void)snprintf(g_diag, sizeof(g_diag), "profile %u, differences vs written block: ",
+                   (unsigned)prof);
+    diag_append_diffs(rep, after);
+
+    /* roll back to exactly what the keyboard reported before, and check it */
     if (kbc_profile_block_to_write(before, sizeof(before), prof, undo, sizeof(undo)) == KBC_OK) {
         (void)io->set_feature(io->ctx, undo, sizeof(undo));
-        io->sleep_ms(io->ctx, 200u);
+        io->sleep_ms(io->ctx, 300u);
+        if (kbdd_dev_query(io, KBC_OP_READ_PROFILE_BLOCK, prof, chk) == KBDD_DEV_OK &&
+            memcmp(chk + 3, before + 3, sizeof(chk) - 3) == 0) {
+            strncat(g_diag, "original block restored (confirmed)",
+                    sizeof(g_diag) - strlen(g_diag) - 1);
+        } else {
+            strncat(g_diag, "RESTORE NOT CONFIRMED: check with kbctl dump-block",
+                    sizeof(g_diag) - strlen(g_diag) - 1);
+        }
     }
     return KBDD_DEV_EVERIFY;
 }

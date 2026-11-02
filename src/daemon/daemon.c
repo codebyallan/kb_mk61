@@ -595,6 +595,17 @@ static int kbdd_handle_led(kbdd_ctx_t *k, const kbdd_ipc_message_t *req,
         : "ok: LED frame sent once");
 }
 
+static int kbdd_reply_dev_err(kbdd_ipc_message_t *resp, int rc)
+{
+    char buf[480];
+    const char *diag = kbdd_dev_last_diag();
+    if ((rc == KBDD_DEV_EVERIFY || rc == KBDD_DEV_EPROTO) && diag != NULL && diag[0] != '\0') {
+        snprintf(buf, sizeof(buf), "%s [%s]", kbdd_dev_err(rc), diag);
+        return kbdd_reply_text(resp, buf);
+    }
+    return kbdd_reply_text(resp, kbdd_dev_err(rc));
+}
+
 static int kbdd_handle_effect(kbdd_ctx_t *k, const kbdd_ipc_message_t *req,
                               kbdd_ipc_message_t *resp)
 {
@@ -621,7 +632,7 @@ static int kbdd_handle_effect(kbdd_ctx_t *k, const kbdd_ipc_message_t *req,
     kbdd_dev_io_init_hidraw(&io, dev);
     rc = kbdd_dev_set_effect(&io, req->payload[0], &prof);
     if (rc != KBDD_DEV_OK) {
-        return kbdd_reply_text(resp, kbdd_dev_err(rc));
+        return kbdd_reply_dev_err(resp, rc);
     }
     k->config_mode = KBDD_CONFIG_EFFECT;
     k->config_effect = req->payload[0];
@@ -812,7 +823,7 @@ static int kbdd_handle_field(kbdd_ctx_t *k, const kbdd_ipc_message_t *req,
     kbdd_dev_io_init_hidraw(&io, dev);
     rc = kbdd_dev_set_field(&io, field, req->payload[1], &prof);
     if (rc != KBDD_DEV_OK) {
-        return kbdd_reply_text(resp, kbdd_dev_err(rc));
+        return kbdd_reply_dev_err(resp, rc);
     }
     if (field == KBC_FIELD_BRIGHTNESS) {
         k->led_brightness = req->payload[1];

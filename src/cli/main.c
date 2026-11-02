@@ -208,6 +208,47 @@ static uint32_t rd32(const uint8_t *p)
            ((uint32_t)p[2] << 16) | ((uint32_t)p[3] << 24);
 }
 
+/* Connects to the kbdd socket, retrying while the daemon is still starting
+ * (socket missing or refusing connections). KBCTL_CONNECT_TIMEOUT_MS: total wait,
+ * default 3000, 0 = single attempt. Returns an fd, or -1 with errno set. */
+static int connect_daemon(const char *path)
+{
+    struct sockaddr_un addr;
+    struct timespec t0, now, ts = {0, 100000000L};
+    unsigned long wait_ms = 3000;
+    const char *env = getenv("KBCTL_CONNECT_TIMEOUT_MS");
+
+    if (env != NULL && env[0] != '\0') {
+        char *end = NULL;
+        unsigned long v = strtoul(env, &end, 10);
+        if (end != NULL && *end == '\0' && v <= 60000UL) wait_ms = v;
+    }
+    if (strlen(path) >= sizeof(addr.sun_path)) {
+        errno = ENAMETOOLONG;
+        return -1;
+    }
+    memset(&addr, 0, sizeof(addr));
+    addr.sun_family = AF_UNIX;
+    strncpy(addr.sun_path, path, sizeof(addr.sun_path) - 1);
+    clock_gettime(CLOCK_MONOTONIC, &t0);
+    for (;;) {
+        int fd = socket(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0);
+        int err;
+        long elapsed;
+        if (fd < 0) return -1;
+        if (connect(fd, (struct sockaddr *)&addr, sizeof(addr)) == 0) return fd;
+        err = errno;
+        close(fd);
+        clock_gettime(CLOCK_MONOTONIC, &now);
+        elapsed = (long)((now.tv_sec - t0.tv_sec) * 1000L + (now.tv_nsec - t0.tv_nsec) / 1000000L);
+        if ((err != ENOENT && err != ECONNREFUSED) || elapsed >= (long)wait_ms) {
+            errno = err;
+            return -1;
+        }
+        nanosleep(&ts, NULL);
+    }
+}
+
 static int ipc_request(uint16_t opcode, const uint8_t *payload, uint32_t plen,
                        uint8_t **out_payload, uint32_t *out_len)
 {
@@ -224,25 +265,10 @@ static int ipc_request(uint16_t opcode, const uint8_t *payload, uint32_t plen,
         return -1;
     }
 
-    int fd = socket(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0);
+    int fd = connect_daemon(path);
     if (fd < 0) {
-        fprintf(stderr, "kbctl: socket: %s\n", strerror(errno));
-        return -1;
-    }
-
-    struct sockaddr_un addr;
-    memset(&addr, 0, sizeof(addr));
-    addr.sun_family = AF_UNIX;
-    if (strlen(path) >= sizeof(addr.sun_path)) {
-        fprintf(stderr, "kbctl: socket path too long\n");
-        close(fd);
-        return -1;
-    }
-    strncpy(addr.sun_path, path, sizeof(addr.sun_path) - 1);
-
-    if (connect(fd, (struct sockaddr *)&addr, sizeof(addr)) != 0) {
-        fprintf(stderr, "kbctl: cannot connect to kbdd at %s: %s\n", path, strerror(errno));
-        close(fd);
+        fprintf(stderr, "kbctl: cannot connect to kbdd at %s: %s (is kbdd running? try: systemctl --user status kbdd)\n",
+                path, strerror(errno));
         return -1;
     }
 
@@ -332,7 +358,6 @@ static int ipc_open_socket(void)
 {
     const char *runtime = getenv("XDG_RUNTIME_DIR");
     char path[512];
-    struct sockaddr_un addr;
     int fd;
 
     if (runtime == NULL || runtime[0] == '\0' ||
@@ -340,18 +365,9 @@ static int ipc_open_socket(void)
         fprintf(stderr, "kbctl: cannot locate kbdd socket\n");
         return -1;
     }
-    fd = socket(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0);
-    if (fd < 0) return -1;
-    memset(&addr, 0, sizeof(addr));
-    addr.sun_family = AF_UNIX;
-    if (strlen(path) >= sizeof(addr.sun_path)) {
-        close(fd);
-        return -1;
-    }
-    strncpy(addr.sun_path, path, sizeof(addr.sun_path) - 1);
-    if (connect(fd, (struct sockaddr *)&addr, sizeof(addr)) != 0) {
-        fprintf(stderr, "kbctl: cannot connect to kbdd: %s\n", strerror(errno));
-        close(fd);
+    fd = connect_daemon(path);
+    if (fd < 0) {
+        fprintf(stderr, "kbctl: cannot connect to kbdd: %s (is kbdd running?)\n", strerror(errno));
         return -1;
     }
     return fd;

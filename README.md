@@ -175,6 +175,10 @@ kbctl diff-block <a.bin> <b.bin>
 kbctl profile <1-4>
 ```
 
+- `kbctl` waits up to 3 s for `kbdd` to create its socket (useful right after
+  `systemctl --user restart kbdd`). Set `KBCTL_CONNECT_TIMEOUT_MS` to change the
+  wait (`0` = single attempt, maximum 60000). Offline commands (`led keys`,
+  `led effects`, `diff-block`, `help`) never connect.
 - `read-profile` reads a profile; without an index it reads profile `0`.
 - `write-profile` writes a profile file and requires
   `KBDD_ENABLE_PROFILE_WRITE=1`. The CLI backs up the active profile first.

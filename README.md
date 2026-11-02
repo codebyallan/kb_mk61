@@ -179,6 +179,10 @@ kbctl profile <1-4>
   `systemctl --user restart kbdd`). Set `KBCTL_CONNECT_TIMEOUT_MS` to change the
   wait (`0` = single attempt, maximum 60000). Offline commands (`led keys`,
   `led effects`, `diff-block`, `help`) never connect.
+- `led direction` changes the animation direction (`0` through `3`) in profile
+  byte 5, which is report byte 13.
+- `led report-rate` changes the report-rate index (`0` through `254`); the
+  stored value is index plus one in profile byte 0, which is report byte 8.
 - `read-profile` reads a profile; without an index it reads profile `0`.
 - `write-profile` writes a profile file and requires
   `KBDD_ENABLE_PROFILE_WRITE=1`. The CLI backs up the active profile first.
@@ -218,6 +222,8 @@ kbctl led release
 kbctl led effect lighting
 kbctl led brightness 8
 kbctl led speed 50
+kbctl led direction 2
+kbctl led report-rate 0
 kbctl led effect breath --save
 kbctl led brightness 5 --save
 kbctl led save

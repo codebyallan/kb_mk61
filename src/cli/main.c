@@ -50,6 +50,8 @@ static void usage(FILE *f)
     fputs("  led effect <name|index>       Set the active profile effect (needs KBDD_ENABLE_PROFILE_WRITE=1)\n", f);
     fputs("  led brightness <0-10>         Set brightness (also scales solid colors; 0 = off)\n", f);
     fputs("  led speed <2-102>             Set the effect speed (raw, lower = faster; shared by all effects)\n", f);
+    fputs("  led direction <0-3>           Set animation direction\n", f);
+    fputs("  led report-rate <0-254>       Set report-rate index (stored as index + 1 in byte 8)\n", f);
     fputs("    opts: --once (send one frame, no streaming)  --stride N (frame layout, default = matrix size)\n", f);
     fputs("          sweep: --delay MS  --color RRGGBB  --from N\n", f);
     fputs("  help                          Show this help\n", f);
@@ -127,6 +129,8 @@ static void usage_led(FILE *f, const char *subcommand)
               "  effect <name|index> [--save] Set the active profile effect\n"
               "  brightness <0-10> [--save] Set brightness\n"
               "  speed <2-102> [--save]     Set effect speed\n\n"
+              "  direction <0-3> [--save]  Set animation direction\n"
+              "  report-rate <0-254> [--save] Set report-rate index\n\n"
               "Options for solid/off/pos/clear: --once, --stride N\n"
               "Options for sweep: --delay MS, --color RRGGBB, --from N\n"
               "Requires KBDD_ENABLE_LED=1 for frame commands.\n", f);
@@ -179,6 +183,14 @@ static void usage_led(FILE *f, const char *subcommand)
     } else if (strcmp(subcommand, "speed") == 0) {
         fputs("Usage: kbctl led speed <2-102> [--save]\n\n"
               "Set raw effect speed; lower values are faster. Append --save to commit it to flash.\n"
+              "Requires KBDD_ENABLE_PROFILE_WRITE=1.\n", f);
+    } else if (strcmp(subcommand, "direction") == 0) {
+        fputs("Usage: kbctl led direction <0-3> [--save]\n\n"
+              "Set animation direction in profile byte 5 (report byte 13).\n"
+              "Requires KBDD_ENABLE_PROFILE_WRITE=1.\n", f);
+    } else if (strcmp(subcommand, "report-rate") == 0) {
+        fputs("Usage: kbctl led report-rate <0-254> [--save]\n\n"
+              "Set the report-rate index; the stored value is index + 1 in profile byte 0 (report byte 8).\n"
               "Requires KBDD_ENABLE_PROFILE_WRITE=1.\n", f);
     } else if (strcmp(subcommand, "save") == 0) {
         fputs("Usage: kbctl led save\n\n"
@@ -885,6 +897,12 @@ static int cmd_led(int argc, char **argv)
     if (strcmp(sub, "speed") == 0)
         return cmd_led_field(argc, argv, 3, KBC_SPEED_RAW_MIN, KBC_SPEED_RAW_MAX,
                              "(raw; lower = faster; one value shared by all effects)");
+    if (strcmp(sub, "direction") == 0)
+        return cmd_led_field(argc, argv, KBC_FIELD_DIRECTION, 0, 3,
+                             "(0..3; animation direction)");
+    if (strcmp(sub, "report-rate") == 0)
+        return cmd_led_field(argc, argv, KBC_FIELD_REPORT_RATE, 0, 254,
+                             "(index; stored as index + 1 in profile byte 0)");
     if (strcmp(sub, "release") == 0) {
         rc = led_call(0, 0, KBDD_LED_MODE_RELEASE, 0, 0, 0, 0, msg, sizeof(msg));
         if (rc < 0) return 1;
@@ -1068,13 +1086,12 @@ static int cmd_dump_block(int argc, char **argv)
     printf("profile %lu, 264 bytes (header 0..7, data 8..263)\n", prof);
     hexdump_block(resp, rlen);
     {
-        const char *na = kbc_led_effect_name(resp[7]);
-        const char *nb = kbc_led_effect_name(resp[11]);
-        printf("fields (effect/brightness/speed confirmed on hardware; [8] inferred):\n"
-               "  A: rate=[4]=%u  effect=[7]=%u (%s)\n"
-               "  B: effect=[11]=%u (%s)  brightness=[12]=%u  speed(wave)=[19]=%u  rate?=[8]=%u\n",
-               resp[4], resp[7], na ? na : "?", resp[11], nb ? nb : "?",
-               resp[12], resp[19], resp[8]);
+        const char *effect = kbc_led_effect_name(resp[11]);
+        printf("fields (profile block offsets; report bytes in brackets):\n"
+               "  report rate=[8]=%u (index %u)\n"
+               "  effect=[11]=%u (%s)  brightness=[12]=%u  direction=[13]=%u  speed=[19]=%u\n",
+               resp[8], resp[8] > 0 ? resp[8] - 1 : 0, resp[11],
+               effect ? effect : "?", resp[12], resp[13], resp[19]);
     }
     if (argc == 4) {
         FILE *f = fopen(argv[3], "wb");

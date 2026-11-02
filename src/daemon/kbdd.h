@@ -67,7 +67,7 @@ int kbdd_dev_enable_notifications(const kbdd_dev_io_t *io);
  * 0x02 with only the effect byte changed, read back and verify. On a failed
  * verification the original block is written back (EVERIFY). */
 int kbdd_dev_set_effect(const kbdd_dev_io_t *io, uint8_t mode, uint8_t *profile_out);
-/* Same flow for one field (kbc_profile_field): effect, brightness or speed. */
+/* Same flow for one profile field: effect, brightness, speed, direction or report rate. */
 typedef struct {
     uint8_t effect;
     uint8_t rgb[14][3];

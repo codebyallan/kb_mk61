@@ -179,6 +179,7 @@ uint8_t kbc_profile_get_hw_profile(const kbc_profile *p)
 kbc_status kbc_profile_set_report_rate_index(kbc_profile *p, uint8_t idx)
 {
     if (p == NULL) return KBC_ERR_INVALID_ARGUMENT;
+    if (idx == 255) return KBC_ERR_RANGE;
     p->report_rate_index = idx;
     return KBC_OK;
 }
@@ -263,7 +264,8 @@ kbc_status kbc_profile_get_color(const kbc_profile *p, size_t index, uint8_t *r,
 kbc_status kbc_profile_set_direction(kbc_profile *p, uint8_t v)
 {
     if (p == NULL) return KBC_ERR_INVALID_ARGUMENT;
-    p->direction = v ? 1 : 0;
+    if (v > 3) return KBC_ERR_RANGE;
+    p->direction = v;
     return KBC_OK;
 }
 
@@ -411,9 +413,11 @@ kbc_status kbc_profile_encode_params_b(const kbc_profile *p, uint8_t hw_profile,
     full[2] = hw_profile;
     full[3] = 0;
 
+    full[base] = (uint8_t)(p->report_rate_index + 1);
     full[base + 3] = p->led_mode;
     full[base + 4] = p->led_intensity;
-    full[base + 5] = p->led_speed;
+    full[base + 5] = p->direction;
+    full[KBC_PBLK_OFF_SPEED] = p->led_speed;
     {
         size_t i;
         for (i = 0; i < 9; i++) {
@@ -474,10 +478,12 @@ static kbc_status kbc_profile_decode_params_b_impl(kbc_profile *p, const uint8_t
     if (rep.param0 < 1 || rep.param0 > 4) return KBC_ERR_PROTOCOL;
     p->hw_profile = rep.param0;
     if (hw_profile != NULL) *hw_profile = rep.param0;
+    p->report_rate_index = (buf[base] > 0) ? (uint8_t)(buf[base] - 1) : 0;
     p->led_mode = buf[base + 3];
     if (validate_led && p->led_mode > 12 && p->led_mode != 15) return KBC_ERR_PROTOCOL;
     p->led_intensity = buf[base + 4];
-    p->led_speed = buf[base + 5];
+    p->direction = (buf[base + 5] > 3) ? 0 : buf[base + 5];
+    p->led_speed = buf[KBC_PBLK_OFF_SPEED];
     {
         size_t i;
         for (i = 0; i < 9; i++) {

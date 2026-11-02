@@ -237,12 +237,20 @@ kbc_status kbc_profile_block_set_field(const uint8_t *block, size_t block_len,
         if (block == NULL || block_len != KBC_FEATURE_REPORT_SIZE) return KBC_ERR_PROTOCOL;
         off = KBC_PBLK_OFF_SPEED;       /* single byte, independent of the effect */
         break;
+    case KBC_FIELD_DIRECTION:
+        if (value > 3) return KBC_ERR_RANGE;
+        off = KBC_PBLK_OFF_DIRECTION;
+        break;
+    case KBC_FIELD_REPORT_RATE:
+        if (value == 255) return KBC_ERR_RANGE;
+        off = KBC_PBLK_OFF_RATE;
+        break;
     default:
         return KBC_ERR_INVALID_ARGUMENT;
     }
     st = kbc_profile_block_to_write(block, block_len, profile, out, out_len);
     if (st != KBC_OK) return st;
-    out[off] = value;
+    out[off] = (field == KBC_FIELD_REPORT_RATE) ? (uint8_t)(value + 1) : value;
     return KBC_OK;
 }
 

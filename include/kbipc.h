@@ -28,7 +28,7 @@
 #define KBDD_IPC_OP_SAVE_BLOCK 18u  /* no payload: commit the active profile block to flash */
 #define KBDD_IPC_OP_LED_ANIM 15u    /* host animation: [kind 1..3, stride, period_hi, period_lo, r, g, b] */
 #define KBDD_ANIM_PAYLOAD_SIZE 7u
-#define KBDD_IPC_OP_SET_FIELD 13u   /* payload [field(1=effect,2=brightness,3=speed), value] */
+#define KBDD_IPC_OP_SET_FIELD 13u   /* payload [field(1=effect,2=brightness,3=speed,4=direction,5=report rate), value] */
 #define KBDD_IPC_OP_WATCH 16u       /* subscribe the client to keyboard events */
 #define KBDD_IPC_OP_EVENT 17u       /* unsolicited daemon event: NUL-terminated text */
 

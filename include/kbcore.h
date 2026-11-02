@@ -320,10 +320,11 @@ KBCORE_API kbc_status kbc_led_frame_apply_brightness(uint8_t *frame, size_t stri
 
 /* Profile parameter block (response of 0x82 / payload of 0x02, path B).
  * Offsets are absolute within the 264-byte report. */
-#define KBC_PBLK_OFF_RATE        8   /* observed 1 on a default profile (inferred: report rate index + 1) */
+#define KBC_PBLK_OFF_RATE        8   /* report rate index + 1 */
 #define KBC_PBLK_OFF_MODE        11  /* CONFIRMED on hardware: LED effect index */
 #define KBC_PBLK_OFF_BRIGHTNESS  12  /* CONFIRMED on hardware: linear 0..10, step 1 */
-#define KBC_PBLK_OFF_SPEED       19  /* CONFIRMED on hardware (and by MK61 Studio, block[11]): ONE byte shared by all effects; inverted, lower = faster */
+#define KBC_PBLK_OFF_DIRECTION   13  /* animation direction, 0..3 */
+#define KBC_PBLK_OFF_SPEED       19  /* one byte shared by all effects; lower = faster */
 #define KBC_PBLK_OFF_CUSTOM_COUNT 134 /* "custom LED count": a change to 1 or 255 makes the keyboard commit the block to flash */
 #define KBC_COMMIT_ARM           1
 #define KBC_COMMIT_CLEAN         255   /* factory value, also the final state after a save */
@@ -350,7 +351,13 @@ KBCORE_API kbc_status kbc_profile_block_to_write(const uint8_t *block, size_t bl
  * (KBC_COMMIT_ARM or KBC_COMMIT_CLEAN). The block must be "clean" (byte 134 == 255)
  * and the effect <= 12 (14/15 are never saved): otherwise KBC_ERR_UNSUPPORTED. */
 KBCORE_API kbc_status kbc_profile_block_commit_report(const uint8_t *block, size_t block_len, uint8_t profile, uint8_t count, uint8_t *out, size_t out_len);
-typedef enum { KBC_FIELD_MODE = 1, KBC_FIELD_BRIGHTNESS = 2, KBC_FIELD_SPEED = 3 } kbc_profile_field;
+typedef enum {
+    KBC_FIELD_MODE = 1,
+    KBC_FIELD_BRIGHTNESS = 2,
+    KBC_FIELD_SPEED = 3,
+    KBC_FIELD_DIRECTION = 4,
+    KBC_FIELD_REPORT_RATE = 5
+} kbc_profile_field;
 /* Builds a 0x02 write report that changes exactly ONE byte of the block:
  *  MODE        effect index (same rules as kbc_profile_block_set_mode)
  *  BRIGHTNESS  0..KBC_BRIGHTNESS_RAW_MAX

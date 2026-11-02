@@ -842,7 +842,9 @@ static int kbdd_handle_save(kbdd_ctx_t *k, kbdd_ipc_message_t *resp)
 static int kbdd_handle_field(kbdd_ctx_t *k, const kbdd_ipc_message_t *req,
                              kbdd_ipc_message_t *resp)
 {
-    static const char *const names[] = {"?", "effect", "brightness", "speed"};
+    static const char *const names[] = {
+        "?", "effect", "brightness", "speed", "direction", "report rate"
+    };
     const kbdd_hid_device_t *dev;
     kbdd_dev_io_t io;
     uint8_t prof = 0;
@@ -853,8 +855,8 @@ static int kbdd_handle_field(kbdd_ctx_t *k, const kbdd_ipc_message_t *req,
         return kbdd_reply_text(resp,
             "error: profile writes are disabled. Start kbdd with KBDD_ENABLE_PROFILE_WRITE=1");
     }
-    if (req->payload == NULL || req->payload_len != 2 || req->payload[0] < 1 || req->payload[0] > 3) {
-        return kbdd_reply_text(resp, "error: payload must be [field 1..3, value]");
+    if (req->payload == NULL || req->payload_len != 2 || req->payload[0] < 1 || req->payload[0] > 5) {
+        return kbdd_reply_text(resp, "error: payload must be [field 1..5, value]");
     }
     field = req->payload[0];
     dev = kbdd_control_dev(k);

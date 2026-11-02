@@ -274,14 +274,20 @@ static void test_set_field(void)
 
     kb_init(&k, &io); k.block[11] = 1; memcpy(orig, k.block, 264);   /* breath active */
     CHECK(kbdd_dev_set_field(&io, KBC_FIELD_SPEED, 40, NULL) == KBDD_DEV_OK);
-    changed = 0;
-    for (i = 3; i < 264; i++) if (k.block[i] != orig[i]) { changed++; CHECK(i == 19); }
-    CHECK(changed == 1 && k.block[19] == 40 && k.block[20] == orig[20]);
+    CHECK(k.block[19] == 40);
+    CHECK(kbdd_dev_set_field(&io, KBC_FIELD_DIRECTION, 3, NULL) == KBDD_DEV_OK);
+    CHECK(k.block[13] == 3);
+    CHECK(kbdd_dev_set_field(&io, KBC_FIELD_REPORT_RATE, 0, NULL) == KBDD_DEV_OK);
+    CHECK(k.block[8] == 1);
+    CHECK(k.block[11] == orig[11] && k.block[12] == orig[12] &&
+          k.block[19] == 40 && k.block[20] == orig[20]);
 
     kb_init(&k, &io);                                    /* out-of-range values never reach the device */
     CHECK(kbdd_dev_set_field(&io, KBC_FIELD_BRIGHTNESS, 11, NULL) == KBDD_DEV_EINVAL);
     CHECK(kbdd_dev_set_field(&io, KBC_FIELD_SPEED, 1, NULL) == KBDD_DEV_EINVAL);
     CHECK(kbdd_dev_set_field(&io, KBC_FIELD_SPEED, 200, NULL) == KBDD_DEV_EINVAL);
+    CHECK(kbdd_dev_set_field(&io, KBC_FIELD_DIRECTION, 4, NULL) == KBDD_DEV_EINVAL);
+    CHECK(kbdd_dev_set_field(&io, KBC_FIELD_REPORT_RATE, 255, NULL) == KBDD_DEV_EINVAL);
     CHECK(kbdd_dev_set_field(&io, 42, 1, NULL) == KBDD_DEV_EINVAL);
     CHECK(k.nwrites == 0);
 

@@ -1133,7 +1133,29 @@ static int kbdd_ipc_handle(const kbdd_ipc_message_t *req, kbdd_ipc_message_t *re
             return kbdd_reply_text(resp, buf);
         }
         case KBDD_IPC_OP_READ_PROFILE:
-            return kbdd_reply_text(resp, "error: read-profile not implemented");
+        {
+            const kbdd_hid_device_t *dev = kbdd_control_dev(kctx);
+            kbdd_dev_io_t io;
+            uint8_t out[264];
+            uint8_t profile;
+            int rc;
+
+            if (req->payload == NULL || req->payload_len != 1 ||
+                req->payload[0] < 1 || req->payload[0] > 4) {
+                return kbdd_reply_text(resp,
+                    "error: payload must be a hardware profile from 1 to 4");
+            }
+            if (dev == NULL) {
+                return kbdd_reply_text(resp, "error: no keyboard control interface available");
+            }
+            profile = req->payload[0];
+            kbdd_dev_io_init_hidraw(&io, dev);
+            rc = kbdd_dev_query(&io, KBC_OP_READ_PROFILE_BLOCK, profile, out);
+            if (rc != KBDD_DEV_OK) {
+                return kbdd_reply_text(resp, kbdd_dev_err(rc));
+            }
+            return kbdd_reply_bytes(resp, out, sizeof(out));
+        }
         case KBDD_IPC_OP_READ_CONFIG: {
             const char *msg = "config: <XDG_CONFIG_HOME>/kbdd";
             size_t n = strlen(msg);

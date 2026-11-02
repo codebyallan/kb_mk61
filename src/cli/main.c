@@ -25,8 +25,8 @@ static void usage(FILE *f)
     fputs("Commands:\n", f);
     fputs("  list                          List devices known to kbdd\n", f);
     fputs("  status                        Show daemon status\n", f);
-    fputs("  read-profile [index]          Read a profile (index 0-3)\n", f);
-    fputs("  write-profile <index> <file>  Write a profile file (index 0-3)\n", f);
+    fputs("  read-profile [profile]        Read a profile (profile 1-4)\n", f);
+    fputs("  write-profile <profile> <file> Write a profile file (profile 1-4)\n", f);
     fputs("  read-config                   Read daemon configuration summary\n", f);
     fputs("  enable-notifications          Enable input notifications\n", f);
     fputs("  watch                         Print keyboard profile/layer/effect events\n", f);
@@ -66,9 +66,9 @@ static void usage_command(FILE *f, const char *command)
     } else if (strcmp(command, "status") == 0) {
         fputs("Usage: kbctl status\n\nShow daemon status, connected devices, and enabled capabilities.\n", f);
     } else if (strcmp(command, "read-profile") == 0) {
-        fputs("Usage: kbctl read-profile [index]\n\nRead a profile by index (0-3). With no index, read profile 0.\n", f);
+        fputs("Usage: kbctl read-profile [profile]\n\nRead a hardware profile (1-4). With no profile, read profile 1.\n", f);
     } else if (strcmp(command, "write-profile") == 0) {
-        fputs("Usage: kbctl write-profile <index> <file>\n\nWrite a 264-byte profile file to index 0-3. Profile writes require\n"
+        fputs("Usage: kbctl write-profile <profile> <file>\n\nWrite a 264-byte profile file to hardware profile 1-4. Profile writes require\n"
               "KBDD_ENABLE_PROFILE_WRITE=1 and are backed up by kbctl first.\n", f);
     } else if (strcmp(command, "read-config") == 0) {
         fputs("Usage: kbctl read-config\n\nRead the daemon configuration summary.\n", f);
@@ -506,7 +506,7 @@ static int parse_index(const char *s, long *out)
     if (errno != 0 || end == NULL || *end != '\0') {
         return -1;
     }
-    if (v < 0 || v > 3) {
+    if (v < 1 || v > 4) {
         return -1;
     }
     *out = v;
@@ -1207,10 +1207,10 @@ int main(int argc, char **argv)
     }
 
     if (strcmp(cmd, "read-profile") == 0) {
-        long idx = 0;
+        long idx = 1;
         if (argc == 3) {
             if (parse_index(argv[2], &idx) != 0) {
-                fprintf(stderr, "kbctl: invalid profile index (expected 0-3)\n");
+                fprintf(stderr, "kbctl: invalid profile (expected 1-4)\n");
                 return 2;
             }
         } else if (argc != 2) {
@@ -1223,7 +1223,15 @@ int main(int argc, char **argv)
         if (ipc_request(KBDD_IPC_OP_READ_PROFILE, payload, 1, &resp, &rlen) != 0) {
             return 1;
         }
-        int perr = print_reply(resp, rlen);
+        int perr;
+        if (rlen == KBC_FEATURE_REPORT_SIZE && resp[0] == KBC_FEATURE_REPORT_ID) {
+            printf("profile %ld, 264 bytes "
+                   "(header 0..7, data 8..263)\n", idx);
+            hexdump_block(resp, rlen);
+            perr = 0;
+        } else {
+            perr = print_reply(resp, rlen);
+        }
         free(resp);
         return perr;
     }
@@ -1235,7 +1243,7 @@ int main(int argc, char **argv)
         }
         long idx = 0;
         if (parse_index(argv[2], &idx) != 0) {
-            fprintf(stderr, "kbctl: invalid profile index (expected 0-3)\n");
+            fprintf(stderr, "kbctl: invalid profile (expected 1-4)\n");
             return 2;
         }
         uint8_t *filebuf = NULL;

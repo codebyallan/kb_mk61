@@ -165,11 +165,11 @@ kbctl active-profile
 
 ### Profile commands
 
-Profile indexes use `0` through `3` for the four profiles:
+Profile numbers use the hardware numbering `1` through `4`:
 
 ```sh
-kbctl read-profile [index]
-kbctl write-profile <index> <file>
+kbctl read-profile [profile]
+kbctl write-profile <profile> <file>
 kbctl dump-block <1-4> [file]
 kbctl diff-block <a.bin> <b.bin>
 kbctl profile <1-4>
@@ -183,15 +183,15 @@ kbctl profile <1-4>
   byte 5, which is report byte 13.
 - `led report-rate` changes the report-rate index (`0` through `254`); the
   stored value is index plus one in profile byte 0, which is report byte 8.
-- `read-profile` reads a profile; without an index it reads profile `0`.
+- `read-profile` reads a profile; without an argument it reads profile `1`.
+  Profile numbers are consistently `1..4`, matching the keyboard protocol.
 - `write-profile` writes a profile file and requires
   `KBDD_ENABLE_PROFILE_WRITE=1`. The CLI backs up the active profile first.
 - `dump-block` reads and displays a raw 264-byte profile parameter block,
   optionally saving it to a file.
 - `diff-block` compares two saved 264-byte blocks and reports changed offsets.
-- `profile <1-4>` switches the keyboard's active profile using the hardware
-  numbering `1` through `4` (unlike `read-profile`/`write-profile`, which use
-  `0`-`3`). It requires `KBDD_ENABLE_PROFILE_WRITE=1` and works in three steps:
+- `profile <1-4>` switches the keyboard's active profile. It requires
+  `KBDD_ENABLE_PROFILE_WRITE=1` and works in three steps:
   read the active profile with `0x81`, send `0x01` with the requested profile,
   then read `0x81` again. If the keyboard does not confirm the change, `kbdd`
   asks it to return to the previous profile and the command fails. Requesting

@@ -170,7 +170,10 @@ struct kb {
     uint8_t active;
     uint8_t last_op;
     int ignore_write;
+    int fail_after_arm;
     int ignore_select;
+    uint8_t flash[264];
+    size_t ncommits;
     size_t nselects;
     size_t nwrites;
     uint8_t writes[4][264];
@@ -188,8 +191,16 @@ static ssize_t kb_set(void *ctx, const uint8_t *buf, size_t len)
     if (buf[1] == 0x02) {
         if (k->nwrites < 4) memcpy(k->writes[k->nwrites], buf, len);
         k->nwrites++;
+        if (k->fail_after_arm && k->nwrites > 1) {
+            return -1;
+        }
         if (!k->ignore_write) {
+            uint8_t oldc = k->block[134];
             memcpy(k->block + 3, buf + 3, 261);   /* keyboard stores the data */
+            if (buf[134] != oldc && (buf[134] == 1 || buf[134] == 255)) {
+                memcpy(k->flash, k->block, 264);  /* the count change commits to flash */
+                k->ncommits++;
+            }
         }
     }
     return (ssize_t)len;
@@ -307,8 +318,39 @@ static void test_switch_profile(void)
     CHECK(kbdd_dev_switch_profile(&io, 2, NULL) == KBDD_DEV_EPROTO && k.nselects == 0);
 }
 
+static void test_save_profile(void)
+{
+    struct kb k; kbdd_dev_io_t io; uint8_t prof = 0;
+
+    kb_init(&k, &io); k.block[134] = 255; k.block[11] = 1; k.block[12] = 7; k.block[19] = 40;
+    CHECK(kbdd_dev_save_profile(&io, &prof) == KBDD_DEV_OK);
+    CHECK(prof == 3 && k.ncommits == 2 && k.nwrites == 2);
+    CHECK(k.writes[0][134] == 1 && k.writes[1][134] == 255);       /* arm, then clean */
+    CHECK(k.flash[12] == 7 && k.flash[19] == 40 && k.flash[134] == 255 && k.flash[11] == 1);
+    CHECK(k.block[134] == 255);
+
+    kb_init(&k, &io); k.block[134] = 9;                            /* not clean: refuse, no write */
+    CHECK(kbdd_dev_save_profile(&io, NULL) == KBDD_DEV_ENOSAVE && k.nwrites == 0);
+    kb_init(&k, &io); k.block[134] = 255; k.block[11] = 15;        /* custom effect: refuse */
+    CHECK(kbdd_dev_save_profile(&io, NULL) == KBDD_DEV_ENOSAVE && k.nwrites == 0);
+    kb_init(&k, &io); k.block[134] = 255; k.block[11] = 14;
+    CHECK(kbdd_dev_save_profile(&io, NULL) == KBDD_DEV_ENOSAVE && k.nwrites == 0);
+
+    kb_init(&k, &io); k.block[134] = 255; k.ignore_write = 1;      /* keyboard ignores writes */
+    CHECK(kbdd_dev_save_profile(&io, NULL) == KBDD_DEV_EVERIFY);
+    CHECK(k.nwrites == 1 && k.ncommits == 0);                      /* stops after the arm write */
+
+    kb_init(&k, &io); k.block[134] = 255; k.fail_after_arm = 1;    /* clean write and restoration both fail */
+    CHECK(kbdd_dev_save_profile(&io, NULL) == KBDD_DEV_EIO);
+    CHECK(k.nwrites == 4 && k.block[134] == 1);                   /* restoration was attempted */
+
+    kb_init(&k, &io); k.block[134] = 255; k.active = 9;            /* bogus 0x81 */
+    CHECK(kbdd_dev_save_profile(&io, NULL) == KBDD_DEV_EPROTO && k.nwrites == 0);
+}
+
 int main(void)
 {
+    test_save_profile();
     test_switch_profile();
     test_set_field();
     test_set_effect_ok();

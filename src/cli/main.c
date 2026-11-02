@@ -16,7 +16,7 @@
 #include "kbcore.h"
 #include "kbipc.h"
 
-#define KBCTL_VERSION "0.3.2"
+#define KBCTL_VERSION "0.3.3"
 #define KBCTL_MAX_FILE (4 * 1024 * 1024)
 
 static void usage(FILE *f)
@@ -44,6 +44,8 @@ static void usage(FILE *f)
     fputs("  led keys                      List key names and matrix positions (offline)\n", f);
     fputs("  led release                   Stop streaming frames\n", f);
     fputs("  led effects                   List the keyboard built-in effects (offline)\n", f);
+    fputs("  led save                      Commit the active profile (effect/brightness/speed) to flash\n", f);
+    fputs("    --save on 'led effect|brightness|speed' saves right after the change\n", f);
     fputs("  led effect <name|index>       Set the active profile effect (needs KBDD_ENABLE_PROFILE_WRITE=1)\n", f);
     fputs("  led brightness <0-10>         Set brightness (also scales solid colors; 0 = off)\n", f);
     fputs("  led speed <2-102>             Set the effect speed (raw, lower = faster; shared by all effects)\n", f);
@@ -102,9 +104,10 @@ static void usage_led(FILE *f, const char *subcommand)
               "  sweep [opts]                Light positions sequentially\n"
               "  release                     Stop periodic frame streaming\n"
               "  effects                     List built-in keyboard effects\n"
-              "  effect <name|index>         Set the active profile effect\n"
-              "  brightness <0-10>           Set brightness\n"
-              "  speed <2-102>               Set effect speed\n\n"
+              "  save                        Commit the active profile to flash\n"
+              "  effect <name|index> [--save] Set the active profile effect\n"
+              "  brightness <0-10> [--save] Set brightness\n"
+              "  speed <2-102> [--save]     Set effect speed\n\n"
               "Options for solid/off/pos/clear: --once, --stride N\n"
               "Options for sweep: --delay MS, --color RRGGBB, --from N\n"
               "Requires KBDD_ENABLE_LED=1 for frame commands.\n", f);
@@ -138,12 +141,20 @@ static void usage_led(FILE *f, const char *subcommand)
     } else if (strcmp(subcommand, "effects") == 0) {
         fputs("Usage: kbctl led effects\n\nList supported built-in effect names and numeric indexes.\n", f);
     } else if (strcmp(subcommand, "effect") == 0) {
-        fputs("Usage: kbctl led effect <name|index>\n\nSet the active profile effect. Requires KBDD_ENABLE_PROFILE_WRITE=1.\n", f);
+        fputs("Usage: kbctl led effect <name|index> [--save]\n\n"
+              "Set the active profile effect. Append --save to commit it to flash.\n"
+              "Requires KBDD_ENABLE_PROFILE_WRITE=1.\n", f);
     } else if (strcmp(subcommand, "brightness") == 0) {
-        fputs("Usage: kbctl led brightness <0-10>\n\nSet profile brightness; 0 is off and 10 is maximum.\n"
+        fputs("Usage: kbctl led brightness <0-10> [--save]\n\n"
+              "Set profile brightness; 0 is off and 10 is maximum. Append --save to commit it to flash.\n"
               "Requires KBDD_ENABLE_PROFILE_WRITE=1.\n", f);
     } else if (strcmp(subcommand, "speed") == 0) {
-        fputs("Usage: kbctl led speed <2-102>\n\nSet raw effect speed; lower values are faster.\n"
+        fputs("Usage: kbctl led speed <2-102> [--save]\n\n"
+              "Set raw effect speed; lower values are faster. Append --save to commit it to flash.\n"
+              "Requires KBDD_ENABLE_PROFILE_WRITE=1.\n", f);
+    } else if (strcmp(subcommand, "save") == 0) {
+        fputs("Usage: kbctl led save\n\n"
+              "Commit the active profile's effect, brightness, and speed to flash.\n"
               "Requires KBDD_ENABLE_PROFILE_WRITE=1.\n", f);
     } else {
         fprintf(f, "kbctl: no LED help available for '%s'\n", subcommand);
@@ -698,16 +709,41 @@ static int profile_write(uint8_t op, const uint8_t *payload, size_t plen)
     return rc;
 }
 
+/* "--save" as the last argument: commit to flash after the change. */
+static int wants_save(int *argc, char **argv)
+{
+    if (*argc >= 5 && strcmp(argv[*argc - 1], "--save") == 0) {
+        (*argc)--;
+        return 1;
+    }
+    return 0;
+}
+
+static int save_to_flash(void)
+{
+    uint8_t *resp = NULL;
+    uint32_t rlen = 0;
+    int rc;
+    if (ipc_request(KBDD_IPC_OP_SAVE_BLOCK, NULL, 0, &resp, &rlen) != 0) {
+        free(resp);
+        return 1;
+    }
+    rc = print_reply(resp, rlen);
+    free(resp);
+    return rc;
+}
+
 static int cmd_led_effect(int argc, char **argv)
 {
     uint8_t mode;
-    int m;
+    int m, save = wants_save(&argc, argv), rc;
     if (argc != 4 || (m = effect_from_arg(argv[3])) < 0) {
-        fprintf(stderr, "kbctl: led effect <name|index>  (see: kbctl led effects)\n");
+        fprintf(stderr, "kbctl: led effect <name|index> [--save]  (see: kbctl led effects)\n");
         return 2;
     }
     mode = (uint8_t)m;
-    return profile_write(KBDD_IPC_OP_SET_EFFECT, &mode, 1);
+    rc = profile_write(KBDD_IPC_OP_SET_EFFECT, &mode, 1);
+    return (rc == 0 && save) ? save_to_flash() : rc;
 }
 
 static int cmd_led_field(int argc, char **argv, uint8_t field, unsigned long lo,
@@ -715,13 +751,15 @@ static int cmd_led_field(int argc, char **argv, uint8_t field, unsigned long lo,
 {
     unsigned long v;
     uint8_t payload[2];
+    int save = wants_save(&argc, argv), rc;
     if (argc != 4 || parse_uint(argv[3], hi, &v) != 0 || v < lo) {
-        fprintf(stderr, "kbctl: led %s <%lu-%lu>  %s\n", argv[2], lo, hi, hint);
+        fprintf(stderr, "kbctl: led %s <%lu-%lu> [--save]  %s\n", argv[2], lo, hi, hint);
         return 2;
     }
     payload[0] = field;
     payload[1] = (uint8_t)v;
-    return profile_write(KBDD_IPC_OP_SET_FIELD, payload, 2);
+    rc = profile_write(KBDD_IPC_OP_SET_FIELD, payload, 2);
+    return (rc == 0 && save) ? save_to_flash() : rc;
 }
 
 static int cmd_led(int argc, char **argv)
@@ -758,6 +796,10 @@ static int cmd_led(int argc, char **argv)
         printf("velocidade %d..%d, brilho %d..%d\n", KBC_LED_SPEED_MIN,
                KBC_LED_SPEED_MAX, KBC_LED_BRIGHTNESS_MIN, KBC_LED_BRIGHTNESS_MAX);
         return 0;
+    }
+    if (strcmp(sub, "save") == 0) {
+        if (argc != 3) { usage(stderr); return 2; }
+        return profile_write(KBDD_IPC_OP_SAVE_BLOCK, NULL, 0);
     }
     if (strcmp(sub, "effect") == 0) return cmd_led_effect(argc, argv);
     if (strcmp(sub, "brightness") == 0)

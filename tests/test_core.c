@@ -1164,6 +1164,37 @@ static void test_keymap(void)
     CHECK(kbc_key_group("wasd", tmp, 2) == 2);                 /* respects max */
 }
 
+static void test_commit_report(void)
+{
+    uint8_t blk[264], out[264];
+    size_t i, changed;
+    memset(blk, 0, sizeof blk);
+    for (i = 8; i < 264; i++) blk[i] = (uint8_t)(i * 3);
+    blk[0] = 7; blk[1] = 0x82; blk[2] = 1;
+    for (i = 3; i < 8; i++) blk[i] = 0;
+    blk[11] = 1; blk[134] = 255;
+
+    CHECK(kbc_profile_block_commit_report(blk, 264, 1, KBC_COMMIT_ARM, out, 264) == KBC_OK);
+    CHECK(out[0] == 7 && out[1] == 0x02 && out[2] == 1 && out[134] == 1);
+    changed = 0;
+    for (i = 3; i < 264; i++) if (out[i] != blk[i]) { changed++; CHECK(i == 134); }
+    CHECK(changed == 1);
+    CHECK(kbc_profile_block_commit_report(blk, 264, 1, KBC_COMMIT_CLEAN, out, 264) == KBC_OK);
+    CHECK(out[134] == 255 && memcmp(out + 3, blk + 3, 261) == 0);
+
+    CHECK(kbc_profile_block_commit_report(blk, 264, 1, 0, out, 264) == KBC_ERR_RANGE);
+    CHECK(kbc_profile_block_commit_report(blk, 264, 1, 2, out, 264) == KBC_ERR_RANGE);
+    CHECK(kbc_profile_block_commit_report(blk, 264, 2, 1, out, 264) == KBC_ERR_PROTOCOL);
+    blk[134] = 1;                                   /* custom LED data in use: refuse */
+    CHECK(kbc_profile_block_commit_report(blk, 264, 1, 1, out, 264) == KBC_ERR_UNSUPPORTED);
+    blk[134] = 255; blk[11] = 15;
+    CHECK(kbc_profile_block_commit_report(blk, 264, 1, 1, out, 264) == KBC_ERR_UNSUPPORTED);
+    blk[11] = 14;
+    CHECK(kbc_profile_block_commit_report(blk, 264, 1, 1, out, 264) == KBC_ERR_UNSUPPORTED);
+    blk[11] = 12;
+    CHECK(kbc_profile_block_commit_report(blk, 264, 1, 1, out, 264) == KBC_OK);
+}
+
 int main(void)
 {
     test_tv_f01(); test_tv_f02(); test_tv_f03(); test_tv_f04();
@@ -1192,6 +1223,7 @@ int main(void)
     test_led_frame();
     test_led_frame_brightness();
     test_read_requests();
+    test_commit_report();
     test_keymap();
     test_led_anim();
     test_select_profile_builder();

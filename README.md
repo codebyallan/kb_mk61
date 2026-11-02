@@ -214,6 +214,9 @@ kbctl led release
 kbctl led effect lighting
 kbctl led brightness 8
 kbctl led speed 50
+kbctl led effect breath --save
+kbctl led brightness 5 --save
+kbctl led save
 ```
 
 - `led solid <RRGGBB>` fills every matrix position with one RGB color.
@@ -253,6 +256,18 @@ kbctl led speed 50
 - `led speed <2-102>` changes the raw effect speed; lower values are faster. It is
   a single profile byte (block offset 19) shared by every effect, so it behaves the
   same whichever effect is active.
+- `led save` makes the active profile's current block (effect, brightness, speed)
+  permanent. `effect`, `brightness` and `speed` only change the keyboard's RAM; the
+  keyboard writes its flash when the "custom LED count" byte (block offset 134)
+  changes to `1` or `255`. `led save` writes the block with that byte set to `1`
+  (the keyboard must read it back as `1`) and then to `255` (the clean value),
+  and checks that the rest of the block is unchanged. Appending `--save` to
+  `led effect|brightness|speed` does both steps. To limit flash wear, set
+  several values and run `led save` once. A profile is never saved when that byte
+  is not `255` (custom LED data in use) or when the effect is 14 or 15; the
+  factory-reset value `0xFF` of opcode `0x01` is never sent. Needs
+  `KBDD_ENABLE_PROFILE_WRITE=1`; a backup of the block is stored in
+  `~/.local/state/kbctl/` first. Saved values survive unplugging the keyboard.
 
 Frame commands accept `--once` to send one frame without periodic refresh and
 `--stride N` to override the frame layout (default: the detected matrix size).

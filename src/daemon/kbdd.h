@@ -53,6 +53,7 @@ typedef struct kbdd_dev_io {
 #define KBDD_DEV_EINVAL (-1)
 #define KBDD_DEV_EIO (-2)
 #define KBDD_DEV_EPROTO (-3)
+#define KBDD_DEV_ENOSAVE (-5)  /* profile cannot be saved safely (custom LED data, effect 14/15) */
 #define KBDD_DEV_EVERIFY (-4)  /* write not confirmed by read-back (rolled back) */
 
 void kbdd_dev_io_init_hidraw(kbdd_dev_io_t *io, const kbdd_hid_device_t *dev);
@@ -73,6 +74,10 @@ int kbdd_dev_set_field(const kbdd_dev_io_t *io, int field, uint8_t value, uint8_
  * confirm. Already-active profile = no write. On failure tries to go back to the
  * previous profile (EVERIFY). *changed = 1 only if the profile actually changed. */
 int kbdd_dev_switch_profile(const kbdd_dev_io_t *io, uint8_t profile, int *changed);
+
+/* Commits the current RAM block of the ACTIVE profile to flash: 0x02 with byte 134 = 1,
+ * then = 255 (the keyboard saves on each change). Requires a clean block. */
+int kbdd_dev_save_profile(const kbdd_dev_io_t *io, uint8_t *profile_out);
 
 /* uinput module */
 typedef struct kbdd_uinput kbdd_uinput_t;

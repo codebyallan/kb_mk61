@@ -331,3 +331,16 @@ kbc_status kbc_led_anim_render(kbc_led_anim kind, uint32_t t_ms, uint32_t period
     }
     return KBC_OK;
 }
+
+kbc_status kbc_profile_block_commit_report(const uint8_t *block, size_t block_len, uint8_t profile,
+                                           uint8_t count, uint8_t *out, size_t out_len)
+{
+    kbc_status st;
+    if (count != KBC_COMMIT_ARM && count != KBC_COMMIT_CLEAN) return KBC_ERR_RANGE;
+    st = kbc_profile_block_to_write(block, block_len, profile, out, out_len);
+    if (st != KBC_OK) return st;
+    if (block[KBC_PBLK_OFF_CUSTOM_COUNT] != KBC_COMMIT_CLEAN) return KBC_ERR_UNSUPPORTED;
+    if (block[KBC_PBLK_OFF_MODE] > KBC_LED_EFFECT_LIGHTING) return KBC_ERR_UNSUPPORTED;
+    out[KBC_PBLK_OFF_CUSTOM_COUNT] = count;
+    return KBC_OK;
+}

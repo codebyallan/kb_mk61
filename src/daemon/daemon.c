@@ -493,6 +493,7 @@ static const char *kbdd_dev_err(int rc)
     case KBDD_DEV_EINVAL: return "error: invalid request";
     case KBDD_DEV_EIO:    return "error: device I/O failed (is the keyboard connected and the udev rule installed?)";
     case KBDD_DEV_EPROTO: return "error: unexpected response from the device (layout check failed, nothing written)";
+    case KBDD_DEV_ENOSAVE: return "error: this profile cannot be saved safely (custom LED data present, or effect 14/15)";
     case KBDD_DEV_EVERIFY: return "error: write not confirmed by read-back; original block restored";
     default:              return "error: unknown";
     }
@@ -746,6 +747,41 @@ static int kbdd_handle_anim(kbdd_ctx_t *k, const kbdd_ipc_message_t *req,
     return kbdd_reply_text(resp, buf);
 }
 
+static int kbdd_handle_save(kbdd_ctx_t *k, kbdd_ipc_message_t *resp)
+{
+    const kbdd_hid_device_t *dev;
+    kbdd_dev_io_t io;
+    uint8_t prof = 0;
+    char buf[160];
+    int rc, was_hold;
+
+    if (!k->allow_profile_write) {
+        return kbdd_reply_text(resp,
+            "error: profile writes are disabled. Start kbdd with KBDD_ENABLE_PROFILE_WRITE=1");
+    }
+    dev = kbdd_control_dev(k);
+    if (dev == NULL) {
+        return kbdd_reply_text(resp, "error: no keyboard control interface available");
+    }
+    was_hold = k->led_hold;
+    k->led_hold = 0;                 /* no host frames while the block is committed */
+    kbdd_dev_io_init_hidraw(&io, dev);
+    rc = kbdd_dev_save_profile(&io, &prof);
+    if (was_hold && k->led_active) {
+        k->led_next_ms = kbdd_now_ms() + 40;
+        k->led_hold = 1;
+    }
+    if (rc != KBDD_DEV_OK) {
+        return kbdd_reply_text(resp, rc == KBDD_DEV_EVERIFY
+            ? "error: save not confirmed by the keyboard; nothing was committed or the block was restored"
+            : kbdd_dev_err(rc));
+    }
+    snprintf(buf, sizeof(buf),
+             "ok: profile %u committed to flash (replug the keyboard to confirm it persists)",
+             (unsigned)prof);
+    return kbdd_reply_text(resp, buf);
+}
+
 static int kbdd_handle_field(kbdd_ctx_t *k, const kbdd_ipc_message_t *req,
                              kbdd_ipc_message_t *resp)
 {
@@ -992,7 +1028,7 @@ static int kbdd_ipc_handle(const kbdd_ipc_message_t *req, kbdd_ipc_message_t *re
             return 0;
         }
         case KBDD_IPC_OP_GET_VERSION: {
-            const char *msg = "kbdd 0.3.2";
+            const char *msg = "kbdd 0.3.3";
             size_t n = strlen(msg);
             resp->payload = malloc(n + 1);
             if (resp->payload == NULL) {
@@ -1033,7 +1069,7 @@ static int kbdd_ipc_handle(const kbdd_ipc_message_t *req, kbdd_ipc_message_t *re
                 "error: write-profile not implemented (disabled until hardware validation)");
         case KBDD_IPC_OP_STATUS: {
             char buf[96];
-            snprintf(buf, sizeof(buf), "kbdd 0.3.2: running, %zu hid interface(s)",
+            snprintf(buf, sizeof(buf), "kbdd 0.3.3: running, %zu hid interface(s)",
                      kctx != NULL ? kctx->count : (size_t)0);
             return kbdd_reply_text(resp, buf);
         }
@@ -1119,6 +1155,8 @@ static int kbdd_ipc_handle(const kbdd_ipc_message_t *req, kbdd_ipc_message_t *re
             return kbdd_handle_profile(kctx, req, resp);
         case KBDD_IPC_OP_LED_ANIM:
             return kbdd_handle_anim(kctx, req, resp);
+        case KBDD_IPC_OP_SAVE_BLOCK:
+            return kbdd_handle_save(kctx, resp);
         case KBDD_IPC_OP_SET_FIELD:
             return kbdd_handle_field(kctx, req, resp);
         default: {

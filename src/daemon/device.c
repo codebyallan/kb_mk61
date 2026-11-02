@@ -183,3 +183,65 @@ int kbdd_dev_switch_profile(const kbdd_dev_io_t *io, uint8_t profile, int *chang
     }
     return KBDD_DEV_EVERIFY;
 }
+
+int kbdd_dev_save_profile(const kbdd_dev_io_t *io, uint8_t *profile_out)
+{
+    uint8_t act[264], cur[264], arm[264], clean[264], chk[264];
+    uint8_t prof;
+    kbc_status st;
+    int rc, clean_rc;
+
+    if (io == NULL) return KBDD_DEV_EINVAL;
+    rc = kbdd_dev_query(io, KBC_OP_READ_ACTIVE_PROFILE, 0, act);
+    if (rc != KBDD_DEV_OK) return rc;
+    if (act[1] != KBC_OP_READ_ACTIVE_PROFILE) return KBDD_DEV_EPROTO;
+    prof = act[2];
+    if (prof < 1 || prof > 4) return KBDD_DEV_EPROTO;
+    rc = kbdd_dev_query(io, KBC_OP_READ_PROFILE_BLOCK, prof, cur);
+    if (rc != KBDD_DEV_OK) return rc;
+
+    st = kbc_profile_block_commit_report(cur, sizeof(cur), prof, KBC_COMMIT_ARM, arm, sizeof(arm));
+    if (st == KBC_ERR_UNSUPPORTED) return KBDD_DEV_ENOSAVE;
+    if (st != KBC_OK) return KBDD_DEV_EPROTO;
+    if (kbc_profile_block_commit_report(cur, sizeof(cur), prof, KBC_COMMIT_CLEAN,
+                                        clean, sizeof(clean)) != KBC_OK) {
+        return KBDD_DEV_EPROTO;
+    }
+    if (profile_out != NULL) *profile_out = prof;
+
+    /* 1) arm: the keyboard must accept the write (byte 134 reads back as 1) */
+    if (io->set_feature(io->ctx, arm, sizeof(arm)) < 0) return KBDD_DEV_EIO;
+    io->sleep_ms(io->ctx, 200u);
+    rc = kbdd_dev_query(io, KBC_OP_READ_PROFILE_BLOCK, prof, chk);
+    if (rc != KBDD_DEV_OK) return rc;
+    if (chk[KBC_PBLK_OFF_CUSTOM_COUNT] != KBC_COMMIT_ARM) return KBDD_DEV_EVERIFY; /* write ignored: nothing changed */
+
+    /* 2) back to the clean value (this also commits); retry once if it fails */
+    clean_rc = io->set_feature(io->ctx, clean, sizeof(clean));
+    if (clean_rc < 0) {
+        io->sleep_ms(io->ctx, 200u);
+        clean_rc = io->set_feature(io->ctx, clean, sizeof(clean));
+    }
+    if (clean_rc < 0) {
+        /*
+         * The arm write may already have changed device state. Make one
+         * explicit restoration attempt and verify it before reporting failure.
+         */
+        if (io->set_feature(io->ctx, clean, sizeof(clean)) < 0) return KBDD_DEV_EIO;
+        io->sleep_ms(io->ctx, 200u);
+        rc = kbdd_dev_query(io, KBC_OP_READ_PROFILE_BLOCK, prof, chk);
+        if (rc != KBDD_DEV_OK ||
+            memcmp(chk + 3, cur + 3, sizeof(chk) - 3) != 0) {
+            return KBDD_DEV_EVERIFY;
+        }
+        return KBDD_DEV_EVERIFY;
+    }
+    io->sleep_ms(io->ctx, 200u);
+    rc = kbdd_dev_query(io, KBC_OP_READ_PROFILE_BLOCK, prof, chk);
+    if (rc != KBDD_DEV_OK) return rc;
+    if (memcmp(chk + 3, cur + 3, sizeof(chk) - 3) != 0) {
+        (void)io->set_feature(io->ctx, clean, sizeof(clean));      /* best effort */
+        return KBDD_DEV_EVERIFY;
+    }
+    return KBDD_DEV_OK;
+}

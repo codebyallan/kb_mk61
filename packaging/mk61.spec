@@ -1,5 +1,5 @@
 Name:           mk61
-Version:        0.4.0
+Version:        0.4.1
 Release:        1%{?dist}
 Summary:        Clean-room keyboard stack for Linux (library, daemon and CLI)
 License:        GPL-2.0-only
@@ -60,6 +60,11 @@ fi
 %config(noreplace) %{_sysconfdir}/systemd/user/kbdd.service.d/led.conf
 
 %changelog
+* Mon Nov 02 2026 mk61 maintainers - 0.4.1-1
+- remove public generic profile write
+- add verified profile recovery
+- standardize profile numbering to hardware range 1-4
+
 * Mon Nov 02 2026 mk61 maintainers - 0.4.0-1
 - Add report-rate and animation-direction controls.
 

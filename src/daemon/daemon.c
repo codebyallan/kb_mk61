@@ -758,6 +758,52 @@ static int kbdd_handle_anim(kbdd_ctx_t *k, const kbdd_ipc_message_t *req,
     return kbdd_reply_text(resp, buf);
 }
 
+static int kbdd_handle_colors(kbdd_ctx_t *k, const kbdd_ipc_message_t *req,
+                              kbdd_ipc_message_t *resp)
+{
+    const uint8_t *p = req->payload;
+    const kbdd_hid_device_t *dev;
+    kbdd_dev_io_t io;
+    kbdd_color_edit_t ce;
+    uint8_t prof = 0;
+    char buf[160];
+    size_t j;
+    int rc;
+
+    if (!k->allow_profile_write) {
+        return kbdd_reply_text(resp,
+            "error: profile writes are disabled. Start kbdd with KBDD_ENABLE_PROFILE_WRITE=1");
+    }
+    if (p == NULL || req->payload_len < 5 || p[1] < 1 || p[1] > 14 ||
+        req->payload_len != 2u + 3u * p[1]) {
+        return kbdd_reply_text(resp, "error: payload must be [effect, count 1..14, r,g,b * count]");
+    }
+    memset(&ce, 0, sizeof(ce));
+    ce.effect = p[0];
+    ce.count = p[1];
+    for (j = 0; j < ce.count; j++) {
+        memcpy(ce.rgb[j], p + 2 + 3 * j, 3);
+    }
+    dev = kbdd_control_dev(k);
+    if (dev == NULL) {
+        return kbdd_reply_text(resp, "error: no keyboard control interface available");
+    }
+    k->led_hold = 0;
+    k->led_active = 0;
+    kbdd_dev_io_init_hidraw(&io, dev);
+    rc = kbdd_dev_set_colors(&io, &ce, &prof);
+    if (rc == KBDD_DEV_EINVAL) {
+        return kbdd_reply_text(resp, "error: this effect has no color slots (cycle and game mode), or too many colors");
+    }
+    if (rc != KBDD_DEV_OK) {
+        return kbdd_reply_dev_err(resp, rc);
+    }
+    snprintf(buf, sizeof(buf),
+             "ok: %s colors set on profile %u, verified by read-back (RAM only; use --save or 'led save')",
+             kbc_led_effect_name(ce.effect), (unsigned)prof);
+    return kbdd_reply_text(resp, buf);
+}
+
 static int kbdd_handle_save(kbdd_ctx_t *k, kbdd_ipc_message_t *resp)
 {
     const kbdd_hid_device_t *dev;
@@ -1166,6 +1212,8 @@ static int kbdd_ipc_handle(const kbdd_ipc_message_t *req, kbdd_ipc_message_t *re
             return kbdd_handle_profile(kctx, req, resp);
         case KBDD_IPC_OP_LED_ANIM:
             return kbdd_handle_anim(kctx, req, resp);
+        case KBDD_IPC_OP_SET_COLORS:
+            return kbdd_handle_colors(kctx, req, resp);
         case KBDD_IPC_OP_SAVE_BLOCK:
             return kbdd_handle_save(kctx, resp);
         case KBDD_IPC_OP_SET_FIELD:

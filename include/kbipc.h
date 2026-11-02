@@ -24,6 +24,7 @@
 #define KBDD_IPC_OP_SET_EFFECT 12u  /* payload [mode]: active profile effect (0x02, verified) */
 
 #define KBDD_IPC_OP_SET_PROFILE 14u /* payload [profile 1..4]: switch active profile (0x01, verified by 0x81) */
+#define KBDD_IPC_OP_SET_COLORS 19u  /* [effect, count 1..14, r,g,b * count]: effect colours of the active profile (RAM) */
 #define KBDD_IPC_OP_SAVE_BLOCK 18u  /* no payload: commit the active profile block to flash */
 #define KBDD_IPC_OP_LED_ANIM 15u    /* host animation: [kind 1..3, stride, period_hi, period_lo, r, g, b] */
 #define KBDD_ANIM_PAYLOAD_SIZE 7u

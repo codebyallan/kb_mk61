@@ -344,3 +344,43 @@ kbc_status kbc_profile_block_commit_report(const uint8_t *block, size_t block_le
     out[KBC_PBLK_OFF_CUSTOM_COUNT] = count;
     return KBC_OK;
 }
+
+static const struct { uint8_t effect; uint16_t off; uint8_t n; } COLOR_SLOTS[] = {
+    {1, 41, 2}, {3, 47, 1}, {4, 50, 2}, {5, 56, 1}, {6, 59, 2}, {7, 65, 2},
+    {8, 71, 2}, {9, 77, 2}, {10, 83, 2}, {12, 89, 1}, {0, 92, 14}
+};
+
+int kbc_effect_color_slots(uint8_t effect, size_t *offset, size_t *count)
+{
+    size_t i;
+    for (i = 0; i < sizeof(COLOR_SLOTS) / sizeof(COLOR_SLOTS[0]); i++) {
+        if (COLOR_SLOTS[i].effect == effect) {
+            if (offset != NULL) *offset = COLOR_SLOTS[i].off;
+            if (count != NULL) *count = COLOR_SLOTS[i].n;
+            return 1;
+        }
+    }
+    return 0;
+}
+
+kbc_status kbc_profile_block_set_colors(const uint8_t *block, size_t block_len, uint8_t profile,
+                                        uint8_t effect, const uint8_t (*rgb)[3], size_t rgb_count,
+                                        uint8_t *out, size_t out_len)
+{
+    size_t off, n, j;
+    kbc_status st;
+
+    if (rgb == NULL) return KBC_ERR_INVALID_ARGUMENT;
+    if (!kbc_effect_color_slots(effect, &off, &n)) return KBC_ERR_RANGE;
+    if (rgb_count < 1 || rgb_count > n) return KBC_ERR_RANGE;
+    st = kbc_profile_block_to_write(block, block_len, profile, out, out_len);
+    if (st != KBC_OK) return st;
+    for (j = 0; j < n; j++) {
+        const uint8_t *c = rgb[j % rgb_count];
+        out[off + j] = c[0];
+        out[off + n + j] = c[1];
+        out[off + 2 * n + j] = c[2];
+    }
+    memset(out + KBC_PBLK_OFF_SPECTRUM, 0, KBC_PBLK_SPECTRUM_COUNT);
+    return KBC_OK;
+}

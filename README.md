@@ -260,6 +260,17 @@ kbctl led save
 - `led speed <2-102>` changes the raw effect speed; lower values are faster. It is
   a single profile byte (block offset 19) shared by every effect, so it behaves the
   same whichever effect is active.
+- `led color <effect> <RRGGBB> [RRGGBB ...]` sets the colors stored in the keyboard for
+  a built-in effect of the active profile. Accepted color counts are: `wave` 1-14,
+  `breath`/`encounter`/`pulse`/`cross`/`trigger`/`ripple`/`blossom` 1-2, and
+  `starlight`/`rain`/`lighting` exactly 1. With fewer colors than slots they repeat.
+  It does not switch the effect (use `led effect`); `cycle` and `game_mode` have no
+  colors. The nine per-effect
+  "factory rainbow" flags (block offsets 32-40) are cleared, as the official driver
+  does on every write, otherwise the keyboard may show the factory rainbow instead of
+  your color. The change is RAM only until `--save` or `led save`. Needs
+  `KBDD_ENABLE_PROFILE_WRITE=1`. Example for a persistent solid red:
+  `kbctl led effect lighting; kbctl led color lighting FF0000 --save`.
 - `led save` makes the active profile's current block (effect, brightness, speed)
   permanent. `effect`, `brightness` and `speed` only change the keyboard's RAM; the
   keyboard writes its flash when the "custom LED count" byte (block offset 134)

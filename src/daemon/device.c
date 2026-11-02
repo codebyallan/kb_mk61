@@ -132,7 +132,8 @@ static void diag_append_diffs(const uint8_t *want, const uint8_t *got)
     }
 }
 
-int kbdd_dev_set_field(const kbdd_dev_io_t *io, int field, uint8_t value, uint8_t *profile_out)
+static int edit_profile(const kbdd_dev_io_t *io, int field, uint8_t value,
+                        const kbdd_color_edit_t *ce, uint8_t *profile_out)
 {
     uint8_t act[264], before[264], after[264], rep[264], undo[264], chk[264];
     uint8_t prof;
@@ -151,8 +152,14 @@ int kbdd_dev_set_field(const kbdd_dev_io_t *io, int field, uint8_t value, uint8_
     rc = kbdd_dev_query(io, KBC_OP_READ_PROFILE_BLOCK, prof, before);
     if (rc != KBDD_DEV_OK) return rc;
 
-    st = kbc_profile_block_set_field(before, sizeof(before), prof,
-                                     (kbc_profile_field)field, value, rep, sizeof(rep));
+    if (ce != NULL) {
+        st = kbc_profile_block_set_colors(before, sizeof(before), prof, ce->effect,
+                                          (const uint8_t (*)[3])ce->rgb, ce->count,
+                                          rep, sizeof(rep));
+    } else {
+        st = kbc_profile_block_set_field(before, sizeof(before), prof,
+                                         (kbc_profile_field)field, value, rep, sizeof(rep));
+    }
     if (st == KBC_ERR_RANGE || st == KBC_ERR_INVALID_ARGUMENT) return KBDD_DEV_EINVAL;
     if (st != KBC_OK) {
         (void)snprintf(g_diag, sizeof(g_diag),
@@ -196,6 +203,17 @@ int kbdd_dev_set_field(const kbdd_dev_io_t *io, int field, uint8_t value, uint8_
         }
     }
     return KBDD_DEV_EVERIFY;
+}
+
+int kbdd_dev_set_field(const kbdd_dev_io_t *io, int field, uint8_t value, uint8_t *profile_out)
+{
+    return edit_profile(io, field, value, NULL, profile_out);
+}
+
+int kbdd_dev_set_colors(const kbdd_dev_io_t *io, const kbdd_color_edit_t *ce, uint8_t *profile_out)
+{
+    if (ce == NULL || ce->count < 1 || ce->count > 14) return KBDD_DEV_EINVAL;
+    return edit_profile(io, 0, 0, ce, profile_out);
 }
 
 int kbdd_dev_set_effect(const kbdd_dev_io_t *io, uint8_t mode, uint8_t *profile_out)

@@ -367,8 +367,38 @@ static void test_set_field_diag(void)
     CHECK(kbdd_dev_last_diag()[0] == '\0');
 }
 
+static void test_set_colors(void)
+{
+    struct kb k; kbdd_dev_io_t io; kbdd_color_edit_t ce; uint8_t orig[264], prof = 0;
+    size_t i, changed;
+
+    memset(&ce, 0, sizeof ce);
+    ce.effect = 12; ce.count = 1; ce.rgb[0][0] = 9; ce.rgb[0][1] = 8; ce.rgb[0][2] = 7;
+    kb_init(&k, &io); memcpy(orig, k.block, 264);
+    CHECK(kbdd_dev_set_colors(&io, &ce, &prof) == KBDD_DEV_OK);
+    CHECK(prof == 3 && k.nwrites == 1);
+    CHECK(k.block[89] == 9 && k.block[90] == 8 && k.block[91] == 7);
+    for (i = 32; i < 41; i++) CHECK(k.block[i] == 0);          /* spectrum flags cleared */
+    changed = 0;
+    for (i = 3; i < 264; i++) if (k.block[i] != orig[i]) { changed++; CHECK((i >= 89 && i <= 91) || (i >= 32 && i <= 40)); }
+    CHECK(changed >= 3 && changed <= 12);
+
+    kb_init(&k, &io);                                          /* effect without slots: no write */
+    ce.effect = 2;
+    CHECK(kbdd_dev_set_colors(&io, &ce, NULL) == KBDD_DEV_EINVAL && k.nwrites == 0);
+    ce.effect = 12; ce.count = 0;
+    CHECK(kbdd_dev_set_colors(&io, &ce, NULL) == KBDD_DEV_EINVAL && k.nwrites == 0);
+    CHECK(kbdd_dev_set_colors(&io, NULL, NULL) == KBDD_DEV_EINVAL);
+
+    kb_init(&k, &io); k.ignore_write = 1;                      /* ignored write: diagnostic + rollback */
+    ce.count = 1;
+    CHECK(kbdd_dev_set_colors(&io, &ce, NULL) == KBDD_DEV_EVERIFY);
+    CHECK(strstr(kbdd_dev_last_diag(), "restored (confirmed)") != NULL);
+}
+
 int main(void)
 {
+    test_set_colors();
     test_set_field_diag();
     test_save_profile();
     test_switch_profile();

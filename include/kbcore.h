@@ -331,6 +331,19 @@ KBCORE_API kbc_status kbc_led_frame_apply_brightness(uint8_t *frame, size_t stri
 #define KBC_SPEED_RAW_MIN        2   /* fastest observed; lower value = faster */
 #define KBC_SPEED_RAW_MAX        102 /* slowest observed (0x66) */
 
+/* Per-effect colour slots (absolute offsets; planar R,G,B planes of `count` entries each).
+ * Effects without slots: 2 (cycle = rainbow) and 11 (game mode). */
+#define KBC_PBLK_OFF_SPECTRUM    32  /* 9 per-effect "factory rainbow" flags, 32..40; non-zero hijacks the palette */
+#define KBC_PBLK_SPECTRUM_COUNT  9
+#define KBC_MAX_EFFECT_COLORS    14  /* wave */
+KBCORE_API int kbc_effect_color_slots(uint8_t effect, size_t *offset, size_t *count);   /* 1 if the effect has slots */
+/* Builds a 0x02 write report that sets the colours of `effect` (1..count given; slots
+ * are filled cyclically when fewer colours than slots are given) and clears the nine
+ * spectrum flags, as the official driver does on every write. Nothing else changes. */
+KBCORE_API kbc_status kbc_profile_block_set_colors(const uint8_t *block, size_t block_len, uint8_t profile,
+                                                   uint8_t effect, const uint8_t (*rgb)[3], size_t rgb_count,
+                                                   uint8_t *out, size_t out_len);
+
 /* Converts a 0x82 response into a 0x02 write report (same data, header fixed). */
 KBCORE_API kbc_status kbc_profile_block_to_write(const uint8_t *block, size_t block_len, uint8_t profile, uint8_t *out, size_t out_len);
 /* Builds a 0x02 report that carries `block` unchanged except byte 134 = `count`

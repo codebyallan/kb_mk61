@@ -1195,6 +1195,70 @@ static void test_commit_report(void)
     CHECK(kbc_profile_block_commit_report(blk, 264, 1, 1, out, 264) == KBC_OK);
 }
 
+static void test_effect_colors(void)
+{
+    uint8_t blk[264], out[264];
+    uint8_t rgb[14][3];
+    size_t off, n, i, j, changed, covered = 0;
+    static const uint8_t effs[] = {1, 3, 4, 5, 6, 7, 8, 9, 10, 12, 0};
+
+    /* slot table: contiguous 41..133 and ends where byte 134 (commit trigger) starts */
+    for (i = 41; i < 134; ) {
+        int found = 0;
+        for (j = 0; j < sizeof effs; j++) {
+            if (kbc_effect_color_slots(effs[j], &off, &n) && off == i) { found = 1; i += 3 * n; covered++; break; }
+        }
+        CHECK(found);
+        if (!found) break;
+    }
+    CHECK(i == 134 && covered == 11);
+    CHECK(!kbc_effect_color_slots(2, NULL, NULL) && !kbc_effect_color_slots(11, NULL, NULL));
+    CHECK(!kbc_effect_color_slots(13, NULL, NULL) && !kbc_effect_color_slots(255, NULL, NULL));
+    CHECK(kbc_effect_color_slots(12, &off, &n) && off == 89 && n == 1);
+    CHECK(kbc_effect_color_slots(1, &off, &n) && off == 41 && n == 2);
+    CHECK(kbc_effect_color_slots(0, &off, &n) && off == 92 && n == 14);
+
+    memset(blk, 0, sizeof blk);
+    for (i = 8; i < 264; i++) blk[i] = (uint8_t)(i * 7 + 3);
+    blk[0] = 7; blk[1] = 0x82; blk[2] = 1;
+    for (i = 3; i < 8; i++) blk[i] = 0;
+    blk[11] = 12;
+    memset(rgb, 0, sizeof rgb);
+    rgb[0][0] = 255; rgb[0][1] = 128; rgb[0][2] = 1;
+
+    /* lighting: one colour, planar (R at 89, G at 90, B at 91); spectrum flags cleared */
+    CHECK(kbc_profile_block_set_colors(blk, 264, 1, 12, (const uint8_t (*)[3])rgb, 1, out, 264) == KBC_OK);
+    CHECK(out[0] == 7 && out[1] == 0x02 && out[2] == 1);
+    CHECK(out[89] == 255 && out[90] == 128 && out[91] == 1);
+    for (i = 32; i < 41; i++) CHECK(out[i] == 0);
+    changed = 0;
+    for (i = 3; i < 264; i++) if (out[i] != blk[i]) { changed++; CHECK((i >= 89 && i <= 91) || (i >= 32 && i <= 40)); }
+    CHECK(changed <= 12);
+
+    /* breath: two colours, planes of 2 (R at 41..42, G at 43..44, B at 45..46) */
+    rgb[1][0] = 10; rgb[1][1] = 20; rgb[1][2] = 30;
+    CHECK(kbc_profile_block_set_colors(blk, 264, 1, 1, (const uint8_t (*)[3])rgb, 2, out, 264) == KBC_OK);
+    CHECK(out[41] == 255 && out[42] == 10 && out[43] == 128 && out[44] == 20 && out[45] == 1 && out[46] == 30);
+    /* fewer colours than slots: repeated */
+    CHECK(kbc_profile_block_set_colors(blk, 264, 1, 1, (const uint8_t (*)[3])rgb, 1, out, 264) == KBC_OK);
+    CHECK(out[41] == 255 && out[42] == 255 && out[43] == 128 && out[44] == 128);
+    /* wave: 14 slots, three colours cycling; ends before byte 134 */
+    rgb[2][0] = 0; rgb[2][1] = 0; rgb[2][2] = 255;
+    CHECK(kbc_profile_block_set_colors(blk, 264, 1, 0, (const uint8_t (*)[3])rgb, 3, out, 264) == KBC_OK);
+    CHECK(out[92] == 255 && out[93] == 10 && out[94] == 0 && out[95] == 255);
+    CHECK(out[133] == rgb[13 % 3][2]);                         /* last B slot (index 13) is written */
+    CHECK(out[134] == blk[134]);                               /* commit trigger untouched */
+
+    /* rejects */
+    CHECK(kbc_profile_block_set_colors(blk, 264, 1, 2, (const uint8_t (*)[3])rgb, 1, out, 264) == KBC_ERR_RANGE);
+    CHECK(kbc_profile_block_set_colors(blk, 264, 1, 11, (const uint8_t (*)[3])rgb, 1, out, 264) == KBC_ERR_RANGE);
+    CHECK(kbc_profile_block_set_colors(blk, 264, 1, 12, (const uint8_t (*)[3])rgb, 0, out, 264) == KBC_ERR_RANGE);
+    CHECK(kbc_profile_block_set_colors(blk, 264, 1, 12, (const uint8_t (*)[3])rgb, 2, out, 264) == KBC_ERR_RANGE);
+    CHECK(kbc_profile_block_set_colors(blk, 264, 1, 0, (const uint8_t (*)[3])rgb, 15, out, 264) == KBC_ERR_RANGE);
+    CHECK(kbc_profile_block_set_colors(blk, 264, 2, 12, (const uint8_t (*)[3])rgb, 1, out, 264) == KBC_ERR_PROTOCOL);
+    CHECK(kbc_profile_block_set_colors(blk, 264, 1, 12, NULL, 1, out, 264) == KBC_ERR_INVALID_ARGUMENT);
+}
+
 int main(void)
 {
     test_tv_f01(); test_tv_f02(); test_tv_f03(); test_tv_f04();
@@ -1223,6 +1287,7 @@ int main(void)
     test_led_frame();
     test_led_frame_brightness();
     test_read_requests();
+    test_effect_colors();
     test_commit_report();
     test_keymap();
     test_led_anim();

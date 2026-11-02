@@ -44,6 +44,7 @@ static void usage(FILE *f)
     fputs("  led keys                      List key names and matrix positions (offline)\n", f);
     fputs("  led release                   Stop streaming frames\n", f);
     fputs("  led effects                   List the keyboard built-in effects (offline)\n", f);
+    fputs("  led color <effect> <RRGGBB>.. Set the colors of a built-in effect in the active profile\n", f);
     fputs("  led save                      Commit the active profile (effect/brightness/speed) to flash\n", f);
     fputs("    --save on 'led effect|brightness|speed' saves right after the change\n", f);
     fputs("  led effect <name|index>       Set the active profile effect (needs KBDD_ENABLE_PROFILE_WRITE=1)\n", f);
@@ -92,6 +93,21 @@ static void usage_command(FILE *f, const char *command)
     }
 }
 
+static void usage_led_color_slots(FILE *f)
+{
+    unsigned m;
+
+    fputs("Color slots (accepted colors: 1..N; fewer colors repeat):\n", f);
+    for (m = 0; m < KBC_LED_EFFECT_COUNT; m++) {
+        size_t count;
+        if (kbc_effect_color_slots((uint8_t)m, NULL, &count)) {
+            fprintf(f, "  %-10s 1..%zu\n", kbc_led_effect_name((uint8_t)m), count);
+        } else {
+            fprintf(f, "  %-10s none\n", kbc_led_effect_name((uint8_t)m));
+        }
+    }
+}
+
 static void usage_led(FILE *f, const char *subcommand)
 {
     if (subcommand == NULL || strcmp(subcommand, "led") == 0) {
@@ -102,8 +118,11 @@ static void usage_led(FILE *f, const char *subcommand)
               "  pos <n> <RRGGBB> [opts]     Set one position, preserving others\n"
               "  clear [opts]                Clear the host-controlled frame\n"
               "  sweep [opts]                Light positions sequentially\n"
+              "  anim <breath|cycle|rainbow> [opts]  Stream a host animation\n"
+              "  key <keys> <RRGGBB>         Color keys by name\n"
               "  release                     Stop periodic frame streaming\n"
               "  effects                     List built-in keyboard effects\n"
+              "  color <effect> <RRGGBB>..  Set built-in effect colors\n"
               "  save                        Commit the active profile to flash\n"
               "  effect <name|index> [--save] Set the active profile effect\n"
               "  brightness <0-10> [--save] Set brightness\n"
@@ -133,13 +152,22 @@ static void usage_led(FILE *f, const char *subcommand)
         fputs("Usage: kbctl led key <k1[,k2,...]> <RRGGBB> [--stride N]\n\n"
               "Set the color of keys by name or group (wasd, numbers, letters, mods, all). Other keys keep\n"
               "their colors. Names are case-insensitive; 'kbctl led keys' lists them. Needs KBDD_ENABLE_LED=1.\n", f);
+    } else if (strcmp(subcommand, "color") == 0) {
+        fputs("Usage: kbctl led color <effect> <RRGGBB> [RRGGBB ...] [--save]\n\n"
+              "Set the colors stored in the keyboard for a built-in effect (breath, starlight, encounter,\n"
+              "rain, pulse, cross, trigger, ripple, blossom, lighting, wave). With fewer colors than the\n"
+              "effect has slots, they repeat. It does not switch effects: use 'led effect'. Cycle and\n"
+              "game mode have no colors. The nine per-effect rainbow flags are cleared, like the official\n"
+              "driver does. RAM only unless --save (or a later 'led save'). Needs KBDD_ENABLE_PROFILE_WRITE=1.\n", f);
+        usage_led_color_slots(f);
     } else if (strcmp(subcommand, "sweep") == 0) {
         fputs("Usage: kbctl led sweep [--delay MS] [--color RRGGBB] [--from N]\n\n"
               "Light one position at a time to map matrix positions. Press Ctrl+C to stop.\n", f);
     } else if (strcmp(subcommand, "release") == 0) {
         fputs("Usage: kbctl led release\n\nStop periodic LED frame streaming.\n", f);
     } else if (strcmp(subcommand, "effects") == 0) {
-        fputs("Usage: kbctl led effects\n\nList supported built-in effect names and numeric indexes.\n", f);
+        fputs("Usage: kbctl led effects\n\nList supported built-in effect names, numeric indexes, and color slot counts.\n", f);
+        usage_led_color_slots(f);
     } else if (strcmp(subcommand, "effect") == 0) {
         fputs("Usage: kbctl led effect <name|index> [--save]\n\n"
               "Set the active profile effect. Append --save to commit it to flash.\n"
@@ -749,6 +777,32 @@ static int save_to_flash(void)
     return rc;
 }
 
+static int cmd_led_color(int argc, char **argv)
+{
+    uint8_t payload[2 + 3 * 14];
+    int m, save = 0, rc;
+    int n = 0, i;
+
+    if (argc >= 6 && strcmp(argv[argc - 1], "--save") == 0) {
+        save = 1;
+        argc--;
+    }
+    if (argc < 5 || (m = effect_from_arg(argv[3])) < 0 || argc - 4 > 14) {
+        fprintf(stderr, "kbctl: led color <effect> <RRGGBB> [RRGGBB ...] [--save]  (max 14 colors)\n");
+        return 2;
+    }
+    payload[0] = (uint8_t)m;
+    for (i = 4; i < argc; i++, n++) {
+        if (parse_rgb(argv[i], &payload[2 + 3 * n], &payload[3 + 3 * n], &payload[4 + 3 * n]) != 0) {
+            fprintf(stderr, "kbctl: invalid color '%s' (use RRGGBB)\n", argv[i]);
+            return 2;
+        }
+    }
+    payload[1] = (uint8_t)n;
+    rc = profile_write(KBDD_IPC_OP_SET_COLORS, payload, (size_t)(2 + 3 * n));
+    return (rc == 0 && save) ? save_to_flash() : rc;
+}
+
 static int cmd_led_effect(int argc, char **argv)
 {
     uint8_t mode;
@@ -805,8 +859,15 @@ static int cmd_led(int argc, char **argv)
         unsigned m;
         printf("index  effect\n");
         for (m = 0; m < KBC_LED_EFFECT_COUNT; m++) {
-            printf("%5u   %s%s\n", m, kbc_led_effect_name((uint8_t)m),
-                   m == KBC_LED_EFFECT_LIGHTING ? "  (cor fixa)" : "");
+            size_t count;
+            if (kbc_effect_color_slots((uint8_t)m, NULL, &count)) {
+                printf("%5u   %-10s colors 1..%zu%s\n", m,
+                       kbc_led_effect_name((uint8_t)m), count,
+                       m == KBC_LED_EFFECT_LIGHTING ? " (cor fixa)" : "");
+            } else {
+                printf("%5u   %-10s colors none\n", m,
+                       kbc_led_effect_name((uint8_t)m));
+            }
         }
         printf("   15   custom\n");
         printf("speed %d..%d, brightness %d..%d\n", KBC_LED_SPEED_MIN,
@@ -818,6 +879,7 @@ static int cmd_led(int argc, char **argv)
         return profile_write(KBDD_IPC_OP_SAVE_BLOCK, NULL, 0);
     }
     if (strcmp(sub, "effect") == 0) return cmd_led_effect(argc, argv);
+    if (strcmp(sub, "color") == 0) return cmd_led_color(argc, argv);
     if (strcmp(sub, "brightness") == 0)
         return cmd_led_field(argc, argv, 2, 0, KBC_BRIGHTNESS_RAW_MAX, "(0 = off, 10 = max)");
     if (strcmp(sub, "speed") == 0)

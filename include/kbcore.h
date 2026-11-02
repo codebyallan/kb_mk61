@@ -230,9 +230,7 @@ KBCORE_API kbc_status kbc_profile_encode_select_logical(size_t logical, uint8_t 
 KBCORE_API kbc_status kbc_profile_encode_key_matrix(const kbc_profile *p, uint8_t hw_profile, uint8_t *buf, size_t buf_len);
 KBCORE_API kbc_status kbc_profile_decode_key_matrix(kbc_profile *p, const uint8_t *buf, size_t len, uint8_t *hw_profile);
 
-KBCORE_API kbc_status kbc_profile_encode_params_a(const kbc_profile *p, uint8_t hw_profile, uint8_t *buf, size_t buf_len);
 KBCORE_API kbc_status kbc_profile_encode_params_b(const kbc_profile *p, uint8_t hw_profile, uint8_t *buf, size_t buf_len);
-KBCORE_API kbc_status kbc_profile_decode_params_a(kbc_profile *p, const uint8_t *buf, size_t len, uint8_t *hw_profile);
 KBCORE_API kbc_status kbc_profile_decode_params_b(kbc_profile *p, const uint8_t *buf, size_t len, uint8_t *hw_profile);
 KBCORE_API kbc_status kbc_profile_decode_block_shifted(kbc_profile *p, const uint8_t *buf, size_t len, int apply_shift, uint8_t *hw_profile);
 
@@ -294,6 +292,9 @@ KBCORE_API kbc_status kbc_led_frame_apply_brightness(uint8_t *frame, size_t stri
 #define KBC_PBLK_OFF_DIRECTION   13  /* animation direction, 0..3 */
 #define KBC_PBLK_OFF_SPEED       19  /* one byte shared by all effects; lower = faster */
 #define KBC_PBLK_OFF_CUSTOM_COUNT 134 /* "custom LED count": a change to 1 or 255 makes the keyboard commit the block to flash */
+#define KBC_PBLK_OFF_CUSTOM_CURRENT 135 /* current custom LED slot index */
+#define KBC_PBLK_OFF_LED_STATE 136      /* LED on/off state byte */
+#define KBC_PBLK_OFF_COLOR_BASE 92      /* first per-effect colour slot (planar R/G/B planes) */
 #define KBC_COMMIT_ARM           1
 #define KBC_COMMIT_CLEAN         255   /* factory value, also the final state after a save */
 #define KBC_BRIGHTNESS_RAW_MAX   10

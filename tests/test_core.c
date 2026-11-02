@@ -506,33 +506,6 @@ static void test_profile_roundtrip(void)
     kbc_profile_destroy(q);
 }
 
-static void test_profile_params_a_roundtrip(void)
-{
-    kbc_profile *p = kbc_profile_create(75, 68);
-    kbc_profile *q = kbc_profile_create(75, 68);
-    uint8_t buf[KBC_FEATURE_REPORT_SIZE];
-    uint8_t hw = 0;
-    CHECK(p && q);
-    CHECK(kbc_profile_set_report_rate_index(p, 3) == KBC_OK);
-    CHECK(kbc_profile_set_led_mode(p, 5) == KBC_OK);
-    CHECK(kbc_profile_set_custom_total(p, 3) == KBC_OK);
-    CHECK(kbc_profile_set_custom_current(p, 2) == KBC_OK);
-    CHECK(kbc_profile_set_led_state(p, 1) == KBC_OK);
-    CHECK(kbc_profile_encode_params_a(p, 1, buf, sizeof buf) == KBC_OK);
-    CHECK(buf[4] == 4); /* index+1 */
-    CHECK(buf[7] == 5);
-    CHECK(buf[130] == 3);
-    CHECK(buf[131] == 2);
-    CHECK(buf[132] == 1);
-    CHECK(kbc_profile_decode_params_a(q, buf, sizeof buf, &hw) == KBC_OK);
-    CHECK(hw == 1);
-    CHECK(kbc_profile_get_report_rate_index(q) == 3);
-    CHECK(kbc_profile_get_led_mode(q) == 5);
-    CHECK(kbc_profile_get_custom_total(q) == 3);
-    kbc_profile_destroy(p);
-    kbc_profile_destroy(q);
-}
-
 static void test_profile_params_b_roundtrip(void)
 {
     kbc_profile *p = kbc_profile_create(70, 61);
@@ -1320,7 +1293,6 @@ int main(void)
     test_null_args();
 
     test_profile_roundtrip();
-    test_profile_params_a_roundtrip();
     test_profile_params_b_roundtrip();
     test_profile_extra();
     test_profile_select_encode();

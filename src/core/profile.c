@@ -374,35 +374,10 @@ kbc_status kbc_profile_decode_key_matrix(kbc_profile *p, const uint8_t *buf, siz
     return KBC_OK;
 }
 
-kbc_status kbc_profile_encode_params_a(const kbc_profile *p, uint8_t hw_profile,
-                                      uint8_t *buf, size_t buf_len)
-{
-    uint8_t full[KBC_FEATURE_REPORT_SIZE];
-
-    if (p == NULL || buf == NULL) return KBC_ERR_INVALID_ARGUMENT;
-    if (kbc_profile_validate(p) != KBC_OK) return KBC_ERR_INVALID_ARGUMENT;
-    if (hw_profile < 1 || hw_profile > 4) return KBC_ERR_RANGE;
-    if (buf_len != KBC_FEATURE_REPORT_SIZE) return KBC_ERR_PROTOCOL;
-
-    memset(full, 0, sizeof(full));
-    full[0] = KBC_FEATURE_REPORT_ID;
-    full[1] = KBC_OP_PROFILE_PARAMS;
-    full[2] = hw_profile;
-    full[3] = 0;
-    full[4] = (uint8_t)(p->report_rate_index + 1);
-    full[7] = p->led_mode;
-    if (4 + 126 < KBC_FEATURE_REPORT_SIZE) full[4 + 126] = p->custom_total;
-    if (4 + 127 < KBC_FEATURE_REPORT_SIZE) full[4 + 127] = p->custom_current;
-    if (4 + 128 < KBC_FEATURE_REPORT_SIZE) full[4 + 128] = p->led_state;
-    memcpy(buf, full, KBC_FEATURE_REPORT_SIZE);
-    return KBC_OK;
-}
-
 kbc_status kbc_profile_encode_params_b(const kbc_profile *p, uint8_t hw_profile,
                                       uint8_t *buf, size_t buf_len)
 {
     uint8_t full[KBC_FEATURE_REPORT_SIZE];
-    size_t base = 8;
 
     if (p == NULL || buf == NULL) return KBC_ERR_INVALID_ARGUMENT;
     if (kbc_profile_validate(p) != KBC_OK) return KBC_ERR_INVALID_ARGUMENT;
@@ -415,23 +390,23 @@ kbc_status kbc_profile_encode_params_b(const kbc_profile *p, uint8_t hw_profile,
     full[2] = hw_profile;
     full[3] = 0;
 
-    full[base] = (uint8_t)(p->report_rate_index + 1);
-    full[base + 3] = p->led_mode;
-    full[base + 4] = p->led_intensity;
-    full[base + 5] = p->direction;
+    full[KBC_PBLK_OFF_RATE] = (uint8_t)(p->report_rate_index + 1);
+    full[KBC_PBLK_OFF_MODE] = p->led_mode;
+    full[KBC_PBLK_OFF_BRIGHTNESS] = p->led_intensity;
+    full[KBC_PBLK_OFF_DIRECTION] = p->direction;
     full[KBC_PBLK_OFF_SPEED] = p->led_speed;
     {
         size_t i;
         for (i = 0; i < 9; i++) {
-            if (base + 24 + i < KBC_FEATURE_REPORT_SIZE) {
-                full[base + 24 + i] = p->spectrum[i];
+            if (KBC_PBLK_OFF_SPECTRUM + i < KBC_FEATURE_REPORT_SIZE) {
+                full[KBC_PBLK_OFF_SPECTRUM + i] = p->spectrum[i];
             }
         }
     }
     {
         size_t c;
         for (c = 0; c < 8 && c < p->color_count; c++) {
-            size_t off = base + 84 + c * 24;
+            size_t off = KBC_PBLK_OFF_COLOR_BASE + c * 24;
             if (off + 16 < KBC_FEATURE_REPORT_SIZE) {
                 full[off] = p->colors[c][0];
                 full[off + 8] = p->colors[c][1];
@@ -439,31 +414,10 @@ kbc_status kbc_profile_encode_params_b(const kbc_profile *p, uint8_t hw_profile,
             }
         }
     }
-    if (base + 126 < KBC_FEATURE_REPORT_SIZE) full[base + 126] = p->custom_total;
-    if (base + 127 < KBC_FEATURE_REPORT_SIZE) full[base + 127] = p->custom_current;
-    if (base + 128 < KBC_FEATURE_REPORT_SIZE) full[base + 128] = p->led_state;
+    if (KBC_PBLK_OFF_CUSTOM_COUNT < KBC_FEATURE_REPORT_SIZE) full[KBC_PBLK_OFF_CUSTOM_COUNT] = p->custom_total;
+    if (KBC_PBLK_OFF_CUSTOM_CURRENT < KBC_FEATURE_REPORT_SIZE) full[KBC_PBLK_OFF_CUSTOM_CURRENT] = p->custom_current;
+    if (KBC_PBLK_OFF_LED_STATE < KBC_FEATURE_REPORT_SIZE) full[KBC_PBLK_OFF_LED_STATE] = p->led_state;
     memcpy(buf, full, KBC_FEATURE_REPORT_SIZE);
-    return KBC_OK;
-}
-
-kbc_status kbc_profile_decode_params_a(kbc_profile *p, const uint8_t *buf, size_t len, uint8_t *hw_profile)
-{
-    kbc_feature_report rep;
-    kbc_status st;
-
-    if (p == NULL || buf == NULL) return KBC_ERR_INVALID_ARGUMENT;
-    st = kbc_parse_feature_report(buf, len, &rep);
-    if (st != KBC_OK) return st;
-    if (rep.opcode != KBC_OP_PROFILE_PARAMS) return KBC_ERR_PROTOCOL;
-    if (rep.param0 < 1 || rep.param0 > 4) return KBC_ERR_PROTOCOL;
-    p->hw_profile = rep.param0;
-    if (hw_profile != NULL) *hw_profile = rep.param0;
-    p->report_rate_index = (rep.params[0] > 0) ? (uint8_t)(rep.params[0] - 1) : 0;
-    p->led_mode = rep.params[3];
-    if (p->led_mode > 12 && p->led_mode != 15) return KBC_ERR_PROTOCOL;
-    if (4 + 126 < KBC_FEATURE_REPORT_SIZE) p->custom_total = buf[4 + 126];
-    if (4 + 127 < KBC_FEATURE_REPORT_SIZE) p->custom_current = buf[4 + 127];
-    if (4 + 128 < KBC_FEATURE_REPORT_SIZE) p->led_state = buf[4 + 128];
     return KBC_OK;
 }
 
@@ -471,7 +425,6 @@ static kbc_status kbc_profile_decode_params_b_impl(kbc_profile *p, const uint8_t
 {
     kbc_feature_report rep;
     kbc_status st;
-    size_t base = 8;
 
     if (p == NULL || buf == NULL) return KBC_ERR_INVALID_ARGUMENT;
     st = kbc_parse_feature_report(buf, len, &rep);
@@ -480,24 +433,24 @@ static kbc_status kbc_profile_decode_params_b_impl(kbc_profile *p, const uint8_t
     if (rep.param0 < 1 || rep.param0 > 4) return KBC_ERR_PROTOCOL;
     p->hw_profile = rep.param0;
     if (hw_profile != NULL) *hw_profile = rep.param0;
-    p->report_rate_index = (buf[base] > 0) ? (uint8_t)(buf[base] - 1) : 0;
-    p->led_mode = buf[base + 3];
+    p->report_rate_index = (buf[KBC_PBLK_OFF_RATE] > 0) ? (uint8_t)(buf[KBC_PBLK_OFF_RATE] - 1) : 0;
+    p->led_mode = buf[KBC_PBLK_OFF_MODE];
     if (validate_led && p->led_mode > 12 && p->led_mode != 15) return KBC_ERR_PROTOCOL;
-    p->led_intensity = buf[base + 4];
-    p->direction = (buf[base + 5] > 3) ? 0 : buf[base + 5];
+    p->led_intensity = buf[KBC_PBLK_OFF_BRIGHTNESS];
+    p->direction = (buf[KBC_PBLK_OFF_DIRECTION] > 3) ? 0 : buf[KBC_PBLK_OFF_DIRECTION];
     p->led_speed = buf[KBC_PBLK_OFF_SPEED];
     {
         size_t i;
         for (i = 0; i < 9; i++) {
-            if (base + 24 + i < KBC_FEATURE_REPORT_SIZE) {
-                p->spectrum[i] = buf[base + 24 + i];
+            if (KBC_PBLK_OFF_SPECTRUM + i < KBC_FEATURE_REPORT_SIZE) {
+                p->spectrum[i] = buf[KBC_PBLK_OFF_SPECTRUM + i];
             }
         }
     }
     {
         size_t c;
         for (c = 0; c < 8; c++) {
-            size_t off = base + 84 + c * 24;
+            size_t off = KBC_PBLK_OFF_COLOR_BASE + c * 24;
             if (off + 16 < KBC_FEATURE_REPORT_SIZE) {
                 p->colors[c][0] = buf[off];
                 p->colors[c][1] = buf[off + 8];
@@ -505,9 +458,9 @@ static kbc_status kbc_profile_decode_params_b_impl(kbc_profile *p, const uint8_t
             }
         }
     }
-    if (base + 126 < KBC_FEATURE_REPORT_SIZE) p->custom_total = buf[base + 126];
-    if (base + 127 < KBC_FEATURE_REPORT_SIZE) p->custom_current = buf[base + 127];
-    if (base + 128 < KBC_FEATURE_REPORT_SIZE) p->led_state = buf[base + 128];
+    if (KBC_PBLK_OFF_CUSTOM_COUNT < KBC_FEATURE_REPORT_SIZE) p->custom_total = buf[KBC_PBLK_OFF_CUSTOM_COUNT];
+    if (KBC_PBLK_OFF_CUSTOM_CURRENT < KBC_FEATURE_REPORT_SIZE) p->custom_current = buf[KBC_PBLK_OFF_CUSTOM_CURRENT];
+    if (KBC_PBLK_OFF_LED_STATE < KBC_FEATURE_REPORT_SIZE) p->led_state = buf[KBC_PBLK_OFF_LED_STATE];
     return KBC_OK;
 }
 
@@ -539,7 +492,6 @@ kbc_status kbc_profile_encode_extra(const kbc_profile *p, uint8_t hw_profile,
                                    uint8_t *buf, size_t buf_len)
 {
     uint8_t full[KBC_FEATURE_REPORT_SIZE];
-    size_t base = 8;
 
     if (p == NULL || buf == NULL) return KBC_ERR_INVALID_ARGUMENT;
     if (kbc_profile_validate(p) != KBC_OK) return KBC_ERR_INVALID_ARGUMENT;
@@ -551,9 +503,9 @@ kbc_status kbc_profile_encode_extra(const kbc_profile *p, uint8_t hw_profile,
     full[1] = KBC_OP_PROFILE_EXTRA;
     full[2] = hw_profile;
     full[3] = 0;
-    if (base + 3 < KBC_FEATURE_REPORT_SIZE) full[base + 3] = p->direction;
-    if (base + 4 < KBC_FEATURE_REPORT_SIZE) full[base + 4] = p->six_key_mode;
-    if (base + 5 < KBC_FEATURE_REPORT_SIZE) full[base + 5] = p->win_lock;
+    if (KBC_FEATURE_DATA_OFFSET + 3 < KBC_FEATURE_REPORT_SIZE) full[KBC_FEATURE_DATA_OFFSET + 3] = p->direction;
+    if (KBC_FEATURE_DATA_OFFSET + 4 < KBC_FEATURE_REPORT_SIZE) full[KBC_FEATURE_DATA_OFFSET + 4] = p->six_key_mode;
+    if (KBC_FEATURE_DATA_OFFSET + 5 < KBC_FEATURE_REPORT_SIZE) full[KBC_FEATURE_DATA_OFFSET + 5] = p->win_lock;
     memcpy(buf, full, KBC_FEATURE_REPORT_SIZE);
     return KBC_OK;
 }
@@ -562,7 +514,6 @@ kbc_status kbc_profile_decode_extra(kbc_profile *p, const uint8_t *buf, size_t l
 {
     kbc_feature_report rep;
     kbc_status st;
-    size_t base = 8;
 
     if (p == NULL || buf == NULL) return KBC_ERR_INVALID_ARGUMENT;
     st = kbc_parse_feature_report(buf, len, &rep);
@@ -571,9 +522,9 @@ kbc_status kbc_profile_decode_extra(kbc_profile *p, const uint8_t *buf, size_t l
     if (rep.param0 < 1 || rep.param0 > 4) return KBC_ERR_PROTOCOL;
     p->hw_profile = rep.param0;
     if (hw_profile != NULL) *hw_profile = rep.param0;
-    if (base + 3 < KBC_FEATURE_REPORT_SIZE) p->direction = buf[base + 3] ? 1 : 0;
-    if (base + 4 < KBC_FEATURE_REPORT_SIZE) p->six_key_mode = buf[base + 4] ? 1 : 0;
-    if (base + 5 < KBC_FEATURE_REPORT_SIZE) p->win_lock = buf[base + 5] ? 1 : 0;
+    if (KBC_FEATURE_DATA_OFFSET + 3 < KBC_FEATURE_REPORT_SIZE) p->direction = buf[KBC_FEATURE_DATA_OFFSET + 3] ? 1 : 0;
+    if (KBC_FEATURE_DATA_OFFSET + 4 < KBC_FEATURE_REPORT_SIZE) p->six_key_mode = buf[KBC_FEATURE_DATA_OFFSET + 4] ? 1 : 0;
+    if (KBC_FEATURE_DATA_OFFSET + 5 < KBC_FEATURE_REPORT_SIZE) p->win_lock = buf[KBC_FEATURE_DATA_OFFSET + 5] ? 1 : 0;
     return KBC_OK;
 }
 

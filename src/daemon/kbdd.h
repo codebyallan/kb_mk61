@@ -18,6 +18,16 @@ typedef struct kbdd_model {
     size_t led_count;
 } kbdd_model_t;
 
+/* Single source of truth for the supported device models (kept in the header
+ * so daemon.c and hidraw.c cannot diverge). */
+static const kbdd_model_t KBDD_MODELS[] = {
+    {"MK61L", 0x1EA7, 0x9018, 70, 61},
+    {"MK68M", 0x1EA7, 0x9050, 75, 68},
+    {"GK8150", 0x2442, 0x0011, 75, 68},
+    {"GK8150", 0x2442, 0xB011, 75, 68},
+    {"GK8150", 0x2442, 0xB014, 75, 68},
+};
+
 typedef struct kbdd_hid_device {
     char path[256];
     int fd;

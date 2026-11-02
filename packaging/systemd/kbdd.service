@@ -8,6 +8,7 @@ Type=simple
 ExecStart=/usr/bin/kbdd
 Restart=on-failure
 RestartSec=2
+UMask=0077
 NoNewPrivileges=yes
 # The daemon persists LED mode, brightness, and effect speeds here.
 # %h/.config/kbdd stores the persistent configuration, while %t contains
@@ -15,11 +16,24 @@ NoNewPrivileges=yes
 RestrictAddressFamilies=AF_UNIX
 RestrictRealtime=yes
 RestrictSUIDSGID=yes
+RestrictNamespaces=yes
 LockPersonality=yes
 MemoryDenyWriteExecute=yes
 SystemCallFilter=@system-service
+SystemCallArchitectures=native
 SystemCallErrorNumber=EPERM
-RestrictRealtime=yes
+ProtectSystem=full
+PrivateTmp=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+ProtectProc=invisible
+ProcSubset=pid
+CapabilityBoundingSet=
+AmbientCapabilities=
 
 [Install]
 WantedBy=default.target

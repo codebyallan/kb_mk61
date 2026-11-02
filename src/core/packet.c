@@ -160,18 +160,6 @@ kbc_status kbc_parse_feature_report(const uint8_t *buf, size_t len,
     return KBC_OK;
 }
 
-kbc_status kbc_decode_feature_report(const uint8_t *buf, size_t len,
-                                    kbc_feature_report *out)
-{
-    return kbc_parse_feature_report(buf, len, out);
-}
-
-kbc_status kbc_read_feature_report(const uint8_t *buf, size_t len,
-                                  kbc_feature_report *out)
-{
-    return kbc_parse_feature_report(buf, len, out);
-}
-
 static kbc_status encode_feature_from_fields(uint8_t opcode, uint8_t param0,
                                             uint8_t param1,
                                             const uint8_t params[KBC_FEATURE_PARAMS_SIZE],
@@ -233,12 +221,6 @@ kbc_status kbc_encode_feature_report(const kbc_feature_report *in,
                                      in->params, data, data_len, buf, buf_len);
 }
 
-kbc_status kbc_decode_encode_feature_report(const kbc_feature_report *in,
-                                           uint8_t *buf, size_t buf_len)
-{
-    return kbc_encode_feature_report(in, buf, buf_len);
-}
-
 kbc_status kbc_build_feature_report(uint8_t opcode, uint8_t param0,
                                    uint8_t param1,
                                    const uint8_t params[KBC_FEATURE_PARAMS_SIZE],
@@ -247,16 +229,6 @@ kbc_status kbc_build_feature_report(uint8_t opcode, uint8_t param0,
 {
     return encode_feature_from_fields(opcode, param0, param1, params, data,
                                      data_len, buf, buf_len);
-}
-
-kbc_status kbc_make_feature_report(uint8_t opcode, uint8_t param0,
-                                  uint8_t param1,
-                                  const uint8_t params[KBC_FEATURE_PARAMS_SIZE],
-                                  const uint8_t *data, size_t data_len,
-                                  uint8_t *buf, size_t buf_len)
-{
-    return kbc_build_feature_report(opcode, param0, param1, params, data,
-                                   data_len, buf, buf_len);
 }
 
 /* Input report parsing. */
@@ -271,43 +243,25 @@ static void fill_input_report(const uint8_t *buf, kbc_input_report *out)
 
     if (buf[1] == 0xF1 && buf[2] == 0xF2) {
         out->col = buf[3];
-        out->column = buf[3];
         out->row = buf[4];
-        out->line = buf[4];
         out->state = buf[5];
-        out->pressed_byte = buf[5];
         out->matrix_index = (uint16_t)buf[3] * 5u + (uint16_t)buf[4];
-        out->index = out->matrix_index;
         out->pressed = (buf[5] != 0) ? 1 : 0;
-        out->emit = out->pressed;
-        out->has_event = out->pressed;
         out->subtype = 0xF1;
     } else if (buf[1] == 0xF5) {
         out->col = buf[2];
-        out->column = buf[2];
         out->row = buf[3];
-        out->line = buf[3];
         out->extra = buf[4];
         out->state = buf[5];
-        out->pressed_byte = buf[5];
         out->matrix_index = (uint16_t)buf[2] * 5u + (uint16_t)buf[3];
-        out->index = out->matrix_index;
         out->pressed = (buf[5] == 0x01) ? 1 : 0;
-        out->emit = out->pressed;
-        out->has_event = out->pressed;
         out->subtype = 0xF5;
     } else if (buf[1] == 0xE1) {
         out->system_subtype = buf[2];
         out->subtype = buf[2];
         out->value = buf[3];
-        out->id = buf[3];
-        out->mode = buf[3];
-        out->profile_id = buf[3];
-        out->led_mode = buf[3];
         out->state = buf[3];
         out->pressed = 0;
-        out->emit = 0;
-        out->has_event = 0;
     } else {
         out->subtype = buf[1];
         out->state = (KBC_INPUT_REPORT_MIN_SIZE > 5) ? buf[5] : 0;
@@ -328,10 +282,4 @@ kbc_status kbc_parse_input_report(const uint8_t *buf, size_t len,
     }
     fill_input_report(buf, out);
     return KBC_OK;
-}
-
-kbc_status kbc_decode_input_report(const uint8_t *buf, size_t len,
-                                  kbc_input_report *out)
-{
-    return kbc_parse_input_report(buf, len, out);
 }

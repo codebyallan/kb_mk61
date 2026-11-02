@@ -22,14 +22,6 @@ static void kbdd_signal_handler(int sig)
     kbdd_stop_flag = 1;
 }
 
-static const kbdd_model_t KBDD_MODELS[] = {
-    {"MK61L", 0x1EA7, 0x9018, 70, 61},
-    {"MK68M", 0x1EA7, 0x9050, 75, 68},
-    {"GK8150", 0x2442, 0x0011, 75, 68},
-    {"GK8150", 0x2442, 0xB011, 75, 68},
-    {"GK8150", 0x2442, 0xB014, 75, 68},
-};
-
 static int kbdd_ensure_dir(const char *path)
 {
     struct stat st;

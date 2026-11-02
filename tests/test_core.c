@@ -542,7 +542,7 @@ static void test_profile_params_b_roundtrip(void)
     CHECK(p && q);
     CHECK(kbc_profile_set_report_rate_index(p, 3) == KBC_OK);
     CHECK(kbc_profile_set_led_mode(p, 7) == KBC_OK);
-    CHECK(kbc_profile_set_led_intensity(p, 80) == KBC_OK);
+    CHECK(kbc_profile_set_led_intensity(p, 8) == KBC_OK);
     CHECK(kbc_profile_set_led_speed(p, 50) == KBC_OK);
     CHECK(kbc_profile_set_direction(p, 2) == KBC_OK);
     CHECK(kbc_profile_set_spectrum(p, 0, 9) == KBC_OK);
@@ -551,13 +551,13 @@ static void test_profile_params_b_roundtrip(void)
     CHECK(kbc_profile_encode_params_b(p, 4, buf, sizeof buf) == KBC_OK);
     CHECK(buf[8] == 4);
     CHECK(buf[11] == 7);
-    CHECK(buf[12] == 80);
+    CHECK(buf[12] == 8);
     CHECK(buf[13] == 2);
     CHECK(buf[19] == 50);
     CHECK(kbc_profile_decode_params_b(q, buf, sizeof buf, &hw) == KBC_OK);
     CHECK(hw == 4);
     CHECK(kbc_profile_get_led_mode(q) == 7);
-    CHECK(kbc_profile_get_led_intensity(q) == 80);
+    CHECK(kbc_profile_get_led_intensity(q) == 8);
     CHECK(kbc_profile_get_led_speed(q) == 50);
     CHECK(kbc_profile_get_direction(q) == 2);
     CHECK(kbc_profile_get_spectrum(q, 0) == 9);
@@ -875,7 +875,7 @@ static void test_profile_regression_shifted(void)
     uint8_t hw = 0;
     CHECK(p && q);
     CHECK(kbc_profile_set_led_mode(p, 5) == KBC_OK);
-    CHECK(kbc_profile_set_led_intensity(p, 80) == KBC_OK);
+    CHECK(kbc_profile_set_led_intensity(p, 8) == KBC_OK);
     CHECK(kbc_profile_set_led_speed(p, 50) == KBC_OK);
     CHECK(kbc_profile_encode_params_b(p, 2, buf, sizeof buf) == KBC_OK);
     /* shifted decode should not crash and yield valid profile */

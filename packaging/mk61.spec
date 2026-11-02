@@ -25,11 +25,6 @@ Status: experimental; device writes are disabled until validated on hardware.
 
 %install
 %make_install PREFIX=%{_prefix} LIBDIR=%{_libdir}
-install -Dpm0644 /dev/stdin %{buildroot}%{_sysconfdir}/systemd/user/kbdd.service.d/led.conf <<'EOF'
-[Service]
-Environment=KBDD_ENABLE_LED=1
-Environment=KBDD_ENABLE_PROFILE_WRITE=1
-EOF
 
 %post
 %systemd_user_post kbdd.service
@@ -57,7 +52,6 @@ fi
 %{_includedir}/kbcore.h
 %{_prefix}/lib/udev/rules.d/60-kbdd.rules
 %{_prefix}/lib/systemd/user/kbdd.service
-%config(noreplace) %{_sysconfdir}/systemd/user/kbdd.service.d/led.conf
 
 %changelog
 * Mon Nov 02 2026 mk61 maintainers - 0.4.1-1

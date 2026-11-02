@@ -205,6 +205,7 @@ uint8_t kbc_profile_get_led_mode(const kbc_profile *p)
 kbc_status kbc_profile_set_led_intensity(kbc_profile *p, uint8_t v)
 {
     if (p == NULL) return KBC_ERR_INVALID_ARGUMENT;
+    if (v > KBC_BRIGHTNESS_RAW_MAX) return KBC_ERR_RANGE;
     p->led_intensity = v;
     return KBC_OK;
 }
@@ -217,6 +218,7 @@ uint8_t kbc_profile_get_led_intensity(const kbc_profile *p)
 kbc_status kbc_profile_set_led_speed(kbc_profile *p, uint8_t v)
 {
     if (p == NULL) return KBC_ERR_INVALID_ARGUMENT;
+    if (v < KBC_SPEED_RAW_MIN || v > KBC_SPEED_RAW_MAX) return KBC_ERR_RANGE;
     p->led_speed = v;
     return KBC_OK;
 }

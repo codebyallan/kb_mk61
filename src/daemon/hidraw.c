@@ -11,14 +11,6 @@
 #include <sys/ioctl.h>
 #include <unistd.h>
 
-static const kbdd_model_t KBDD_MODELS[] = {
-    {"MK61L", 0x1EA7, 0x9018, 70, 61},
-    {"MK68M", 0x1EA7, 0x9050, 75, 68},
-    {"GK8150", 0x2442, 0x0011, 75, 68},
-    {"GK8150", 0x2442, 0xB011, 75, 68},
-    {"GK8150", 0x2442, 0xB014, 75, 68},
-};
-
 static const kbdd_model_t *kbdd_model_lookup(uint16_t vid, uint16_t pid)
 {
     for (size_t i = 0; i < sizeof(KBDD_MODELS) / sizeof(KBDD_MODELS[0]); i++) {

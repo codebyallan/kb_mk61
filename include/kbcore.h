@@ -91,31 +91,18 @@ typedef enum kbc_status {
 
 /* Feature-report opcodes. */
 #define KBC_OP_SELECT_PROFILE       0x01
-#define KBC_OPCODE_SELECT_PROFILE   0x01
 #define KBC_OP_PROFILE_PARAMS       0x02
-#define KBC_OPCODE_PROFILE_PARAMS   0x02
 #define KBC_OP_KEY_MATRIX           0x03
-#define KBC_OPCODE_KEY_MATRIX       0x03
 #define KBC_OP_LED_DATA             0x04
-#define KBC_OPCODE_LED_DATA         0x04
 #define KBC_OP_MACRO                0x05
-#define KBC_OPCODE_MACRO            0x05
 #define KBC_OP_ENABLE_INPUT         0x06
-#define KBC_OPCODE_ENABLE_INPUT     0x06
 #define KBC_OP_LED_PAGE             0x07
-#define KBC_OPCODE_LED_PAGE         0x07
 #define KBC_OP_CUSTOM_COLOR         0x08
-#define KBC_OPCODE_CUSTOM_COLOR     0x08
 #define KBC_OP_CUSTOM_FRAME         0x09
-#define KBC_OPCODE_CUSTOM_FRAME     0x09
 #define KBC_OP_CUSTOM_EFFECT        0x0A
-#define KBC_OPCODE_CUSTOM_EFFECT    0x0A
 #define KBC_OP_PROFILE_EXTRA        0x0B
-#define KBC_OPCODE_PROFILE_EXTRA    0x0B
 #define KBC_OP_READ_ACTIVE_PROFILE  0x81
-#define KBC_OPCODE_READ_ACTIVE_PROFILE 0x81
 #define KBC_OP_READ_PROFILE_BLOCK   0x82
-#define KBC_OPCODE_READ_PROFILE_BLOCK 0x82
 
 /* ------------------------------------------------------------------ */
 /* Decoded report structures                                           */
@@ -132,34 +119,28 @@ typedef struct kbc_feature_report {
     size_t  data_len;                  /* number of meaningful bytes in data */
 } kbc_feature_report;
 
-typedef kbc_feature_report kbc_feature_report_t;
+/* ------------------------------------------------------------------ */
+/* Decoded report structures (continued)                               */
+/* ------------------------------------------------------------------ */
 
 typedef struct kbc_input_report {
     uint8_t report_id;       /* byte 0, must be 0x04 */
     uint8_t marker;          /* byte 1 */
-    uint8_t subtype;         /* alias of marker / system subtype */
+    uint8_t subtype;         /* marker / system subtype */
     uint8_t system_subtype;  /* byte 2 when marker == 0xE1 */
     uint8_t col;             /* column (0-based) */
-    uint8_t column;          /* alias of col */
     uint8_t row;             /* row (0-based) */
-    uint8_t line;            /* alias of row */
     uint8_t state;           /* state byte (pp) */
-    uint8_t pressed_byte;    /* alias of state */
     uint8_t extra;           /* extra byte (GK8150) */
     uint8_t value;           /* byte 3 for system events (profile id, led mode, ...) */
-    uint8_t id;              /* alias of value */
-    uint8_t mode;            /* alias of value */
-    uint8_t profile_id;      /* alias of value */
-    uint8_t led_mode;        /* alias of value */
     uint16_t matrix_index;   /* col * 5 + row */
-    uint16_t index;          /* alias of matrix_index */
     int pressed;             /* 1 if the event should be emitted */
-    int emit;                /* alias of pressed */
-    int has_event;           /* alias of pressed */
     uint8_t raw[KBC_INPUT_REPORT_MIN_SIZE];
 } kbc_input_report;
 
-typedef kbc_input_report kbc_input_report_t;
+/* ------------------------------------------------------------------ */
+/* Version                                                             */
+/* ------------------------------------------------------------------ */
 
 /* ------------------------------------------------------------------ */
 /* Version                                                             */
@@ -180,32 +161,19 @@ KBCORE_API kbc_status  kbc_is_valid_opcode(uint8_t opcode);
 /* Decode a 264-byte feature report into *out. */
 KBCORE_API kbc_status kbc_parse_feature_report(const uint8_t *buf, size_t len,
                                                kbc_feature_report *out);
-KBCORE_API kbc_status kbc_decode_feature_report(const uint8_t *buf, size_t len,
-                                                kbc_feature_report *out);
-KBCORE_API kbc_status kbc_read_feature_report(const uint8_t *buf, size_t len,
-                                              kbc_feature_report *out);
 
 /* Encode *in into buf (must have room for KBC_FEATURE_REPORT_SIZE bytes). */
 KBCORE_API kbc_status kbc_encode_feature_report(const kbc_feature_report *in,
                                                  uint8_t *buf, size_t buf_len);
-KBCORE_API kbc_status kbc_decode_encode_feature_report(const kbc_feature_report *in,
-                                                       uint8_t *buf, size_t buf_len);
 KBCORE_API kbc_status kbc_build_feature_report(uint8_t opcode, uint8_t param0,
                                                uint8_t param1,
                                                const uint8_t params[KBC_FEATURE_PARAMS_SIZE],
                                                const uint8_t *data, size_t data_len,
                                                uint8_t *buf, size_t buf_len);
-KBCORE_API kbc_status kbc_make_feature_report(uint8_t opcode, uint8_t param0,
-                                              uint8_t param1,
-                                              const uint8_t params[KBC_FEATURE_PARAMS_SIZE],
-                                              const uint8_t *data, size_t data_len,
-                                              uint8_t *buf, size_t buf_len);
 
 /* Decode an input report 0x04 into *out. */
 KBCORE_API kbc_status kbc_parse_input_report(const uint8_t *buf, size_t len,
                                               kbc_input_report *out);
-KBCORE_API kbc_status kbc_decode_input_report(const uint8_t *buf, size_t len,
-                                               kbc_input_report *out);
 
 /* Convenience: validate a single report ID value. */
 KBCORE_API kbc_status kbc_validate_report_id(uint8_t id, uint8_t expected);
@@ -373,10 +341,10 @@ KBCORE_API kbc_status kbc_profile_block_set_mode(const uint8_t *block, size_t bl
 #define KBC_LED_EFFECT_COUNT   13
 #define KBC_LED_EFFECT_LIGHTING 12   /* constant single colour */
 #define KBC_LED_EFFECT_OBSERVED_14 14
-#define KBC_LED_SPEED_MIN       1
-#define KBC_LED_SPEED_MAX       3
+#define KBC_LED_SPEED_MIN       2
+#define KBC_LED_SPEED_MAX       102
 #define KBC_LED_BRIGHTNESS_MIN  0
-#define KBC_LED_BRIGHTNESS_MAX  5
+#define KBC_LED_BRIGHTNESS_MAX  10
 KBCORE_API const char *kbc_led_effect_name(uint8_t mode);
 
 /* MK61L/SK61L key names <-> matrix positions (index = column * 5 + row).
@@ -417,22 +385,5 @@ KBCORE_API kbc_status kbc_build_read_request(uint8_t opcode, uint8_t profile, ui
 #endif
 
 
-
-/* ------------------------------------------------------------------ */
-/* Convenience aliases                                                 */
-/* ------------------------------------------------------------------ */
-#define kbc_profile_new kbc_profile_create
-#define kbc_profile_free kbc_profile_destroy
-#define kbc_macro_new kbc_macro_create
-#define kbc_macro_free kbc_macro_destroy
-
-#define kbc_encode_select_profile kbc_profile_encode_select
-#define kbc_encode_key_matrix kbc_profile_encode_key_matrix
-#define kbc_encode_profile_params_a kbc_profile_encode_params_a
-#define kbc_encode_profile_params_b kbc_profile_encode_params_b
-#define kbc_decode_profile_params_a kbc_profile_decode_params_a
-#define kbc_decode_profile_params_b kbc_profile_decode_params_b
-#define kbc_encode_profile_extra kbc_profile_encode_extra
-#define kbc_decode_profile_extra kbc_profile_decode_extra
 
 #endif /* KBCORE_H */

@@ -89,7 +89,7 @@ tests, installs, and starts the user service:
 ./install.sh
 ```
 
-LED and profile writes are opt-in:
+LED and profile writes are opt-in (disabled by default):
 
 ```sh
 ENABLE_LED=1 ./install.sh

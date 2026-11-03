@@ -371,7 +371,7 @@ int kbdd_dev_save_profile(const kbdd_dev_io_t *io, uint8_t *profile_out)
         rc = kbdd_dev_query(io, KBC_OP_READ_PROFILE_BLOCK, prof, chk);
         if (rc != KBDD_DEV_OK ||
             memcmp(chk + 3, cur + 3, sizeof(chk) - 3) != 0) {
-            return KBDD_DEV_EVERIFY;
+            return rc != KBDD_DEV_OK ? rc : KBDD_DEV_EIO;
         }
         return KBDD_DEV_EVERIFY;
     }

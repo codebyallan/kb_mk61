@@ -191,6 +191,8 @@ struct kb {
     uint8_t last_op;
     int ignore_write;
     int fail_after_arm;
+    int fail_clean_writes;
+    int ignore_restore_write;
     int ignore_select;
     size_t short_reply;        /* if set, replies are truncated to this many bytes */
     uint8_t flash[264];
@@ -215,7 +217,10 @@ static ssize_t kb_set(void *ctx, const uint8_t *buf, size_t len)
         if (k->fail_after_arm && k->nwrites > 1) {
             return -1;
         }
-        if (!k->ignore_write) {
+        if (k->fail_clean_writes && (k->nwrites == 2 || k->nwrites == 3)) {
+            return -1;
+        }
+        if (!k->ignore_write && !(k->ignore_restore_write && k->nwrites == 4)) {
             uint8_t oldc = k->block[134];
             memcpy(k->block + 3, buf + 3, 261);   /* keyboard stores the data */
             if (buf[134] != oldc && (buf[134] == 1 || buf[134] == 255)) {
@@ -406,6 +411,16 @@ static void test_save_profile(void)
     kb_init(&k, &io); k.block[134] = 255; k.fail_after_arm = 1;    /* clean write and restoration both fail */
     CHECK(kbdd_dev_save_profile(&io, NULL) == KBDD_DEV_EIO);
     CHECK(k.nwrites == 4 && k.block[134] == 1);                   /* restoration was attempted */
+
+    /* clean write fails twice, restoration succeeds and block is verified */
+    kb_init(&k, &io); k.block[134] = 255; k.fail_clean_writes = 1;
+    CHECK(kbdd_dev_save_profile(&io, NULL) == KBDD_DEV_EVERIFY);
+    CHECK(k.nwrites == 4 && k.block[134] == 255);
+
+    /* clean write fails twice, restoration write succeeds but block not restored */
+    kb_init(&k, &io); k.block[134] = 255; k.fail_clean_writes = 1; k.ignore_restore_write = 1;
+    CHECK(kbdd_dev_save_profile(&io, NULL) == KBDD_DEV_EIO);
+    CHECK(k.nwrites == 4 && k.block[134] == 1);
 
     kb_init(&k, &io); k.block[134] = 255; k.active = 9;            /* bogus 0x81 */
     CHECK(kbdd_dev_save_profile(&io, NULL) == KBDD_DEV_EPROTO && k.nwrites == 0);

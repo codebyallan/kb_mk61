@@ -46,7 +46,7 @@ LIB_SHARED := libkbcore.so
 CORE_SRCS   := $(wildcard src/core/*.c)
 DAEMON_SRCS := $(wildcard src/daemon/*.c)
 CLI_SRCS    := $(wildcard src/cli/*.c)
-TEST_SRCS   := $(wildcard tests/*.c)
+TEST_SRCS   := $(filter-out tests/test_handlers.c, $(wildcard tests/*.c))
 
 CORE_OBJS   := $(patsubst src/%.c,$(OBJ_DIR)/%.o,$(CORE_SRCS))
 DAEMON_OBJS := $(patsubst src/%.c,$(OBJ_DIR)/%.o,$(DAEMON_SRCS))
@@ -74,10 +74,11 @@ daemon: check-arch $(BIN_DIR)/kbdd
 
 cli: check-arch $(BIN_DIR)/kbctl
 
-test: check-arch $(BIN_DIR)/test-core $(BIN_DIR)/test-device
+test: check-arch $(BIN_DIR)/test-core $(BIN_DIR)/test-device $(BIN_DIR)/test-handlers
 	@echo "==> running unit tests"
 	@$(BIN_DIR)/test-core
 	@$(BIN_DIR)/test-device
+	@$(BIN_DIR)/test-handlers
 
 asan: check-arch
 	@mkdir -p $(BUILD_DIR)
@@ -92,7 +93,7 @@ asan: check-arch
 		$(MAKE) --no-print-directory test; \
 	fi
 
-asan-run: check-arch $(ASAN_DIR)/test-core $(ASAN_DIR)/test-device
+asan-run: check-arch $(ASAN_DIR)/test-core $(ASAN_DIR)/test-device $(ASAN_DIR)/test-handlers
 	@echo "==> running ASan/UBSan tests"
 	@ASAN_OPTIONS=detect_leaks=1:abort_on_error=1 \
 	 UBSAN_OPTIONS=halt_on_error=1:print_stacktrace=1 \
@@ -100,6 +101,9 @@ asan-run: check-arch $(ASAN_DIR)/test-core $(ASAN_DIR)/test-device
 	@ASAN_OPTIONS=detect_leaks=1:abort_on_error=1 \
 	 UBSAN_OPTIONS=halt_on_error=1:print_stacktrace=1 \
 	 $(ASAN_DIR)/test-device
+	@ASAN_OPTIONS=detect_leaks=1:abort_on_error=1 \
+	 UBSAN_OPTIONS=halt_on_error=1:print_stacktrace=1 \
+	 $(ASAN_DIR)/test-handlers
 
 install: all
 	$(INSTALL) -d $(DESTDIR)$(BINDIR) $(DESTDIR)$(LIBDIR) \
@@ -172,6 +176,15 @@ $(BIN_DIR)/test-device: $(DEVTEST_OBJS) $(LIB_STATIC)
 	@echo "==> link $@"
 	$(CC) $(LDFLAGS) $(EXE_LDFLAGS) -o $@ $(DEVTEST_OBJS) $(LIB_STATIC) $(LDLIBS)
 
+HANDLERTEST_OBJS := $(OBJ_DIR)/tests/test_handlers.o $(OBJ_DIR)/daemon/daemon.o \
+                    $(OBJ_DIR)/daemon/device.o $(OBJ_DIR)/daemon/hidraw.o \
+                    $(OBJ_DIR)/daemon/ipc.o $(OBJ_DIR)/daemon/uinput.o
+
+$(BIN_DIR)/test-handlers: $(HANDLERTEST_OBJS) $(LIB_STATIC)
+	@mkdir -p $(BIN_DIR)
+	@echo "==> link $@"
+	$(CC) $(LDFLAGS) $(EXE_LDFLAGS) -o $@ $(HANDLERTEST_OBJS) $(LIB_STATIC) $(LDLIBS)
+
 $(BIN_DIR)/test-core: $(TEST_OBJS) $(LIB_STATIC)
 	@mkdir -p $(BIN_DIR)
 	@echo "==> link $@"
@@ -196,10 +209,25 @@ $(ASAN_DIR)/obj/tests/%.o: tests/%.c
 ASAN_DEVTEST_OBJS := $(ASAN_DIR)/obj/tests/device/test_device.o \
                      $(ASAN_DIR)/obj/daemon/device.o $(ASAN_DIR)/obj/daemon/hidraw.o
 
+ASAN_DAEMON_OBJS := $(ASAN_DIR)/obj/daemon/daemon.o $(ASAN_DIR)/obj/daemon/device.o \
+                    $(ASAN_DIR)/obj/daemon/hidraw.o $(ASAN_DIR)/obj/daemon/ipc.o \
+                    $(ASAN_DIR)/obj/daemon/uinput.o
+
 $(ASAN_DIR)/test-device: $(ASAN_DEVTEST_OBJS) $(ASAN_CORE_OBJS)
 	@mkdir -p $(dir $@)
 	@echo "==> link $@"
 	$(CC) $(ASAN_LDFLAGS) -o $@ $(ASAN_DEVTEST_OBJS) $(ASAN_CORE_OBJS) $(LDLIBS)
+
+ASAN_HANDLERTEST_OBJS := $(ASAN_DIR)/obj/tests/test_handlers.o $(ASAN_DAEMON_OBJS)
+
+$(ASAN_DIR)/test-handlers: $(ASAN_HANDLERTEST_OBJS) $(ASAN_CORE_OBJS)
+	@mkdir -p $(dir $@)
+	@echo "==> link $@"
+	$(CC) $(ASAN_LDFLAGS) -o $@ $(ASAN_HANDLERTEST_OBJS) $(ASAN_CORE_OBJS) $(LDLIBS)
+
+$(ASAN_DIR)/obj/tests/test_handlers.o: tests/test_handlers.c
+	@mkdir -p $(dir $@)
+	$(CC) $(CPPFLAGS) $(ASAN_FLAGS) -MMD -MP -c $< -o $@
 
 $(ASAN_DIR)/test-core: $(ASAN_TEST_OBJS) $(ASAN_CORE_OBJS)
 	@mkdir -p $(dir $@)

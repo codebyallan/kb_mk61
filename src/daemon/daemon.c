@@ -120,40 +120,6 @@ static int kbdd_acquire_lock(void)
     return fd;
 }
 
-typedef struct {
-    kbdd_hid_device_t *devices;
-    size_t count;
-    int allow_led;                       /* KBDD_ENABLE_LED=1 */
-    int allow_profile_write;             /* KBDD_ENABLE_PROFILE_WRITE=1 */
-    int led_hold;                        /* streaming active */
-    int led_active;                      /* a host-controlled frame is installed */
-    int led_anim;                        /* 0 none, else kbc_led_anim */
-    uint32_t led_anim_period;
-    uint8_t led_anim_rgb[3];
-    size_t led_anim_count;
-    long long led_anim_start_ms;
-    uint8_t led_frame[KBC_LED_BUFFER_SIZE];
-    uint8_t led_base_frame[KBC_LED_BUFFER_SIZE];
-    uint8_t led_brightness;              /* host-frame scale, 0..10 */
-    size_t led_stride;
-    int led_fail;
-    long long led_next_ms;
-    uint8_t config_mode;                 /* 0 none, 1 effect, 2 solid, 3 positions */
-    uint8_t config_effect;
-    uint8_t config_speed[KBC_LED_EFFECT_COUNT];
-    uint8_t config_brightness;
-    uint8_t config_solid[3];
-    uint8_t config_positions[KBC_MAX_MATRIX_SIZE][3];
-    size_t config_stride;
-    uint8_t config_anim;
-    uint32_t config_anim_period;
-    uint8_t config_anim_rgb[3];
-    int restore_pending;
-    unsigned restore_attempts;
-    long long restore_next_ms;
-    kbdd_ipc_server_t *ipc;
-} kbdd_ctx_t;
-
 #define KBDD_CONFIG_NONE 0u
 #define KBDD_CONFIG_EFFECT 1u
 #define KBDD_CONFIG_SOLID 2u
@@ -518,7 +484,7 @@ static const char *kbdd_dev_err(int rc)
     }
 }
 
-static int kbdd_handle_led(kbdd_ctx_t *k, const kbdd_ipc_message_t *req,
+int kbdd_handle_led(kbdd_ctx_t *k, const kbdd_ipc_message_t *req,
                            kbdd_ipc_message_t *resp)
 {
     const uint8_t *p = req->payload;
@@ -625,7 +591,7 @@ static int kbdd_reply_dev_err(kbdd_ipc_message_t *resp, int rc)
     return kbdd_reply_text(resp, kbdd_dev_err(rc));
 }
 
-static int kbdd_handle_effect(kbdd_ctx_t *k, const kbdd_ipc_message_t *req,
+int kbdd_handle_effect(kbdd_ctx_t *k, const kbdd_ipc_message_t *req,
                               kbdd_ipc_message_t *resp)
 {
     const kbdd_hid_device_t *dev;
@@ -663,7 +629,7 @@ static int kbdd_handle_effect(kbdd_ctx_t *k, const kbdd_ipc_message_t *req,
     return kbdd_reply_text(resp, buf);
 }
 
-static int kbdd_handle_profile(kbdd_ctx_t *k, const kbdd_ipc_message_t *req,
+int kbdd_handle_profile(kbdd_ctx_t *k, const kbdd_ipc_message_t *req,
                                kbdd_ipc_message_t *resp)
 {
     const kbdd_hid_device_t *dev;
@@ -700,7 +666,7 @@ static int kbdd_handle_profile(kbdd_ctx_t *k, const kbdd_ipc_message_t *req,
     return kbdd_reply_text(resp, buf);
 }
 
-static int kbdd_handle_anim(kbdd_ctx_t *k, const kbdd_ipc_message_t *req,
+int kbdd_handle_anim(kbdd_ctx_t *k, const kbdd_ipc_message_t *req,
                             kbdd_ipc_message_t *resp)
 {
     static const char *const names[] = {"?", "breath", "cycle", "rainbow"};
@@ -777,7 +743,7 @@ static int kbdd_handle_anim(kbdd_ctx_t *k, const kbdd_ipc_message_t *req,
     return kbdd_reply_text(resp, buf);
 }
 
-static int kbdd_handle_colors(kbdd_ctx_t *k, const kbdd_ipc_message_t *req,
+int kbdd_handle_colors(kbdd_ctx_t *k, const kbdd_ipc_message_t *req,
                               kbdd_ipc_message_t *resp)
 {
     const uint8_t *p = req->payload;
@@ -823,7 +789,7 @@ static int kbdd_handle_colors(kbdd_ctx_t *k, const kbdd_ipc_message_t *req,
     return kbdd_reply_text(resp, buf);
 }
 
-static int kbdd_handle_save(kbdd_ctx_t *k, kbdd_ipc_message_t *resp)
+int kbdd_handle_save(kbdd_ctx_t *k, kbdd_ipc_message_t *resp)
 {
     const kbdd_hid_device_t *dev;
     kbdd_dev_io_t io;
@@ -858,7 +824,7 @@ static int kbdd_handle_save(kbdd_ctx_t *k, kbdd_ipc_message_t *resp)
     return kbdd_reply_text(resp, buf);
 }
 
-static int kbdd_handle_field(kbdd_ctx_t *k, const kbdd_ipc_message_t *req,
+int kbdd_handle_field(kbdd_ctx_t *k, const kbdd_ipc_message_t *req,
                              kbdd_ipc_message_t *resp)
 {
     static const char *const names[] = {

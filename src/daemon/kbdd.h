@@ -5,6 +5,7 @@
 #include <stdint.h>
 #include <sys/types.h>
 
+#include "kbcore.h"
 #include "kbipc.h"
 
 #define KBDD_MAX_DEVICES 16
@@ -41,7 +42,41 @@ typedef struct kbdd_hid_device {
     void (*yield)(void *kctx);        /* process input reports while blocked */
 } kbdd_hid_device_t;
 
-/* hidraw module */
+typedef struct kbdd_ipc_server kbdd_ipc_server_t;
+
+typedef struct kbdd_ctx {
+    kbdd_hid_device_t *devices;
+    size_t count;
+    int allow_led;
+    int allow_profile_write;
+    int led_hold;
+    int led_active;
+    int led_anim;
+    uint32_t led_anim_period;
+    uint8_t led_anim_rgb[3];
+    size_t led_anim_count;
+    long long led_anim_start_ms;
+    uint8_t led_frame[KBC_LED_BUFFER_SIZE];
+    uint8_t led_base_frame[KBC_LED_BUFFER_SIZE];
+    uint8_t led_brightness;
+    size_t led_stride;
+    int led_fail;
+    long long led_next_ms;
+    uint8_t config_mode;
+    uint8_t config_effect;
+    uint8_t config_speed[KBC_LED_EFFECT_COUNT];
+    uint8_t config_brightness;
+    uint8_t config_solid[3];
+    uint8_t config_positions[KBC_MAX_MATRIX_SIZE][3];
+    size_t config_stride;
+    uint8_t config_anim;
+    uint32_t config_anim_period;
+    uint8_t config_anim_rgb[3];
+    int restore_pending;
+    unsigned restore_attempts;
+    long long restore_next_ms;
+    kbdd_ipc_server_t *ipc;
+} kbdd_ctx_t;
 int kbdd_hidraw_enumerate(const kbdd_model_t *models, size_t model_count,
                           kbdd_hid_device_t **out_devs, size_t *out_count);
 void kbdd_hidraw_free(kbdd_hid_device_t *devs, size_t count);
@@ -124,7 +159,6 @@ typedef struct {
 typedef int (*kbdd_ipc_handler_t)(const kbdd_ipc_message_t *req,
                                   kbdd_ipc_message_t *resp, void *ctx);
 
-typedef struct kbdd_ipc_server kbdd_ipc_server_t;
 kbdd_ipc_server_t *kbdd_ipc_server_create(void);
 void kbdd_ipc_server_destroy(kbdd_ipc_server_t *s);
 int kbdd_ipc_server_fd(const kbdd_ipc_server_t *s);
@@ -132,6 +166,21 @@ int kbdd_ipc_server_accept(kbdd_ipc_server_t *s);
 int kbdd_ipc_server_poll(kbdd_ipc_server_t *s, int timeout_ms,
                          kbdd_ipc_handler_t handler, void *ctx);
 int kbdd_ipc_server_publish(kbdd_ipc_server_t *s, const char *event);
+
+/* daemon handlers (exposed for testing) */
+int kbdd_handle_led(kbdd_ctx_t *k, const kbdd_ipc_message_t *req,
+                    kbdd_ipc_message_t *resp);
+int kbdd_handle_effect(kbdd_ctx_t *k, const kbdd_ipc_message_t *req,
+                       kbdd_ipc_message_t *resp);
+int kbdd_handle_profile(kbdd_ctx_t *k, const kbdd_ipc_message_t *req,
+                        kbdd_ipc_message_t *resp);
+int kbdd_handle_anim(kbdd_ctx_t *k, const kbdd_ipc_message_t *req,
+                     kbdd_ipc_message_t *resp);
+int kbdd_handle_colors(kbdd_ctx_t *k, const kbdd_ipc_message_t *req,
+                       kbdd_ipc_message_t *resp);
+int kbdd_handle_save(kbdd_ctx_t *k, kbdd_ipc_message_t *resp);
+int kbdd_handle_field(kbdd_ctx_t *k, const kbdd_ipc_message_t *req,
+                      kbdd_ipc_message_t *resp);
 
 /* daemon */
 int kbdd_run(int argc, char **argv);

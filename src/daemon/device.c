@@ -39,6 +39,7 @@ static void hr_sleep(void *ctx, unsigned ms)
     }
 }
 
+__attribute__((weak))
 void kbdd_dev_io_init_hidraw(kbdd_dev_io_t *io, const kbdd_hid_device_t *dev)
 {
     io->ctx = (void *)dev;

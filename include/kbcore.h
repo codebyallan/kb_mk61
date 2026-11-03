@@ -53,9 +53,7 @@ typedef enum kbc_status {
 
 /* Report IDs. */
 #define KBC_FEATURE_REPORT_ID 0x07
-#define KBC_REPORT_ID_FEATURE 0x07
 #define KBC_INPUT_REPORT_ID   0x04
-#define KBC_REPORT_ID_INPUT   0x04
 
 /* Report sizes (bytes), including the report ID in byte 0. */
 #define KBC_FEATURE_REPORT_SIZE 264
@@ -85,6 +83,10 @@ typedef enum kbc_status {
 /* Matrix / LED limits (from the validated model table). */
 #define KBC_MAX_MATRIX_SIZE 75
 #define KBC_MAX_LED_COUNT   144
+
+/* Shared-library ABI version (soname libkbcore.so.<KBCORE_SOVERSION>).
+ * Bump on any incompatible change to the exported API. */
+#define KBCORE_SOVERSION 1
 
 /* Number of feature-report opcodes in the allowlist. */
 #define KBC_OPCODE_COUNT 13
@@ -184,9 +186,7 @@ KBCORE_API kbc_status kbc_validate_report_id(uint8_t id, uint8_t expected);
 /* ------------------------------------------------------------------ */
 
 KBCORE_API kbc_profile *kbc_profile_create(size_t matrix_size, size_t led_count);
-KBCORE_API kbc_profile *kbc_profile_new(size_t matrix_size, size_t led_count);
 KBCORE_API void kbc_profile_destroy(kbc_profile *p);
-KBCORE_API void kbc_profile_free(kbc_profile *p);
 KBCORE_API kbc_status kbc_profile_validate(const kbc_profile *p);
 
 KBCORE_API size_t kbc_profile_matrix_size(const kbc_profile *p);
@@ -248,9 +248,7 @@ KBCORE_API kbc_status kbc_read_active_profile_decode(const uint8_t *buf, size_t 
 typedef struct kbc_macro_step_public { uint8_t delay; int key_down; uint8_t keycode; } kbc_macro_step_public;
 
 KBCORE_API kbc_macro *kbc_macro_create(void);
-KBCORE_API kbc_macro *kbc_macro_new(void);
 KBCORE_API void kbc_macro_destroy(kbc_macro *m);
-KBCORE_API void kbc_macro_free(kbc_macro *m);
 
 KBCORE_API kbc_status kbc_macro_set_repetitions(kbc_macro *m, uint16_t reps);
 KBCORE_API uint16_t kbc_macro_get_repetitions(const kbc_macro *m);

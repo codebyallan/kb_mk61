@@ -20,13 +20,13 @@ sudo rm -f \
   /usr/local/bin/kbdd \
   /usr/local/bin/kbctl \
   /usr/lib/libkbcore.a \
-  /usr/lib/libkbcore.so \
+  /usr/lib/libkbcore.so* \
   /usr/lib64/libkbcore.a \
-  /usr/lib64/libkbcore.so \
+  /usr/lib64/libkbcore.so* \
   /usr/local/lib/libkbcore.a \
-  /usr/local/lib/libkbcore.so \
+  /usr/local/lib/libkbcore.so* \
   /usr/local/lib64/libkbcore.a \
-  /usr/local/lib64/libkbcore.so \
+  /usr/local/lib64/libkbcore.so* \
   /usr/include/kbcore.h \
   /usr/local/include/kbcore.h \
   /usr/lib/udev/rules.d/60-kbdd.rules \

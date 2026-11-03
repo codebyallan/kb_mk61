@@ -203,22 +203,12 @@ static kbc_status encode_feature_from_fields(uint8_t opcode, uint8_t param0,
 kbc_status kbc_encode_feature_report(const kbc_feature_report *in,
                                     uint8_t *buf, size_t buf_len)
 {
-    const uint8_t *data = NULL;
-    size_t data_len = 0;
-
     if (in == NULL) {
         return KBC_ERR_INVALID_ARGUMENT;
     }
-    data = in->data;
-    data_len = in->data_len;
-    if (data_len == 0) {
-        data_len = KBC_FEATURE_DATA_SIZE;
-    }
-    if (data_len > KBC_FEATURE_DATA_SIZE) {
-        data_len = KBC_FEATURE_DATA_SIZE;
-    }
     return encode_feature_from_fields(in->opcode, in->param0, in->param1,
-                                     in->params, data, data_len, buf, buf_len);
+                                     in->params, in->data, in->data_len,
+                                     buf, buf_len);
 }
 
 kbc_status kbc_build_feature_report(uint8_t opcode, uint8_t param0,

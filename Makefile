@@ -40,8 +40,14 @@ OBJ_DIR    := $(BUILD_DIR)/obj
 BIN_DIR    := $(BUILD_DIR)/bin
 ASAN_DIR   := $(BUILD_DIR)/asan
 
-LIB_STATIC := libkbcore.a
-LIB_SHARED := libkbcore.so
+# Versioning: libkbcore.so.<SOVERSION> is the soname (ABI), libkbcore.so.<VERSION>
+# the real file, libkbcore.so the development symlink.  Both come from kbcore.h.
+LIB_VERSION    := $(shell sed -n 's/^\#define KBCORE_VERSION_STRING "\(.*\)"/\1/p' include/kbcore.h)
+LIB_SOVERSION  := $(shell sed -n 's/^\#define KBCORE_SOVERSION \([0-9]*\)/\1/p' include/kbcore.h)
+LIB_STATIC     := libkbcore.a
+LIB_SHARED     := libkbcore.so
+LIB_SONAME     := $(LIB_SHARED).$(LIB_SOVERSION)
+LIB_SHARED_REAL := $(LIB_SHARED).$(LIB_VERSION)
 
 CORE_SRCS   := $(wildcard src/core/*.c)
 DAEMON_SRCS := $(wildcard src/daemon/*.c)
@@ -74,7 +80,7 @@ DEPFILES := $(OBJ_DIR)/tests/device/test_device.d $(OBJ_DIR)/tests/test_cli_pars
 all: check-arch core daemon cli
 
 # Public library: protocol, profiles and macros.  No GUI and no global I/O.
-core: check-arch $(LIB_STATIC) $(LIB_SHARED)
+core: check-arch $(LIB_STATIC) $(LIB_SHARED_REAL)
 
 daemon: check-arch $(BIN_DIR)/kbdd
 
@@ -129,7 +135,9 @@ install: all
 	$(INSTALL) -m 0755 $(BIN_DIR)/kbdd      $(DESTDIR)$(BINDIR)/kbdd
 	$(INSTALL) -m 0755 $(BIN_DIR)/kbctl     $(DESTDIR)$(BINDIR)/kbctl
 	$(INSTALL) -m 0644 $(LIB_STATIC)        $(DESTDIR)$(LIBDIR)/$(LIB_STATIC)
-	$(INSTALL) -m 0755 $(LIB_SHARED)        $(DESTDIR)$(LIBDIR)/$(LIB_SHARED)
+	$(INSTALL) -m 0755 $(LIB_SHARED_REAL)   $(DESTDIR)$(LIBDIR)/$(LIB_SHARED_REAL)
+	ln -sf $(LIB_SHARED_REAL) $(DESTDIR)$(LIBDIR)/$(LIB_SONAME)
+	ln -sf $(LIB_SONAME)      $(DESTDIR)$(LIBDIR)/$(LIB_SHARED)
 	$(INSTALL) -m 0644 include/kbcore.h     $(DESTDIR)$(INCLUDEDIR)/kbcore.h
 	@for f in packaging/udev/*.rules; do \
 		[ -e "$$f" ] || continue; \
@@ -143,7 +151,7 @@ install: all
 	done
 
 clean:
-	rm -rf $(BUILD_DIR) $(LIB_STATIC) $(LIB_SHARED)
+	rm -rf $(BUILD_DIR) $(LIB_STATIC) $(LIB_SHARED) $(LIB_SONAME) $(LIB_SHARED_REAL)
 
 # Fast, source-only architecture guard.  It fails the build before a forbidden
 # dependency can be introduced.
@@ -172,9 +180,11 @@ $(LIB_STATIC): $(CORE_OBJS)
 	$(AR) rcs $@ $^
 	$(RANLIB) $@
 
-$(LIB_SHARED): $(CORE_OBJS)
+$(LIB_SHARED_REAL): $(CORE_OBJS)
 	@echo "==> link $@"
-	$(CC) -shared -Wl,-soname,$(LIB_SHARED) -o $@ $(CORE_OBJS) $(LDFLAGS)
+	$(CC) -shared -Wl,-soname,$(LIB_SONAME) -o $@ $(CORE_OBJS) $(LDFLAGS)
+	ln -sf $@ $(LIB_SONAME)
+	ln -sf $(LIB_SONAME) $(LIB_SHARED)
 
 $(BIN_DIR)/kbdd: $(DAEMON_OBJS) $(LIB_STATIC)
 	@mkdir -p $(BIN_DIR)

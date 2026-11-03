@@ -10,12 +10,19 @@ BuildRequires:  gcc
 BuildRequires:  make
 BuildRequires:  systemd-rpm-macros
 
+%package devel
+Summary:        Development files for libkbcore
+Requires:       %{name}%{?_isa} = %{version}-%{release}
+
 %description
 Clean-room reimplementation of a keyboard configuration stack for Linux:
 - libkbcore: protocol, profiles and macros library (no GUI, no global I/O)
 - kbdd: user daemon (hidraw, optional uinput, Unix-socket IPC)
 - kbctl: command-line client for kbdd
 Status: experimental; device writes are disabled until validated on hardware.
+
+%description devel
+Header, static library and development symlink for building against libkbcore.
 
 %prep
 %setup -q
@@ -46,11 +53,14 @@ fi
 %files
 %{_bindir}/kbdd
 %{_bindir}/kbctl
-%{_libdir}/libkbcore.a
-%{_libdir}/libkbcore.so
-%{_includedir}/kbcore.h
+%{_libdir}/libkbcore.so.*
 %{_prefix}/lib/udev/rules.d/60-kbdd.rules
 %{_prefix}/lib/systemd/user/kbdd.service
+
+%files devel
+%{_includedir}/kbcore.h
+%{_libdir}/libkbcore.a
+%{_libdir}/libkbcore.so
 
 %changelog
 * Mon Nov 02 2026 mk61 maintainers - 0.4.1-1

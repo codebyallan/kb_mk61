@@ -244,6 +244,8 @@ int kbdd_op_queue_restore_config(kbdd_ctx_t *k, const kbdd_hid_device_t *dev);
 void kbdd_op_cancel_led(void);
 int kbdd_op_pending(void);
 int kbdd_op_has_room(void);
+/* Pid of the persistent device worker, or -1 when none is running. */
+pid_t kbdd_op_worker_pid(void);
 void kbdd_op_shutdown(void);
 
 #endif /* KBDD_H */

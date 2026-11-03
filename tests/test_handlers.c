@@ -1,7 +1,11 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <dirent.h>
 #include <errno.h>
+#include <fcntl.h>
+#include <signal.h>
+#include <sys/wait.h>
 #include <time.h>
 #include <poll.h>
 #include <unistd.h>
@@ -37,6 +41,10 @@ struct mock {
     int get_fail;          /* if set, get_feature returns -1 */
     unsigned sleeps[16];
     size_t nsleeps;
+    pid_t die_unless_pid;  /* if set, a process with another pid exits in set_feature */
+    int fd_ok;             /* worker side: fstat() of the descriptor it was given */
+    dev_t fd_dev;
+    ino_t fd_ino;
 };
 
 static struct mock *g_mock;
@@ -44,6 +52,9 @@ static struct mock *g_mock;
 static ssize_t m_set(void *ctx, const uint8_t *buf, size_t len)
 {
     struct mock *m = (struct mock *)ctx;
+    if (m->die_unless_pid != 0 && getpid() != m->die_unless_pid) {
+        _exit(1); /* simulate the worker crashing in the middle of an operation */
+    }
     if (m->nsent < 16 && len <= 264) {
         memcpy(m->sent[m->nsent], buf, len);
         m->nsent++;
@@ -118,7 +129,15 @@ static void wait_for_op(kbdd_ctx_t *ctx)
 /* Override the weak init function to bind mock transport. */
 void kbdd_dev_io_init_hidraw(kbdd_dev_io_t *io, const kbdd_hid_device_t *dev)
 {
-    (void)dev;
+    struct stat st;
+
+    /* Record which file the worker was handed, so tests can verify that the
+     * descriptor really travels with each request. */
+    g_mock->fd_ok = fstat(dev->fd, &st) == 0;
+    if (g_mock->fd_ok) {
+        g_mock->fd_dev = st.st_dev;
+        g_mock->fd_ino = st.st_ino;
+    }
     io->ctx = g_mock;
     io->set_feature = m_set;
     io->get_feature = m_get;
@@ -471,7 +490,7 @@ static void test_async_frame_cancel(void)
     CHECK(kbdd_op_queue_frame_from_base(NULL, &g_dev, frame, 70, 70,
                                         KBDD_LED_FLAG_HOLD) == 0);
     /* A release arriving while the frame is in flight must win. The child has
-     * been forked but its completion has not been processed yet. */
+     * been handed to the worker but its completion has not been processed. */
     kbdd_op_cancel_led();
     g_ctx.led_active = 0;
     g_ctx.led_hold = 0;
@@ -524,6 +543,191 @@ static void test_async_shutdown_discards_queue(void)
     kbdd_op_shutdown();
     CHECK(!kbdd_op_pending());
     CHECK(kbdd_op_has_room());
+}
+
+
+/* ------------------------------------------------------------------ */
+/* Persistent worker                                                   */
+/* ------------------------------------------------------------------ */
+
+static int count_fds(pid_t pid)
+{
+    char path[64];
+    DIR *d;
+    int n = 0;
+
+    snprintf(path, sizeof(path), "/proc/%d/fd", (int)pid);
+    d = opendir(path);
+    if (d == NULL) {
+        return -1;
+    }
+    while (readdir(d) != NULL) {
+        n++;
+    }
+    closedir(d);
+    return n;
+}
+
+/* A killed child stays a zombie until the daemon reaps it; wait until the
+ * kernel has finished delivering the signal so the next dispatch sees it. */
+static void wait_until_dead(pid_t pid)
+{
+    for (int i = 0; i < 500; i++) {
+        char path[64], line[256];
+        FILE *f;
+        char *p;
+
+        snprintf(path, sizeof(path), "/proc/%d/stat", (int)pid);
+        f = fopen(path, "r");
+        if (f == NULL) {
+            return;
+        }
+        p = fgets(line, sizeof(line), f) != NULL ? strrchr(line, ')') : NULL;
+        fclose(f);
+        if (p != NULL && p[1] == ' ' && p[2] == 'Z') {
+            return;
+        }
+        struct timespec ts = {0, 2 * 1000 * 1000};
+        nanosleep(&ts, NULL);
+    }
+}
+
+static void send_one_frame(uint8_t r)
+{
+    uint8_t frame[KBC_LED_BUFFER_SIZE];
+
+    CHECK(kbc_led_frame_fill(frame, 70, 70, r, 2, 3) == KBC_OK);
+    CHECK(kbdd_op_queue_frame_from_base(NULL, &g_dev, frame, 70, 70,
+                                        KBDD_LED_FLAG_HOLD) == 0);
+    wait_for_op(&g_ctx);
+}
+
+/* LED animation queues an operation every 40 ms: all of them must go through
+ * the same worker process instead of forking one each. */
+static void test_worker_is_persistent(void)
+{
+    pid_t pid;
+    int fds;
+
+    CHECK(kbdd_op_worker_pid() == -1);
+    mock_init();
+    setup_ctx(1, 0);
+    send_one_frame(1);
+    pid = kbdd_op_worker_pid();
+    CHECK(pid > 0);
+    CHECK(!kbdd_op_pending()); /* an idle worker is not pending work */
+    CHECK(g_ctx.led_active == 1);
+    fds = count_fds(pid);
+    CHECK(fds > 0);
+
+    for (int i = 0; i < 100; i++) {
+        g_ctx.led_active = 0;
+        send_one_frame((uint8_t)i);
+        CHECK(kbdd_op_worker_pid() == pid);
+        CHECK(g_ctx.led_active == 1);
+        CHECK(g_ctx.led_fail == 0);
+    }
+    CHECK(count_fds(pid) == fds); /* no descriptor leaks per operation */
+
+    kbdd_op_shutdown();
+    CHECK(kbdd_op_worker_pid() == -1);
+    CHECK(kill(pid, 0) == -1 && errno == ESRCH); /* exited and reaped */
+}
+
+/* The worker must use the descriptor the daemon holds *now*, e.g. after the
+ * keyboard was unplugged and reopened, not the one from when it was spawned. */
+static void test_worker_gets_current_fd(void)
+{
+    char t1[] = "/tmp/kbdd-fd1-XXXXXX";
+    char t2[] = "/tmp/kbdd-fd2-XXXXXX";
+    int fd1 = mkstemp(t1);
+    int fd2 = mkstemp(t2);
+    struct stat s1, s2;
+    pid_t pid;
+
+    CHECK(fd1 >= 0 && fd2 >= 0);
+    if (fd1 < 0 || fd2 < 0) {
+        return;
+    }
+    unlink(t1);
+    unlink(t2);
+    CHECK(fstat(fd1, &s1) == 0 && fstat(fd2, &s2) == 0);
+    CHECK(s1.st_ino != s2.st_ino);
+
+    mock_init();
+    setup_ctx(1, 0);
+    g_dev.fd = fd1;
+    send_one_frame(1);
+    pid = kbdd_op_worker_pid();
+    CHECK(g_mock->fd_ok && g_mock->fd_dev == s1.st_dev && g_mock->fd_ino == s1.st_ino);
+
+    g_dev.fd = fd2; /* reconnect: new descriptor, same worker */
+    send_one_frame(2);
+    CHECK(kbdd_op_worker_pid() == pid);
+    CHECK(g_mock->fd_ok && g_mock->fd_dev == s2.st_dev && g_mock->fd_ino == s2.st_ino);
+
+    kbdd_op_shutdown();
+    close(fd1);
+    close(fd2);
+}
+
+static void test_worker_respawns_after_exit(void)
+{
+    pid_t first, second;
+
+    mock_init();
+    setup_ctx(1, 0);
+    send_one_frame(1);
+    first = kbdd_op_worker_pid();
+    CHECK(first > 0);
+
+    /* Dies while idle: the next operation must still succeed. */
+    kill(first, SIGKILL);
+    wait_until_dead(first);
+    g_ctx.led_active = 0;
+    send_one_frame(2);
+    second = kbdd_op_worker_pid();
+    CHECK(second > 0 && second != first);
+    CHECK(g_ctx.led_active == 1);
+    CHECK(g_ctx.led_fail == 0);
+
+    /* Dies in the middle of an operation: that operation reports an I/O error
+     * (not a hang), and the worker is replaced for the following one. */
+    g_mock->die_unless_pid = getpid();
+    g_ctx.led_active = 0;
+    send_one_frame(3);
+    CHECK(!kbdd_op_pending());
+    CHECK(g_ctx.led_active == 0);
+    CHECK(g_ctx.led_fail == 1);
+    CHECK(kbdd_op_worker_pid() == -1);
+    CHECK(kill(second, 0) == -1 && errno == ESRCH);
+
+    g_mock->die_unless_pid = 0;
+    send_one_frame(4);
+    CHECK(kbdd_op_worker_pid() > 0);
+    CHECK(g_ctx.led_active == 1);
+    CHECK(g_ctx.led_fail == 0);
+    kbdd_op_shutdown();
+}
+
+static void test_worker_survives_term_signals(void)
+{
+    pid_t pid;
+
+    /* A group-wide SIGTERM/SIGINT (systemd stop, Ctrl-C) must not kill the
+     * worker behind the daemon's back; the daemon ends it deliberately. */
+    mock_init();
+    setup_ctx(1, 0);
+    send_one_frame(1);
+    pid = kbdd_op_worker_pid();
+    CHECK(pid > 0);
+    kill(pid, SIGTERM);
+    kill(pid, SIGINT);
+    send_one_frame(2);
+    CHECK(kbdd_op_worker_pid() == pid);
+    CHECK(g_ctx.led_fail == 0);
+    kbdd_op_shutdown();
+    CHECK(kill(pid, 0) == -1 && errno == ESRCH);
 }
 
 /* ------------------------------------------------------------------ */
@@ -916,6 +1120,10 @@ int main(void)
     test_async_frame_cancel();
     test_async_queue_full();
     test_async_shutdown_discards_queue();
+    test_worker_is_persistent();
+    test_worker_gets_current_fd();
+    test_worker_respawns_after_exit();
+    test_worker_survives_term_signals();
     test_async_led_deferred_reply();
     test_async_profile();
     test_async_effect();

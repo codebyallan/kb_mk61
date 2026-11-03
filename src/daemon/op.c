@@ -2,27 +2,46 @@
 
 #include <dirent.h>
 #include <errno.h>
-#include <fcntl.h>
-#include <poll.h>
 #include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/socket.h>
+#include <sys/types.h>
+#include <sys/uio.h>
 #include <sys/wait.h>
 #include <time.h>
 #include <unistd.h>
 
 /* Device operations can block for hundreds of milliseconds (feature reports
- * need spec-mandated delays). Running them in a short-lived child keeps the
+ * need spec-mandated delays). Running them in a separate process keeps the
  * daemon loop responsive so other IPC clients are not stalled behind a slow
- * keyboard. A single child is in flight at a time, preserving operation
- * ordering, and the child inherits the current hidraw descriptors at fork
- * time so hotplug/rescan in the parent cannot leave a stale descriptor. */
+ * keyboard.
+ *
+ * The process is a single, persistent worker forked lazily on the first
+ * operation and reused afterwards. LED animation queues one operation every
+ * 40 ms, so forking (and scanning /proc/self/fd) per operation meant ~25
+ * forks per second for as long as an animation ran.
+ *
+ * Protocol: a SOCK_SEQPACKET socketpair carries one request and one response
+ * per operation; only one operation is in flight at a time, which preserves
+ * ordering. The current hidraw descriptor travels with *every* request as
+ * SCM_RIGHTS and the worker closes it when the operation ends, so hotplug or
+ * a rescan in the parent can never leave the worker holding a stale
+ * descriptor (the guarantee fork-per-operation used to give). The worker
+ * exits when the parent closes the socket, and the parent respawns it if it
+ * dies or exceeds KBDD_OP_TIMEOUT_MS. */
 
 #define KBDD_MAX_PENDING 16
 #define KBDD_OP_FLAG_ANIM 0x80u
 /* A wedged hidraw ioctl must not stall the daemon forever. */
 #define KBDD_OP_TIMEOUT_MS 10000
+/* Largest request payload any handler accepts is 265 bytes (profile restore). */
+#define KBDD_WORKER_PAYLOAD_MAX 512
+/* Flash commits get this long to finish at shutdown instead of being killed. */
+#define KBDD_SHUTDOWN_GRACE_MS 3000
+/* An idle worker exits as soon as its socket closes; this only bounds a hang. */
+#define KBDD_SHUTDOWN_IDLE_MS 500
 
 static long long now_ms(void)
 {
@@ -58,7 +77,7 @@ typedef struct kbdd_op_node {
     size_t stride;
     size_t count;
     uint64_t epoch;             /* LED generation captured at submit */
-    kbdd_hid_device_t dev;      /* snapshot; refreshed from g_ctx before fork */
+    kbdd_hid_device_t dev;      /* snapshot; refreshed from g_ctx before dispatch */
     int has_dev;
     uint8_t *payload;           /* request payload copy */
     size_t payload_len;
@@ -75,15 +94,37 @@ typedef struct {
     char diag[256];
 } kbdd_op_result_t;
 
+/* One request to the worker. dev.fd is meaningless on the wire: the live
+ * descriptor is attached as SCM_RIGHTS and substituted by the worker. The
+ * pointer fields of dev (model/kctx/yield) are valid in the worker because it
+ * is a fork of this process; it clears kctx/yield and never follows model. */
+typedef struct {
+    uint32_t seq;
+    kbdd_op_type_t type;
+    uint8_t flags;
+    uint8_t mode;
+    size_t stride;
+    size_t count;
+    kbdd_hid_device_t dev;
+    size_t payload_len;
+    size_t data_len;
+    uint8_t payload[KBDD_WORKER_PAYLOAD_MAX];
+    uint8_t data[KBC_LED_BUFFER_SIZE];
+} kbdd_worker_req_t;
+
+typedef struct {
+    uint32_t seq;
+    kbdd_op_result_t result;
+} kbdd_worker_resp_t;
+
 static kbdd_ctx_t *g_ctx;
 static kbdd_op_node_t *g_head;
 static kbdd_op_node_t *g_tail;
 static size_t g_queue_len;
-static kbdd_op_node_t *g_current;
-static pid_t g_child_pid = -1;
-static int g_pipe_fd = -1;
-static kbdd_op_result_t g_result;
-static size_t g_result_size;
+static kbdd_op_node_t *g_current;       /* operation in flight at the worker */
+static pid_t g_worker_pid = -1;
+static int g_worker_fd = -1;            /* parent end of the socketpair */
+static uint32_t g_seq;
 static long long g_op_start_ms;
 static uint64_t g_led_epoch;
 
@@ -212,14 +253,13 @@ static int op_refresh_dev(kbdd_op_node_t *op)
     return -1;
 }
 
-static void op_child_exec(const kbdd_op_node_t *op, int out_fd)
+static void worker_exec(const kbdd_worker_req_t *req, kbdd_op_result_t *result)
 {
-    kbdd_hid_device_t dev = op->dev;
+    kbdd_hid_device_t dev = req->dev;
     kbdd_dev_io_t io;
-    kbdd_op_result_t result;
     const char *diag;
 
-    memset(&result, 0, sizeof(result));
+    memset(result, 0, sizeof(*result));
     kbdd_dev_clear_diag();
 
     /* All input-report processing belongs to the parent now. */
@@ -227,155 +267,155 @@ static void op_child_exec(const kbdd_op_node_t *op, int out_fd)
     dev.yield = NULL;
     kbdd_dev_io_init_hidraw(&io, &dev);
 
-    switch (op->type) {
+    switch (req->type) {
     case OP_READ_ACTIVE:
-        result.rc = kbdd_dev_query(&io, KBC_OP_READ_ACTIVE_PROFILE, 0, result.out);
+        result->rc = kbdd_dev_query(&io, KBC_OP_READ_ACTIVE_PROFILE, 0, result->out);
         break;
     case OP_READ_BLOCK:
-        if (op->payload_len == 1 && op->payload != NULL) {
-            result.rc = kbdd_dev_query(&io, KBC_OP_READ_PROFILE_BLOCK,
-                                       op->payload[0], result.out);
+        if (req->payload_len == 1) {
+            result->rc = kbdd_dev_query(&io, KBC_OP_READ_PROFILE_BLOCK,
+                                       req->payload[0], result->out);
         } else {
-            result.rc = KBDD_DEV_EINVAL;
+            result->rc = KBDD_DEV_EINVAL;
         }
         break;
     case OP_SWITCH_PROFILE:
-        if (op->payload_len == 1 && op->payload != NULL) {
+        if (req->payload_len == 1) {
             int changed = 0;
-            result.rc = kbdd_dev_switch_profile(&io, op->payload[0], &changed);
-            result.changed = changed;
-            if (result.rc == KBDD_DEV_OK) {
-                result.profile = op->payload[0];
+            result->rc = kbdd_dev_switch_profile(&io, req->payload[0], &changed);
+            result->changed = changed;
+            if (result->rc == KBDD_DEV_OK) {
+                result->profile = req->payload[0];
             }
         } else {
-            result.rc = KBDD_DEV_EINVAL;
+            result->rc = KBDD_DEV_EINVAL;
         }
         break;
     case OP_SET_EFFECT:
-        if (op->payload_len == 1 && op->payload != NULL) {
-            result.rc = kbdd_dev_set_effect(&io, op->payload[0], &result.profile);
+        if (req->payload_len == 1) {
+            result->rc = kbdd_dev_set_effect(&io, req->payload[0], &result->profile);
         } else {
-            result.rc = KBDD_DEV_EINVAL;
+            result->rc = KBDD_DEV_EINVAL;
         }
         break;
     case OP_SET_FIELD:
-        if (op->payload_len == 2 && op->payload != NULL) {
-            int field = op->payload[0];
-            result.rc = kbdd_dev_set_field(&io, field, op->payload[1], &result.profile);
-            if (result.rc == KBDD_DEV_OK && op->stride != 0 && op->data != NULL &&
+        if (req->payload_len == 2) {
+            int field = req->payload[0];
+            result->rc = kbdd_dev_set_field(&io, field, req->payload[1], &result->profile);
+            if (result->rc == KBDD_DEV_OK && req->stride != 0 && req->data_len == KBC_LED_BUFFER_SIZE &&
                 field == KBC_FIELD_BRIGHTNESS) {
                 uint8_t frame[KBC_LED_BUFFER_SIZE];
-                memcpy(frame, op->data, sizeof(frame));
-                if (kbc_led_frame_apply_brightness(frame, op->stride, op->payload[1]) != KBC_OK ||
-                    kbdd_dev_send_frame(&io, frame, op->stride) != KBDD_DEV_OK) {
-                    result.rc = KBDD_DEV_EIO;
+                memcpy(frame, req->data, sizeof(frame));
+                if (kbc_led_frame_apply_brightness(frame, req->stride, req->payload[1]) != KBC_OK ||
+                    kbdd_dev_send_frame(&io, frame, req->stride) != KBDD_DEV_OK) {
+                    result->rc = KBDD_DEV_EIO;
                 }
             }
         } else {
-            result.rc = KBDD_DEV_EINVAL;
+            result->rc = KBDD_DEV_EINVAL;
         }
         break;
     case OP_SET_COLORS: {
         kbdd_color_edit_t ce;
         memset(&ce, 0, sizeof(ce));
-        if (op->payload == NULL || op->payload_len < 5 ||
-            op->payload[1] < 1 || op->payload[1] > 14 ||
-            op->payload_len != 2u + 3u * op->payload[1]) {
-            result.rc = KBDD_DEV_EINVAL;
+        if (req->payload_len < 5 ||
+            req->payload[1] < 1 || req->payload[1] > 14 ||
+            req->payload_len != 2u + 3u * req->payload[1]) {
+            result->rc = KBDD_DEV_EINVAL;
             break;
         }
-        ce.effect = op->payload[0];
-        ce.count = op->payload[1];
+        ce.effect = req->payload[0];
+        ce.count = req->payload[1];
         for (size_t j = 0; j < ce.count; j++) {
-            memcpy(ce.rgb[j], op->payload + 2 + 3 * j, 3);
+            memcpy(ce.rgb[j], req->payload + 2 + 3 * j, 3);
         }
-        result.rc = kbdd_dev_set_colors(&io, &ce, &result.profile);
+        result->rc = kbdd_dev_set_colors(&io, &ce, &result->profile);
         break;
     }
     case OP_SAVE_PROFILE:
-        result.rc = kbdd_dev_save_profile(&io, &result.profile);
+        result->rc = kbdd_dev_save_profile(&io, &result->profile);
         break;
     case OP_RESTORE_PROFILE:
-        if (op->payload_len == 265 && op->payload != NULL &&
-            op->payload[0] >= 1 && op->payload[0] <= 4) {
-            result.rc = kbdd_dev_restore_profile(&io, op->payload[0], op->payload + 1);
+        if (req->payload_len == 265 &&
+            req->payload[0] >= 1 && req->payload[0] <= 4) {
+            result->rc = kbdd_dev_restore_profile(&io, req->payload[0], req->payload + 1);
         } else {
-            result.rc = KBDD_DEV_EINVAL;
+            result->rc = KBDD_DEV_EINVAL;
         }
         break;
     case OP_ENABLE_NOTIF:
-        result.rc = kbdd_dev_enable_notifications(&io);
+        result->rc = kbdd_dev_enable_notifications(&io);
         break;
     case OP_SEND_FRAME:
-        if (op->data != NULL && op->data_len == KBC_LED_BUFFER_SIZE && op->stride > 0) {
+        if (req->data_len == KBC_LED_BUFFER_SIZE && req->stride > 0) {
             uint8_t frame[KBC_LED_BUFFER_SIZE];
-            memcpy(frame, op->data, sizeof(frame));
-            result.rc = kbdd_dev_send_frame(&io, frame, op->stride);
+            memcpy(frame, req->data, sizeof(frame));
+            result->rc = kbdd_dev_send_frame(&io, frame, req->stride);
         } else {
-            result.rc = KBDD_DEV_EINVAL;
+            result->rc = KBDD_DEV_EINVAL;
         }
         break;
     case OP_RESTORE_CONFIG: {
-        int allow_pw = (op->flags & 0x01u) != 0;
-        int allow_led = (op->flags & 0x02u) != 0;
-        uint8_t cfg_mode = op->mode;
-        uint8_t brightness = op->payload != NULL && op->payload_len >= 1 ? op->payload[0] : 0;
-        uint8_t effect = op->payload != NULL && op->payload_len >= 2 ? op->payload[1] : 0;
-        uint8_t speed = op->payload != NULL && op->payload_len >= 3 ? op->payload[2] : 0;
+        int allow_pw = (req->flags & 0x01u) != 0;
+        int allow_led = (req->flags & 0x02u) != 0;
+        uint8_t cfg_mode = req->mode;
+        uint8_t brightness = req->payload_len >= 1 ? req->payload[0] : 0;
+        uint8_t effect = req->payload_len >= 2 ? req->payload[1] : 0;
+        uint8_t speed = req->payload_len >= 3 ? req->payload[2] : 0;
 
-        result.rc = KBDD_DEV_OK;
+        result->rc = KBDD_DEV_OK;
         if (allow_pw) {
-            result.rc = kbdd_dev_set_field(&io, KBC_FIELD_BRIGHTNESS, brightness, NULL);
-            if (result.rc == KBDD_DEV_OK && cfg_mode == KBDD_CONFIG_EFFECT) {
-                result.rc = kbdd_dev_set_field(&io, KBC_FIELD_MODE, effect, NULL);
-                if (result.rc == KBDD_DEV_OK) {
-                    result.rc = kbdd_dev_set_field(&io, KBC_FIELD_SPEED, speed, NULL);
+            result->rc = kbdd_dev_set_field(&io, KBC_FIELD_BRIGHTNESS, brightness, NULL);
+            if (result->rc == KBDD_DEV_OK && cfg_mode == KBDD_CONFIG_EFFECT) {
+                result->rc = kbdd_dev_set_field(&io, KBC_FIELD_MODE, effect, NULL);
+                if (result->rc == KBDD_DEV_OK) {
+                    result->rc = kbdd_dev_set_field(&io, KBC_FIELD_SPEED, speed, NULL);
                 }
             }
         }
-        if (result.rc == KBDD_DEV_OK && cfg_mode != KBDD_CONFIG_EFFECT && allow_led) {
-            if (op->data != NULL && op->data_len == KBC_LED_BUFFER_SIZE && op->stride > 0) {
+        if (result->rc == KBDD_DEV_OK && cfg_mode != KBDD_CONFIG_EFFECT && allow_led) {
+            if (req->data_len == KBC_LED_BUFFER_SIZE && req->stride > 0) {
                 uint8_t frame[KBC_LED_BUFFER_SIZE];
-                memcpy(frame, op->data, sizeof(frame));
-                result.rc = kbdd_dev_send_frame(&io, frame, op->stride);
+                memcpy(frame, req->data, sizeof(frame));
+                result->rc = kbdd_dev_send_frame(&io, frame, req->stride);
             } else {
-                result.rc = KBDD_DEV_EINVAL;
+                result->rc = KBDD_DEV_EINVAL;
             }
         }
         break;
     }
     default:
-        result.rc = KBDD_DEV_EINVAL;
+        result->rc = KBDD_DEV_EINVAL;
         break;
     }
 
     diag = kbdd_dev_last_diag();
     if (diag != NULL) {
-        snprintf(result.diag, sizeof(result.diag), "%s", diag);
-    }
-
-    const uint8_t *ptr = (const uint8_t *)&result;
-    size_t left = sizeof(result);
-    while (left > 0) {
-        ssize_t n = write(out_fd, ptr, left);
-        if (n < 0) {
-            if (errno == EINTR) {
-                continue;
-            }
-            break;
-        }
-        if (n == 0) {
-            break;
-        }
-        ptr += n;
-        left -= (size_t)n;
+        snprintf(result->diag, sizeof(result->diag), "%s", diag);
     }
 }
 
-/* The child only needs the pipe and the hidraw descriptor. Closing the rest
- * (IPC sockets, lock, other devices) prevents a slow worker from holding the
- * daemon's listening socket or single-instance lock alive. */
-static void op_child_close_fds(int keep_a, int keep_b)
+static int op_reap(pid_t pid, int *status, int options)
+{
+    for (;;) {
+        pid_t r = waitpid(pid, status, options);
+        if (r >= 0) {
+            return (int)r;
+        }
+        if (errno == EINTR) {
+            continue;
+        }
+        if (errno == ECHILD) {
+            return (int)pid; /* already reaped */
+        }
+        return -1;
+    }
+}
+
+/* The worker only needs its socket. Closing everything else (IPC sockets,
+ * lock, hidraw devices) keeps it from holding the daemon's listening socket
+ * or single-instance lock alive. Runs once per worker, not once per operation. */
+static void worker_close_fds(int keep)
 {
     DIR *dir = opendir("/proc/self/fd");
     if (dir != NULL) {
@@ -387,7 +427,7 @@ static void op_child_close_fds(int keep_a, int keep_b)
             if (end == de->d_name || *end != '\0') {
                 continue;
             }
-            if (fd < 3 || fd == dfd || fd == keep_a || fd == keep_b) {
+            if (fd < 3 || fd == dfd || fd == keep) {
                 continue;
             }
             close((int)fd);
@@ -400,11 +440,270 @@ static void op_child_close_fds(int keep_a, int keep_b)
         max = 4096;
     }
     for (int fd = 3; fd < max; fd++) {
-        if (fd == keep_a || fd == keep_b) {
+        if (fd != keep) {
+            close(fd);
+        }
+    }
+}
+
+/* Receives one request plus the hidraw descriptor that travels with it.
+ * Returns the datagram size, 0 on EOF, -1 on error. *fd_out is -1 when no
+ * descriptor arrived; surplus descriptors are closed. */
+static ssize_t worker_recv_req(int sock, kbdd_worker_req_t *req, int *fd_out)
+{
+    union {
+        struct cmsghdr align;
+        char buf[CMSG_SPACE(4 * sizeof(int))];
+    } ctl;
+    struct iovec iov = {req, sizeof(*req)};
+    struct msghdr msg;
+    ssize_t n;
+
+    *fd_out = -1;
+    memset(&msg, 0, sizeof(msg));
+    msg.msg_iov = &iov;
+    msg.msg_iovlen = 1;
+    msg.msg_control = ctl.buf;
+    msg.msg_controllen = sizeof(ctl.buf);
+    do {
+        n = recvmsg(sock, &msg, MSG_CMSG_CLOEXEC);
+    } while (n < 0 && errno == EINTR);
+    if (n <= 0) {
+        return n;
+    }
+    for (struct cmsghdr *c = CMSG_FIRSTHDR(&msg); c != NULL; c = CMSG_NXTHDR(&msg, c)) {
+        if (c->cmsg_level != SOL_SOCKET || c->cmsg_type != SCM_RIGHTS) {
             continue;
         }
-        close(fd);
+        size_t nfds = (c->cmsg_len - CMSG_LEN(0)) / sizeof(int);
+        for (size_t i = 0; i < nfds; i++) {
+            int fd;
+            memcpy(&fd, CMSG_DATA(c) + i * sizeof(int), sizeof(fd));
+            if (*fd_out < 0) {
+                *fd_out = fd;
+            } else {
+                close(fd);
+            }
+        }
     }
+    if ((msg.msg_flags & (MSG_TRUNC | MSG_CTRUNC)) != 0) {
+        if (*fd_out >= 0) {
+            close(*fd_out);
+            *fd_out = -1;
+        }
+        errno = EPROTO;
+        return -1;
+    }
+    return n;
+}
+
+/* Worker process body: serve requests until the parent closes the socket.
+ * SIGINT/SIGTERM are ignored on purpose: a terminal Ctrl-C or a systemd stop
+ * signals the whole group, and dying mid-way through a flash commit is what
+ * the shutdown grace period exists to avoid. The daemon decides when the
+ * worker ends, by closing the socket (EOF) or, as a last resort, SIGKILL. */
+static void worker_main(int sock)
+{
+    struct sigaction sa;
+
+    memset(&sa, 0, sizeof(sa));
+    sa.sa_handler = SIG_IGN;
+    sigemptyset(&sa.sa_mask);
+    (void)sigaction(SIGINT, &sa, NULL);
+    (void)sigaction(SIGTERM, &sa, NULL);
+
+    for (;;) {
+        kbdd_worker_req_t req;
+        kbdd_worker_resp_t resp;
+        const uint8_t *ptr = (const uint8_t *)&resp;
+        size_t left = sizeof(resp);
+        int fd;
+        ssize_t n = worker_recv_req(sock, &req, &fd);
+
+        if (n != (ssize_t)sizeof(req)) {
+            if (fd >= 0) {
+                close(fd);
+            }
+            _exit(n == 0 ? 0 : 1);
+        }
+        memset(&resp, 0, sizeof(resp));
+        resp.seq = req.seq;
+        if (fd < 0) {
+            resp.result.rc = KBDD_DEV_EIO;
+        } else {
+            req.dev.fd = fd;
+            worker_exec(&req, &resp.result);
+            close(fd);
+        }
+        while (left > 0) {
+            n = send(sock, ptr, left, MSG_NOSIGNAL);
+            if (n < 0 && errno == EINTR) {
+                continue;
+            }
+            if (n <= 0) {
+                _exit(1);
+            }
+            ptr += n;
+            left -= (size_t)n;
+        }
+    }
+}
+
+static int worker_spawn(void)
+{
+    int sv[2];
+    pid_t pid;
+
+    if (socketpair(AF_UNIX, SOCK_SEQPACKET | SOCK_CLOEXEC, 0, sv) != 0) {
+        return -1;
+    }
+    pid = fork();
+    if (pid < 0) {
+        close(sv[0]);
+        close(sv[1]);
+        return -1;
+    }
+    if (pid == 0) {
+        close(sv[0]);
+        worker_close_fds(sv[1]);
+        worker_main(sv[1]);
+        _exit(0);
+    }
+    close(sv[1]);
+    g_worker_fd = sv[0];
+    g_worker_pid = pid;
+    return 0;
+}
+
+/* Ends the worker. Closing the socket asks it to exit once the operation it
+ * is running (if any) finishes; it gets grace_ms to do so before SIGKILL. */
+static void worker_stop(long grace_ms)
+{
+    if (g_worker_fd >= 0) {
+        close(g_worker_fd);
+        g_worker_fd = -1;
+    }
+    if (g_worker_pid >= 0) {
+        pid_t pid = g_worker_pid;
+        int status = 0;
+        int reaped = 0;
+
+        while (grace_ms > 0) {
+            if (op_reap(pid, &status, WNOHANG) != 0) {
+                reaped = 1;
+                break;
+            }
+            struct timespec ts = {0, 2 * 1000 * 1000};
+            nanosleep(&ts, NULL);
+            grace_ms -= 2;
+        }
+        if (!reaped) {
+            (void)kill(pid, SIGKILL);
+            (void)op_reap(pid, &status, 0);
+        }
+        g_worker_pid = -1;
+    }
+}
+
+/* Makes sure a live worker exists, spawning (or respawning) it on demand. */
+static int worker_ensure(void)
+{
+    if (g_worker_pid >= 0) {
+        int status = 0;
+        int r = op_reap(g_worker_pid, &status, WNOHANG);
+
+        if (r == 0) {
+            return 0; /* alive */
+        }
+        if (r < 0) {
+            worker_stop(0); /* cannot tell: make sure it is gone */
+        } else {
+            /* Died while idle and is reaped now; its pid must not be signalled. */
+            fprintf(stderr, "kbdd: device worker exited unexpectedly; restarting\n");
+            close(g_worker_fd);
+            g_worker_fd = -1;
+            g_worker_pid = -1;
+        }
+    }
+    return worker_spawn();
+}
+
+static int worker_send_req(const kbdd_worker_req_t *req, int dev_fd)
+{
+    union {
+        struct cmsghdr align;
+        char buf[CMSG_SPACE(sizeof(int))];
+    } ctl;
+    struct iovec iov = {(void *)req, sizeof(*req)};
+    struct msghdr msg;
+    struct cmsghdr *c;
+
+    memset(&msg, 0, sizeof(msg));
+    memset(&ctl, 0, sizeof(ctl));
+    msg.msg_iov = &iov;
+    msg.msg_iovlen = 1;
+    msg.msg_control = ctl.buf;
+    msg.msg_controllen = sizeof(ctl.buf);
+    c = CMSG_FIRSTHDR(&msg);
+    c->cmsg_level = SOL_SOCKET;
+    c->cmsg_type = SCM_RIGHTS;
+    c->cmsg_len = CMSG_LEN(sizeof(int));
+    memcpy(CMSG_DATA(c), &dev_fd, sizeof(int));
+
+    for (;;) {
+        ssize_t n = sendmsg(g_worker_fd, &msg, MSG_NOSIGNAL | MSG_DONTWAIT);
+        if (n == (ssize_t)sizeof(*req)) {
+            return 0;
+        }
+        if (n < 0 && errno == EINTR) {
+            continue;
+        }
+        if (n >= 0) {
+            errno = EIO;
+        }
+        return -1;
+    }
+}
+
+/* Hands op to the worker. Returns KBDD_DEV_OK, or the error to complete the
+ * operation with. One retry covers a worker that died while idle. */
+static int worker_dispatch(const kbdd_op_node_t *op)
+{
+    kbdd_worker_req_t req;
+
+    if (op->payload_len > sizeof(req.payload) || op->data_len > sizeof(req.data)) {
+        return KBDD_DEV_EINVAL;
+    }
+    memset(&req, 0, sizeof(req));
+    req.seq = ++g_seq;
+    req.type = op->type;
+    req.flags = op->flags;
+    req.mode = op->mode;
+    req.stride = op->stride;
+    req.count = op->count;
+    req.dev = op->dev;
+    req.payload_len = op->payload_len;
+    req.data_len = op->data_len;
+    if (op->payload_len > 0) {
+        memcpy(req.payload, op->payload, op->payload_len);
+    }
+    if (op->data_len > 0) {
+        memcpy(req.data, op->data, op->data_len);
+    }
+
+    for (int attempt = 0; attempt < 2; attempt++) {
+        if (worker_ensure() != 0) {
+            return KBDD_DEV_EIO;
+        }
+        if (worker_send_req(&req, op->dev.fd) == 0) {
+            return KBDD_DEV_OK;
+        }
+        if (errno == EBADF) {
+            return KBDD_DEV_EIO; /* device descriptor is gone; worker is fine */
+        }
+        worker_stop(0); /* transport broken: start over with a fresh worker */
+    }
+    return KBDD_DEV_EIO;
 }
 
 static void op_reply(kbdd_ctx_t *kctx, const kbdd_op_node_t *op,
@@ -786,7 +1085,7 @@ static void op_complete(kbdd_ctx_t *kctx, kbdd_op_node_t *op,
 
 static void op_start_next(void)
 {
-    while (g_child_pid < 0) {
+    while (g_current == NULL) {
         kbdd_op_node_t *op = op_dequeue();
         if (op == NULL) {
             return;
@@ -812,154 +1111,67 @@ static void op_start_next(void)
             continue;
         }
 
-        int pipefd[2];
-        if (pipe(pipefd) != 0) {
-            failed.rc = KBDD_DEV_EIO;
+        int rc = worker_dispatch(op);
+        if (rc != KBDD_DEV_OK) {
+            failed.rc = rc;
             op_complete(g_ctx, op, &failed);
             continue;
         }
-        pid_t pid = fork();
-        if (pid < 0) {
-            close(pipefd[0]);
-            close(pipefd[1]);
-            failed.rc = KBDD_DEV_EIO;
-            op_complete(g_ctx, op, &failed);
-            continue;
-        }
-        if (pid == 0) {
-            close(pipefd[0]);
-            op_child_close_fds(pipefd[1], op->dev.fd);
-            op_child_exec(op, pipefd[1]);
-            _exit(0);
-        }
-
-        close(pipefd[1]);
-        int flags = fcntl(pipefd[0], F_GETFL, 0);
-        if (flags >= 0) {
-            (void)fcntl(pipefd[0], F_SETFL, flags | O_NONBLOCK);
-        }
-        g_pipe_fd = pipefd[0];
-        g_child_pid = pid;
         g_current = op;
         g_op_start_ms = now_ms();
-        g_result_size = 0;
-        memset(&g_result, 0, sizeof(g_result));
         return;
     }
 }
 
-static int op_reap(pid_t pid, int *status, int options)
-{
-    for (;;) {
-        pid_t r = waitpid(pid, status, options);
-        if (r >= 0) {
-            return (int)r;
-        }
-        if (errno == EINTR) {
-            continue;
-        }
-        if (errno == ECHILD) {
-            return (int)pid; /* already reaped */
-        }
-        return -1;
-    }
-}
-
-static void op_finish(kbdd_ctx_t *kctx)
+static void op_finish(kbdd_ctx_t *kctx, const kbdd_op_result_t *r)
 {
     kbdd_op_node_t *op = g_current;
     g_current = NULL;
-    op_complete(kctx, op, &g_result);
-    g_result_size = 0;
-    memset(&g_result, 0, sizeof(g_result));
+    op_complete(kctx, op, r);
+}
+
+/* The worker died, wedged or answered out of protocol: drop it (it is
+ * respawned on the next dispatch) and report an I/O error for the operation. */
+static void op_fail_current(kbdd_ctx_t *kctx)
+{
+    kbdd_op_result_t failed;
+
+    memset(&failed, 0, sizeof(failed));
+    failed.rc = KBDD_DEV_EIO;
+    worker_stop(0);
+    op_finish(kctx, &failed);
 }
 
 static void op_poll_result(kbdd_ctx_t *kctx)
 {
-    if (g_child_pid < 0 || g_pipe_fd < 0) {
+    kbdd_worker_resp_t resp;
+    ssize_t n;
+
+    if (g_current == NULL) {
         return;
     }
-
+    if (g_worker_fd < 0) {
+        op_fail_current(kctx);
+        return;
+    }
     if (now_ms() - g_op_start_ms > KBDD_OP_TIMEOUT_MS) {
-        int status = 0;
-        (void)kill(g_child_pid, SIGKILL);
-        (void)op_reap(g_child_pid, &status, 0);
-        close(g_pipe_fd);
-        g_pipe_fd = -1;
-        g_child_pid = -1;
-        memset(&g_result, 0, sizeof(g_result));
-        g_result.rc = KBDD_DEV_EIO;
-        g_result_size = sizeof(g_result);
-        op_finish(kctx);
+        fprintf(stderr, "kbdd: device operation timed out; restarting worker\n");
+        op_fail_current(kctx);
         return;
     }
 
-    struct pollfd pfd;
-    pfd.fd = g_pipe_fd;
-    pfd.events = POLLIN | POLLHUP | POLLERR;
-    pfd.revents = 0;
-    int pr = poll(&pfd, 1, 0);
-
-    uint8_t *dst = (uint8_t *)&g_result;
-    size_t want = sizeof(g_result);
-    int eof = 0;
-
-    if (pr > 0) {
-        for (;;) {
-            ssize_t n = read(g_pipe_fd, dst + g_result_size,
-                             want - g_result_size);
-            if (n > 0) {
-                g_result_size += (size_t)n;
-                if (g_result_size >= want) {
-                    break;
-                }
-                continue;
-            }
-            if (n == 0) {
-                eof = 1;
-                break;
-            }
-            if (errno == EINTR) {
-                continue;
-            }
-            break; /* EAGAIN */
-        }
-    }
-
-    int status = 0;
-    int reaped = op_reap(g_child_pid, &status, WNOHANG);
-    if (reaped == 0) {
+    do {
+        n = recv(g_worker_fd, &resp, sizeof(resp), MSG_DONTWAIT);
+    } while (n < 0 && errno == EINTR);
+    if (n < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) {
         return; /* still running */
     }
-
-    /* Child is gone: everything it wrote is buffered in the pipe. Drain it
-     * even when poll raced with the exit, so a completed operation is not
-     * mistaken for an I/O failure. */
-    while (!eof && g_result_size < want) {
-        ssize_t n = read(g_pipe_fd, dst + g_result_size, want - g_result_size);
-        if (n > 0) {
-            g_result_size += (size_t)n;
-            continue;
-        }
-        if (n == 0) {
-            break;
-        }
-        if (errno == EINTR) {
-            continue;
-        }
-        break;
+    /* EOF (worker died), short read or a response for another request. */
+    if (n != (ssize_t)sizeof(resp) || resp.seq != g_seq) {
+        op_fail_current(kctx);
+        return;
     }
-
-    close(g_pipe_fd);
-    g_pipe_fd = -1;
-    g_child_pid = -1;
-
-    if (g_result_size != want) {
-        memset(&g_result, 0, sizeof(g_result));
-        g_result.rc = KBDD_DEV_EIO;
-        g_result_size = want;
-    }
-    op_finish(kctx);
+    op_finish(kctx, &resp.result);
 }
 
 void kbdd_op_poll(kbdd_ctx_t *kctx)
@@ -975,9 +1187,16 @@ void kbdd_op_cancel_led(void)
     g_led_epoch++;
 }
 
+/* "Pending" means work is queued or in flight; an idle worker does not count,
+ * otherwise the daemon loop would poll at its busy rate forever. */
 int kbdd_op_pending(void)
 {
-    return g_child_pid >= 0 || g_queue_len > 0;
+    return g_current != NULL || g_queue_len > 0;
+}
+
+pid_t kbdd_op_worker_pid(void)
+{
+    return g_worker_pid;
 }
 
 int kbdd_op_has_room(void)
@@ -1003,7 +1222,7 @@ static int op_submit(kbdd_op_type_t type, const kbdd_ipc_message_t *req,
     op_set_payload(op, req != NULL ? req->payload : NULL,
                    req != NULL ? req->payload_len : 0);
     op_enqueue(op);
-    if (g_child_pid < 0) {
+    if (g_current == NULL) {
         op_start_next();
     }
     return 0;
@@ -1053,7 +1272,7 @@ int kbdd_op_queue_field(const kbdd_ipc_message_t *req,
         op_set_data(op, frame, KBC_LED_BUFFER_SIZE);
     }
     op_enqueue(op);
-    if (g_child_pid < 0) {
+    if (g_current == NULL) {
         op_start_next();
     }
     return 0;
@@ -1103,7 +1322,7 @@ int kbdd_op_queue_frame_from_base(const kbdd_ipc_message_t *req,
                    req != NULL ? req->payload_len : 0);
     op_set_data(op, frame, KBC_LED_BUFFER_SIZE);
     op_enqueue(op);
-    if (g_child_pid < 0) {
+    if (g_current == NULL) {
         op_start_next();
     }
     return 0;
@@ -1180,7 +1399,7 @@ int kbdd_op_queue_restore_config(kbdd_ctx_t *k, const kbdd_hid_device_t *dev)
         op_set_data(op, frame, sizeof(frame));
     }
     op_enqueue(op);
-    if (g_child_pid < 0) {
+    if (g_current == NULL) {
         op_start_next();
     }
     return 0;
@@ -1201,37 +1420,17 @@ void kbdd_op_client_closed(kbdd_ctx_t *k, int fd)
 
 void kbdd_op_shutdown(void)
 {
-    if (g_child_pid >= 0) {
-        pid_t pid = g_child_pid;
-        int status = 0;
-        int reaped = 0;
-        long grace_ms = 0;
+    if (g_worker_pid >= 0 || g_worker_fd >= 0) {
+        long grace_ms = KBDD_SHUTDOWN_IDLE_MS;
 
-        if (g_current != NULL &&
-            (g_current->type == OP_SAVE_PROFILE ||
-             g_current->type == OP_RESTORE_PROFILE)) {
+        if (g_current != NULL) {
             /* Let a flash commit reach its read-back verification instead of
-             * killing the child mid-write and leaving the keyboard unverified. */
-            grace_ms = 3000;
+             * killing the worker mid-write and leaving the keyboard unverified. */
+            grace_ms = (g_current->type == OP_SAVE_PROFILE ||
+                        g_current->type == OP_RESTORE_PROFILE)
+                           ? KBDD_SHUTDOWN_GRACE_MS : 0;
         }
-        while (grace_ms > 0) {
-            if (op_reap(pid, &status, WNOHANG) != 0) {
-                reaped = 1;
-                break;
-            }
-            struct timespec ts = {0, 10 * 1000 * 1000};
-            nanosleep(&ts, NULL);
-            grace_ms -= 10;
-        }
-        if (!reaped) {
-            (void)kill(pid, SIGKILL);
-            (void)op_reap(pid, &status, 0);
-        }
-        g_child_pid = -1;
-    }
-    if (g_pipe_fd >= 0) {
-        close(g_pipe_fd);
-        g_pipe_fd = -1;
+        worker_stop(grace_ms);
     }
     op_free(g_current);
     g_current = NULL;

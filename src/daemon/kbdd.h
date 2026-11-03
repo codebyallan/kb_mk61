@@ -44,6 +44,10 @@ typedef struct kbdd_hid_device {
 
 typedef struct kbdd_ipc_server kbdd_ipc_server_t;
 
+/* Minimum time between accepted SAVE_BLOCK requests. Each save writes the
+ * keyboard's flash twice, so this bounds wear from a looping client. */
+#define KBDD_SAVE_COOLDOWN_MS 30000LL
+
 typedef struct kbdd_ctx {
     kbdd_hid_device_t *devices;
     size_t count;
@@ -75,6 +79,7 @@ typedef struct kbdd_ctx {
     int restore_pending;
     unsigned restore_attempts;
     long long restore_next_ms;
+    long long save_next_ms;           /* earliest time the next save is accepted */
     kbdd_ipc_server_t *ipc;
 } kbdd_ctx_t;
 

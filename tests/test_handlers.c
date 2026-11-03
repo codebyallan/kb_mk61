@@ -692,10 +692,116 @@ static void test_async_led_deferred_reply(void)
     kbdd_ipc_sync_mode = 1;
 }
 
+/* LED-only deployments (ENABLE_LED=1, no PROFILE_WRITE) must not reach flash. */
+static void test_led_only_has_no_flash_access(void)
+{
+    kbdd_ipc_message_t req, resp;
+    uint8_t blk[265];
+    uint8_t fp[2] = {1, 5};
+
+    memset(&resp, 0, sizeof(resp));
+    memset(blk, 0, sizeof(blk));
+    blk[0] = 1;
+    setup_ctx(1, 0);
+    g_mock = &g_m;
+    mock_init(g_mock);
+
+    make_msg(&req, KBDD_IPC_OP_SAVE_BLOCK, NULL, 0);
+    setup_resp(&resp);
+    CHECK(kbdd_handle_save(&g_ctx, &req, &resp) == 0);
+    CHECK(resp.payload != NULL && strstr((char *)resp.payload, "disabled") != NULL);
+
+    make_msg(&req, KBDD_IPC_OP_SET_FIELD, fp, 2);
+    setup_resp(&resp);
+    CHECK(kbdd_handle_field(&g_ctx, &req, &resp) == 0);
+    CHECK(resp.payload != NULL && strstr((char *)resp.payload, "disabled") != NULL);
+
+    make_msg(&req, KBDD_IPC_OP_RESTORE_PROFILE, blk, sizeof(blk));
+    setup_resp(&resp);
+    CHECK(kbdd_ipc_handle(&req, &resp, &g_ctx) == 0);
+    CHECK(resp.payload != NULL && strstr((char *)resp.payload, "disabled") != NULL);
+
+    CHECK(g_mock->nsent == 0);       /* nothing reached the device */
+    CHECK(g_ctx.save_next_ms == 0);  /* a refused save must not arm the cooldown */
+    free_resp(&resp);
+}
+
+static void test_save_cooldown(void)
+{
+    kbdd_ipc_message_t req, resp;
+    size_t sent_after_first;
+
+    memset(&resp, 0, sizeof(resp));
+    setup_ctx(0, 1);
+    g_mock = &g_m;
+    mock_init(g_mock);
+    make_msg(&req, KBDD_IPC_OP_SAVE_BLOCK, NULL, 0);
+
+    /* first attempt reaches the device (whatever its outcome) and arms the cooldown */
+    setup_resp(&resp);
+    CHECK(kbdd_handle_save(&g_ctx, &req, &resp) == 0);
+    CHECK(resp.payload != NULL && strstr((char *)resp.payload, "rate-limited") == NULL);
+    CHECK(g_mock->get_calls > 0);
+    CHECK(g_ctx.save_next_ms != 0);
+    sent_after_first = g_mock->nsent;
+
+    /* an immediate retry is refused without touching the device */
+    {
+        int gets = g_mock->get_calls;
+        setup_resp(&resp);
+        CHECK(kbdd_handle_save(&g_ctx, &req, &resp) == 0);
+        CHECK(resp.payload != NULL && strstr((char *)resp.payload, "rate-limited") != NULL);
+        CHECK(g_mock->nsent == sent_after_first);
+        CHECK(g_mock->get_calls == gets);
+    }
+
+    /* once the window has passed, saving is allowed again */
+    g_ctx.save_next_ms = 1;          /* monotonic clock is long past 1 ms */
+    setup_resp(&resp);
+    CHECK(kbdd_handle_save(&g_ctx, &req, &resp) == 0);
+    CHECK(resp.payload != NULL && strstr((char *)resp.payload, "rate-limited") == NULL);
+    CHECK(g_ctx.save_next_ms > 1);
+    free_resp(&resp);
+}
+
+/* Async (production) path: the second save inside the window never reaches the queue. */
+static void test_save_cooldown_async(void)
+{
+    kbdd_ipc_message_t req, resp;
+    int waited = 0;
+
+    memset(&resp, 0, sizeof(resp));
+    setup_ctx(0, 1);
+    g_mock = &g_m;
+    mock_init(g_mock);
+    make_msg(&req, KBDD_IPC_OP_SAVE_BLOCK, NULL, 0);
+
+    kbdd_ipc_sync_mode = 0;
+    setup_resp(&resp);
+    CHECK(kbdd_handle_save(&g_ctx, &req, &resp) == KBDD_HANDLER_DEFER);
+    CHECK(g_ctx.save_next_ms != 0);
+    while (kbdd_op_pending() && waited < 400) {
+        struct timespec ts = {0, 10 * 1000 * 1000};
+        nanosleep(&ts, NULL);
+        kbdd_op_poll(&g_ctx);
+        waited++;
+    }
+    setup_resp(&resp);
+    CHECK(kbdd_handle_save(&g_ctx, &req, &resp) == 0);
+    CHECK(resp.payload != NULL && strstr((char *)resp.payload, "rate-limited") != NULL);
+    CHECK(!kbdd_op_pending());
+    kbdd_op_shutdown();
+    kbdd_ipc_sync_mode = 1;
+    free_resp(&resp);
+}
+
 int main(void)
 {
     kbdd_ipc_sync_mode = 1;
     test_env_gates();
+    test_led_only_has_no_flash_access();
+    test_save_cooldown();
+    test_save_cooldown_async();
     test_payload_validation();
     test_no_device();
     test_led_release();

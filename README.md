@@ -89,11 +89,17 @@ tests, installs, and starts the user service:
 ./install.sh
 ```
 
-LED and profile writes are opt-in (disabled by default):
+LED control and profile writes are separate opt-ins (both disabled by default):
 
 ```sh
-ENABLE_LED=1 ./install.sh
+ENABLE_LED=1 ./install.sh                          # colours/frames, RAM only
+ENABLE_PROFILE_WRITE=1 ./install.sh                # flash saves, effect/profile, restore-profile
+ENABLE_LED=1 ENABLE_PROFILE_WRITE=1 ./install.sh   # both
 ```
+
+`ENABLE_LED=1` no longer enables profile writes (earlier versions turned on
+both). Any process running as your user can talk to `kbdd`, so enable
+`ENABLE_PROFILE_WRITE` only if you need to write the keyboard's flash.
 
 For a manual installation, use the Makefile targets:
 
@@ -293,7 +299,8 @@ kbctl led save
   is not `255` (custom LED data in use) or when the effect is 14 or 15; the
   factory-reset value `0xFF` of opcode `0x01` is never sent. Needs
   `KBDD_ENABLE_PROFILE_WRITE=1`; a backup of the block is stored in
-  `~/.local/state/kbctl/` first. Saved values survive unplugging the keyboard.
+  `~/.local/state/kbctl/` first. Each save writes flash twice, so `kbdd` accepts
+  at most one save every 30 s (`error: save rate-limited ...` otherwise). Saved values survive unplugging the keyboard.
 
 Frame commands accept `--once` to send one frame without periodic refresh and
 `--stride N` to override the frame layout (default: the detected matrix size).

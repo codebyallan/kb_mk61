@@ -445,10 +445,33 @@ static int kbdd_handle_colors_async(kbdd_ctx_t *k, const kbdd_ipc_message_t *req
                : kbdd_queue_busy(resp);
 }
 
+/* Flash-wear guard: 0 = allowed (and arms the cooldown), else ms to wait. */
+static long long kbdd_save_cooldown_take(kbdd_ctx_t *k)
+{
+    long long now = kbdd_now_ms();
+
+    if (now < k->save_next_ms) {
+        return k->save_next_ms - now;
+    }
+    k->save_next_ms = now + KBDD_SAVE_COOLDOWN_MS;
+    return 0;
+}
+
+static int kbdd_save_rate_limited(kbdd_ipc_message_t *resp, long long wait_ms)
+{
+    char buf[128];
+
+    snprintf(buf, sizeof(buf),
+             "error: save rate-limited to protect flash; try again in %lld s",
+             (wait_ms + 999) / 1000);
+    return kbdd_reply_text(resp, buf);
+}
+
 static int kbdd_handle_save_async(kbdd_ctx_t *k, const kbdd_ipc_message_t *req,
                                   kbdd_ipc_message_t *resp)
 {
     const kbdd_hid_device_t *dev;
+    long long wait_ms;
     uint8_t was_hold;
 
     if (!k->allow_profile_write) {
@@ -462,11 +485,17 @@ static int kbdd_handle_save_async(kbdd_ctx_t *k, const kbdd_ipc_message_t *req,
     if (!kbdd_op_has_room()) {
         return kbdd_queue_busy(resp);
     }
+    wait_ms = kbdd_save_cooldown_take(k);
+    if (wait_ms != 0) {
+        return kbdd_save_rate_limited(resp, wait_ms);
+    }
     was_hold = (uint8_t)(k->led_hold ? 1 : 0);
     k->led_hold = 0;
-    return kbdd_op_queue_save(req, dev, was_hold) == 0
-               ? KBDD_HANDLER_DEFER
-               : kbdd_queue_busy(resp);
+    if (kbdd_op_queue_save(req, dev, was_hold) != 0) {
+        k->save_next_ms = 0;   /* nothing was written: do not charge the cooldown */
+        return kbdd_queue_busy(resp);
+    }
+    return KBDD_HANDLER_DEFER;
 }
 
 static int kbdd_handle_field_async(kbdd_ctx_t *k, const kbdd_ipc_message_t *req,
@@ -843,6 +872,7 @@ int kbdd_handle_save(kbdd_ctx_t *k, const kbdd_ipc_message_t *req,
     kbdd_dev_io_t io;
     uint8_t prof = 0;
     char buf[160];
+    long long wait_ms;
     int rc, was_hold;
 
     if (!k->allow_profile_write) {
@@ -852,6 +882,10 @@ int kbdd_handle_save(kbdd_ctx_t *k, const kbdd_ipc_message_t *req,
     dev = kbdd_control_dev(k);
     if (dev == NULL) {
         return kbdd_reply_text(resp, "error: no keyboard control interface available");
+    }
+    wait_ms = kbdd_save_cooldown_take(k);
+    if (wait_ms != 0) {
+        return kbdd_save_rate_limited(resp, wait_ms);
     }
     was_hold = k->led_hold;
     k->led_hold = 0;                 /* no host frames while the block is committed */

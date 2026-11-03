@@ -46,7 +46,7 @@ LIB_SHARED := libkbcore.so
 CORE_SRCS   := $(wildcard src/core/*.c)
 DAEMON_SRCS := $(wildcard src/daemon/*.c)
 CLI_SRCS    := $(wildcard src/cli/*.c)
-TEST_SRCS   := $(filter-out tests/test_handlers.c tests/test_cli_parse.c tests/test_config.c, $(wildcard tests/*.c))
+TEST_SRCS   := $(filter-out tests/test_handlers.c tests/test_cli_parse.c tests/test_config.c tests/test_ipc.c, $(wildcard tests/*.c))
 
 CORE_OBJS   := $(patsubst src/%.c,$(OBJ_DIR)/%.o,$(CORE_SRCS))
 DAEMON_OBJS := $(patsubst src/%.c,$(OBJ_DIR)/%.o,$(DAEMON_SRCS))
@@ -54,6 +54,7 @@ CLI_OBJS    := $(patsubst src/%.c,$(OBJ_DIR)/%.o,$(CLI_SRCS))
 TEST_OBJS   := $(patsubst tests/%.c,$(OBJ_DIR)/tests/%.o,$(TEST_SRCS))
 CLI_PARSER_OBJS := $(OBJ_DIR)/cli/parse.o
 CONFIG_OBJS := $(OBJ_DIR)/daemon/config.o
+IPC_OBJS := $(OBJ_DIR)/daemon/ipc.o
 
 # ASan/UBSan build (no FORTIFY: it conflicts with the sanitizer runtime).
 ASAN_FLAGS      := $(CSTD) $(WARN) -O1 $(DEBUG) -fPIC -fno-omit-frame-pointer \
@@ -61,6 +62,7 @@ ASAN_FLAGS      := $(CSTD) $(WARN) -O1 $(DEBUG) -fPIC -fno-omit-frame-pointer \
 ASAN_LDFLAGS    := -fsanitize=address,undefined
 ASAN_CORE_OBJS  := $(patsubst src/%.c,$(ASAN_DIR)/obj/%.o,$(CORE_SRCS))
 ASAN_TEST_OBJS  := $(patsubst tests/%.c,$(ASAN_DIR)/obj/tests/%.o,$(TEST_SRCS))
+ASAN_IPC_OBJS := $(ASAN_DIR)/obj/daemon/ipc.o $(ASAN_DIR)/obj/tests/test_ipc.o
 ASAN_CONFIG_OBJS := $(ASAN_DIR)/obj/daemon/config.o $(ASAN_DIR)/obj/tests/test_config.o
 ASAN_CLI_PARSER_OBJS := $(ASAN_DIR)/obj/cli/parse.o $(ASAN_DIR)/obj/tests/test_cli_parse.o
 
@@ -78,13 +80,14 @@ daemon: check-arch $(BIN_DIR)/kbdd
 
 cli: check-arch $(BIN_DIR)/kbctl
 
-test: check-arch $(BIN_DIR)/test-core $(BIN_DIR)/test-device $(BIN_DIR)/test-handlers $(BIN_DIR)/test-cli $(BIN_DIR)/test-config
+test: check-arch $(BIN_DIR)/test-core $(BIN_DIR)/test-device $(BIN_DIR)/test-handlers $(BIN_DIR)/test-cli $(BIN_DIR)/test-config $(BIN_DIR)/test-ipc
 	@echo "==> running unit tests"
 	@$(BIN_DIR)/test-core
 	@$(BIN_DIR)/test-device
 	@$(BIN_DIR)/test-handlers
 	@$(BIN_DIR)/test-cli
 	@$(BIN_DIR)/test-config
+	@$(BIN_DIR)/test-ipc
 
 asan: check-arch
 	@mkdir -p $(BUILD_DIR)
@@ -99,7 +102,7 @@ asan: check-arch
 		$(MAKE) --no-print-directory test; \
 	fi
 
-asan-run: check-arch $(ASAN_DIR)/test-core $(ASAN_DIR)/test-device $(ASAN_DIR)/test-handlers $(ASAN_DIR)/test-cli $(ASAN_DIR)/test-config
+asan-run: check-arch $(ASAN_DIR)/test-core $(ASAN_DIR)/test-device $(ASAN_DIR)/test-handlers $(ASAN_DIR)/test-cli $(ASAN_DIR)/test-config $(ASAN_DIR)/test-ipc
 	@echo "==> running ASan/UBSan tests"
 	@ASAN_OPTIONS=detect_leaks=1:abort_on_error=1 \
 	 UBSAN_OPTIONS=halt_on_error=1:print_stacktrace=1 \
@@ -116,6 +119,9 @@ asan-run: check-arch $(ASAN_DIR)/test-core $(ASAN_DIR)/test-device $(ASAN_DIR)/t
 	@ASAN_OPTIONS=detect_leaks=1:abort_on_error=1 \
 	 UBSAN_OPTIONS=halt_on_error=1:print_stacktrace=1 \
 	 $(ASAN_DIR)/test-config
+	@ASAN_OPTIONS=detect_leaks=1:abort_on_error=1 \
+	 UBSAN_OPTIONS=halt_on_error=1:print_stacktrace=1 \
+	 $(ASAN_DIR)/test-ipc
 
 install: all
 	$(INSTALL) -d $(DESTDIR)$(BINDIR) $(DESTDIR)$(LIBDIR) \
@@ -203,6 +209,11 @@ $(BIN_DIR)/test-cli: $(OBJ_DIR)/tests/test_cli_parse.o $(CLI_PARSER_OBJS)
 	@echo "==> link $@"
 	$(CC) $(LDFLAGS) $(EXE_LDFLAGS) -o $@ $(OBJ_DIR)/tests/test_cli_parse.o $(CLI_PARSER_OBJS) $(LDLIBS)
 
+$(BIN_DIR)/test-ipc: $(OBJ_DIR)/tests/test_ipc.o $(IPC_OBJS) $(LIB_STATIC)
+	@mkdir -p $(BIN_DIR)
+	@echo "==> link $@"
+	$(CC) $(LDFLAGS) $(EXE_LDFLAGS) -o $@ $(OBJ_DIR)/tests/test_ipc.o $(IPC_OBJS) $(LIB_STATIC) $(LDLIBS)
+
 $(BIN_DIR)/test-config: $(OBJ_DIR)/tests/test_config.o $(CONFIG_OBJS) $(LIB_STATIC)
 	@mkdir -p $(BIN_DIR)
 	@echo "==> link $@"
@@ -223,6 +234,12 @@ $(ASAN_DIR)/test-config: $(ASAN_CONFIG_OBJS) $(ASAN_CORE_OBJS)
 	@mkdir -p $(dir $@)
 	@echo "==> link $@"
 	$(CC) $(ASAN_LDFLAGS) -o $@ $(ASAN_CONFIG_OBJS) $(ASAN_CORE_OBJS) $(LDLIBS)
+
+
+$(ASAN_DIR)/test-ipc: $(ASAN_IPC_OBJS) $(ASAN_CORE_OBJS)
+	@mkdir -p $(dir $@)
+	@echo "==> link $@"
+	$(CC) $(ASAN_LDFLAGS) -o $@ $(ASAN_IPC_OBJS) $(ASAN_CORE_OBJS) $(LDLIBS)
 
 
 $(OBJ_DIR)/%.o: src/%.c

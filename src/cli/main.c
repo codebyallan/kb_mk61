@@ -15,6 +15,7 @@
 
 #include "kbcore.h"
 #include "kbipc.h"
+#include "kbctl_parse.h"
 
 #define KBCTL_VERSION "0.4.1"
 #define KBCTL_MAX_FILE (4 * 1024 * 1024)
@@ -534,24 +535,6 @@ static void print_payload(const uint8_t *data, uint32_t len)
     (void)print_reply(data, len);
 }
 
-static int parse_index(const char *s, long *out)
-{
-    if (s == NULL || s[0] == '\0') {
-        return -1;
-    }
-    char *end = NULL;
-    errno = 0;
-    long v = strtol(s, &end, 10);
-    if (errno != 0 || end == NULL || *end != '\0') {
-        return -1;
-    }
-    if (v < 1 || v > 4) {
-        return -1;
-    }
-    *out = v;
-    return 0;
-}
-
 static int read_file(const char *path, uint8_t **out_buf, size_t *out_len)
 {
     int fd = open(path, O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
@@ -608,40 +591,6 @@ static int read_file(const char *path, uint8_t **out_buf, size_t *out_len)
 }
 
 /* ---- LED / read helpers ------------------------------------------------ */
-
-static int parse_rgb(const char *s, uint8_t *r, uint8_t *g, uint8_t *b)
-{
-    unsigned v = 0;
-    size_t i, n;
-    if (s != NULL && s[0] == '#') s++;
-    if (s == NULL) return -1;
-    n = strlen(s);
-    if (n != 6) return -1;
-    for (i = 0; i < n; i++) {
-        char c = s[i];
-        unsigned d;
-        if (c >= '0' && c <= '9') d = (unsigned)(c - '0');
-        else if (c >= 'a' && c <= 'f') d = (unsigned)(c - 'a') + 10u;
-        else if (c >= 'A' && c <= 'F') d = (unsigned)(c - 'A') + 10u;
-        else return -1;
-        v = (v << 4) | d;
-    }
-    *r = (uint8_t)(v >> 16);
-    *g = (uint8_t)(v >> 8);
-    *b = (uint8_t)v;
-    return 0;
-}
-
-static int parse_uint(const char *s, unsigned long max, unsigned long *out)
-{
-    char *end = NULL;
-    unsigned long v;
-    if (s == NULL || s[0] == '\0') return -1;
-    v = strtoul(s, &end, 10);
-    if (end == NULL || *end != '\0' || v > max) return -1;
-    *out = v;
-    return 0;
-}
 
 static void sleep_ms(unsigned long ms)
 {
@@ -700,15 +649,15 @@ static int led_parse_opts(int argc, char **argv, int start, struct led_opts *o)
         if (strcmp(argv[i], "--once") == 0) {
             o->flags = 0;
         } else if (strcmp(argv[i], "--stride") == 0 && i + 1 < argc) {
-            if (parse_uint(argv[++i], 144, &o->stride) != 0) return -1;
+            if (kbctl_parse_uint(argv[++i], 144, &o->stride) != 0) return -1;
         } else if (strcmp(argv[i], "--delay") == 0 && i + 1 < argc) {
-            if (parse_uint(argv[++i], 60000, &o->delay) != 0) return -1;
+            if (kbctl_parse_uint(argv[++i], 60000, &o->delay) != 0) return -1;
         } else if (strcmp(argv[i], "--period") == 0 && i + 1 < argc) {
-            if (parse_uint(argv[++i], KBC_ANIM_PERIOD_MAX, &o->period) != 0) return -1;
+            if (kbctl_parse_uint(argv[++i], KBC_ANIM_PERIOD_MAX, &o->period) != 0) return -1;
         } else if (strcmp(argv[i], "--from") == 0 && i + 1 < argc) {
-            if (parse_uint(argv[++i], 143, &o->from) != 0) return -1;
+            if (kbctl_parse_uint(argv[++i], 143, &o->from) != 0) return -1;
         } else if (strcmp(argv[i], "--color") == 0 && i + 1 < argc) {
-            if (parse_rgb(argv[++i], &o->r, &o->g, &o->b) != 0) return -1;
+            if (kbctl_parse_rgb(argv[++i], &o->r, &o->g, &o->b) != 0) return -1;
             o->have_color = 1;
         } else {
             return -1;
@@ -722,7 +671,7 @@ static int effect_from_arg(const char *a)
 {
     unsigned long v;
     int m;
-    if (parse_uint(a, 15, &v) == 0) return (int)v;
+    if (kbctl_parse_uint(a, 15, &v) == 0) return (int)v;
     for (m = 0; m < KBC_LED_EFFECT_COUNT; m++) {
         if (strcasecmp(a, kbc_led_effect_name((uint8_t)m)) == 0) return m;
     }
@@ -844,7 +793,7 @@ static int cmd_led_color(int argc, char **argv)
     }
     payload[0] = (uint8_t)m;
     for (i = 4; i < argc; i++, n++) {
-        if (parse_rgb(argv[i], &payload[2 + 3 * n], &payload[3 + 3 * n], &payload[4 + 3 * n]) != 0) {
+        if (kbctl_parse_rgb(argv[i], &payload[2 + 3 * n], &payload[3 + 3 * n], &payload[4 + 3 * n]) != 0) {
             fprintf(stderr, "kbctl: invalid color '%s' (use RRGGBB)\n", argv[i]);
             return 2;
         }
@@ -873,7 +822,7 @@ static int cmd_led_field(int argc, char **argv, uint8_t field, unsigned long lo,
     unsigned long v;
     uint8_t payload[2];
     int save = wants_save(&argc, argv), rc;
-    if (argc != 4 || parse_uint(argv[3], hi, &v) != 0 || v < lo) {
+    if (argc != 4 || kbctl_parse_uint(argv[3], hi, &v) != 0 || v < lo) {
         fprintf(stderr, "kbctl: led %s <%lu-%lu> [--save]  %s\n", argv[2], lo, hi, hint);
         return 2;
     }
@@ -952,7 +901,7 @@ static int cmd_led(int argc, char **argv)
         uint8_t r = 0, g = 0, b = 0;
         int next = 3;
         if (strcmp(sub, "solid") == 0) {
-            if (argc < 4 || parse_rgb(argv[3], &r, &g, &b) != 0) {
+            if (argc < 4 || kbctl_parse_rgb(argv[3], &r, &g, &b) != 0) {
                 fprintf(stderr, "kbctl: led solid needs a colour like FF8800\n");
                 return 2;
             }
@@ -976,8 +925,8 @@ static int cmd_led(int argc, char **argv)
     if (strcmp(sub, "pos") == 0) {
         unsigned long pos;
         uint8_t r, g, b;
-        if (argc < 5 || parse_uint(argv[3], 143, &pos) != 0 ||
-            parse_rgb(argv[4], &r, &g, &b) != 0) {
+        if (argc < 5 || kbctl_parse_uint(argv[3], 143, &pos) != 0 ||
+            kbctl_parse_rgb(argv[4], &r, &g, &b) != 0) {
             fprintf(stderr, "kbctl: led pos <n> <RRGGBB>\n");
             return 2;
         }
@@ -1027,7 +976,7 @@ static int cmd_led(int argc, char **argv)
         size_t n = 0, i, j;
         uint8_t r, g, b;
         char spec[256], *tok, *save = NULL;
-        if (argc < 5 || parse_rgb(argv[4], &r, &g, &b) != 0 || strlen(argv[3]) >= sizeof(spec)) {
+        if (argc < 5 || kbctl_parse_rgb(argv[4], &r, &g, &b) != 0 || strlen(argv[3]) >= sizeof(spec)) {
             fprintf(stderr, "kbctl: led key <k1[,k2,...]> <RRGGBB>  (see: kbctl led keys)\n");
             return 2;
         }
@@ -1108,7 +1057,7 @@ static int cmd_dump_block(int argc, char **argv)
     uint8_t *resp = NULL;
     uint32_t rlen = 0;
 
-    if (argc < 3 || argc > 4 || parse_uint(argv[2], 4, &prof) != 0 || prof < 1) {
+    if (argc < 3 || argc > 4 || kbctl_parse_uint(argv[2], 4, &prof) != 0 || prof < 1) {
         fprintf(stderr, "kbctl: dump-block <1-4> [file]\n");
         return 2;
     }
@@ -1248,7 +1197,7 @@ int main(int argc, char **argv)
     if (strcmp(cmd, "read-profile") == 0) {
         long idx = 1;
         if (argc == 3) {
-            if (parse_index(argv[2], &idx) != 0) {
+            if (kbctl_parse_index(argv[2], &idx) != 0) {
                 fprintf(stderr, "kbctl: invalid profile (expected 1-4)\n");
                 return 2;
             }
@@ -1283,7 +1232,7 @@ int main(int argc, char **argv)
         long profile;
         uint8_t *filebuf = NULL;
         size_t filelen = 0;
-        if (parse_index(argv[2], &profile) != 0) {
+        if (kbctl_parse_index(argv[2], &profile) != 0) {
             fprintf(stderr, "kbctl: invalid profile (expected 1-4)\n");
             return 2;
         }
@@ -1364,7 +1313,7 @@ int main(int argc, char **argv)
         uint8_t *resp = NULL;
         uint32_t rlen = 0;
         int perr;
-        if (argc != 3 || parse_uint(argv[2], 4, &p) != 0 || p < 1) {
+        if (argc != 3 || kbctl_parse_uint(argv[2], 4, &p) != 0 || p < 1) {
             fprintf(stderr, "kbctl: profile <1-4>\n");
             return 2;
         }

@@ -1139,6 +1139,76 @@ static void test_led_anim(void)
                               0, 0, 0, f, stride, count) == KBC_OK);
 }
 
+static size_t load_hex_file(const char *path, uint8_t *buf, size_t cap)
+{
+    FILE *f = fopen(path, "r");
+    size_t n = 0;
+    unsigned v;
+
+    if (f == NULL) {
+        return 0;
+    }
+    while (n < cap && fscanf(f, "%2x", &v) == 1) {
+        buf[n++] = (uint8_t)v;
+    }
+    fclose(f);
+    return n;
+}
+
+static void test_fixtures(void)
+{
+    uint8_t buf[KBC_FEATURE_REPORT_SIZE];
+    size_t n;
+
+    /* valid feature report */
+    n = load_hex_file("tests/fixtures/valid/feature_tv_f01.hex", buf, sizeof buf);
+    CHECK(n == KBC_FEATURE_REPORT_SIZE);
+    CHECK(kbc_validate_feature_report(buf, n) == KBC_OK);
+
+    /* valid input report */
+    n = load_hex_file("tests/fixtures/valid/input_tv_i01.hex", buf, sizeof buf);
+    CHECK(n == KBC_INPUT_REPORT_SIZE);
+    CHECK(kbc_validate_input_report(buf, n) == KBC_OK);
+
+    /* invalid feature: bad opcode */
+    n = load_hex_file("tests/fixtures/invalid/feature_bad_opcode.hex", buf, sizeof buf);
+    CHECK(n == KBC_FEATURE_REPORT_SIZE);
+    CHECK(kbc_validate_feature_report(buf, n) != KBC_OK);
+
+    /* invalid feature: bad report id */
+    n = load_hex_file("tests/fixtures/invalid/feature_bad_report_id.hex", buf, sizeof buf);
+    CHECK(n == KBC_FEATURE_REPORT_SIZE);
+    CHECK(kbc_validate_feature_report(buf, n) != KBC_OK);
+
+    /* invalid feature: bad size (263 bytes) */
+    n = load_hex_file("tests/fixtures/invalid/feature_bad_size_263.hex", buf, sizeof buf);
+    CHECK(n == KBC_FEATURE_REPORT_SIZE - 1);
+    CHECK(kbc_validate_feature_report(buf, n) != KBC_OK);
+
+    /* invalid feature: bad macro position */
+    n = load_hex_file("tests/fixtures/invalid/feature_bad_macro_pos.hex", buf, sizeof buf);
+    CHECK(n == KBC_FEATURE_REPORT_SIZE);
+    CHECK(kbc_validate_feature_report(buf, n) != KBC_OK);
+
+    /* invalid input: bad report id */
+    n = load_hex_file("tests/fixtures/invalid/input_bad_report_id.hex", buf, sizeof buf);
+    CHECK(n == KBC_INPUT_REPORT_SIZE);
+    CHECK(kbc_validate_input_report(buf, n) != KBC_OK);
+}
+
+static void test_input_report_default_marker(void)
+{
+    uint8_t buf[KBC_INPUT_REPORT_MIN_SIZE];
+    kbc_input_report rep;
+
+    /* unknown marker (0xF2) exercises the default branch of fill_input_report */
+    buf[0] = 0x04; buf[1] = 0xF2; buf[2] = 0x00; buf[3] = 0x00;
+    buf[4] = 0x00; buf[5] = 0x07;
+    CHECK(kbc_parse_input_report(buf, sizeof buf, &rep) == KBC_OK);
+    CHECK(rep.subtype == 0xF2);
+    CHECK(rep.state == 7);
+    CHECK(rep.pressed == 0);
+}
 static void test_keymap(void)
 {
     int tmp[KBC_KEY_POSITIONS], pos[KBC_KEY_POSITIONS];
@@ -1306,6 +1376,8 @@ int main(void)
     test_effect_colors();
     test_commit_report();
     test_keymap();
+    test_fixtures();
+    test_input_report_default_marker();
     test_led_anim();
     test_select_profile_builder();
     test_led_effect_names();

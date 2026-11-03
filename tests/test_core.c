@@ -569,6 +569,10 @@ static void test_profile_select_encode(void)
     uint8_t buf[KBC_FEATURE_REPORT_SIZE];
     CHECK(kbc_profile_encode_select(2, buf, sizeof buf) == KBC_OK);
     CHECK(buf[0] == 0x07 && buf[1] == 0x01 && buf[2] == 2);
+    CHECK(kbc_profile_encode_select(3, buf, sizeof buf) == KBC_OK);
+    CHECK(buf[2] == 3);
+    CHECK(kbc_profile_encode_select(4, buf, sizeof buf) == KBC_OK);
+    CHECK(buf[2] == 4);
     CHECK(kbc_profile_encode_select_logical(0, buf, sizeof buf) == KBC_OK);
     CHECK(buf[2] == 1);
     /* factory reset value must never be encodable for profile select */
@@ -968,6 +972,11 @@ static void test_read_active_profile_decode(void)
     CHECK(kbc_read_active_profile_decode(buf, sizeof buf, &hw) == KBC_OK);
     CHECK(hw == 3);
 
+    zero_buf(buf, sizeof buf);
+    buf[0] = 0x07; buf[1] = 0x81; buf[2] = 0x04;
+    CHECK(kbc_read_active_profile_decode(buf, sizeof buf, &hw) == KBC_OK);
+    CHECK(hw == 4);
+
     /* reply to 0x82 (block read) is not an active-profile reply */
     zero_buf(buf, sizeof buf);
     buf[0] = 0x07; buf[1] = 0x82; buf[2] = 0x01;
@@ -1079,6 +1088,10 @@ static void test_select_profile_builder(void)
     size_t i;
     CHECK(kbc_build_select_profile(2, b, sizeof b) == KBC_OK);
     CHECK(b[0] == 7 && b[1] == 0x01 && b[2] == 2);
+    CHECK(kbc_build_select_profile(3, b, sizeof b) == KBC_OK);
+    CHECK(b[2] == 3);
+    CHECK(kbc_build_select_profile(4, b, sizeof b) == KBC_OK);
+    CHECK(b[2] == 4);
     for (i = 3; i < sizeof b; i++) CHECK(b[i] == 0);
     CHECK(kbc_build_select_profile(0, b, sizeof b) == KBC_ERR_RANGE);
     CHECK(kbc_build_select_profile(5, b, sizeof b) == KBC_ERR_RANGE);
@@ -1127,6 +1140,20 @@ static void test_led_anim(void)
     /* validation */
     CHECK(kbc_led_anim_render(KBC_ANIM_BREATH, 0, 199, 1, 1, 1, f, stride, count) == KBC_ERR_RANGE);
     CHECK(kbc_led_anim_render(KBC_ANIM_BREATH, 0, 60001, 1, 1, 1, f, stride, count) == KBC_ERR_RANGE);
+    /* exact boundaries are accepted */
+    CHECK(kbc_led_anim_render(KBC_ANIM_BREATH, 0, 200, 1, 1, 1, f, stride, count) == KBC_OK);
+    CHECK(kbc_led_anim_render(KBC_ANIM_BREATH, 0, 60000, 1, 1, 1, f, stride, count) == KBC_OK);
+    CHECK(kbc_led_anim_render(KBC_ANIM_CYCLE, 0, 200, 1, 1, 1, f, stride, count) == KBC_OK);
+    CHECK(kbc_led_anim_render(KBC_ANIM_CYCLE, 0, 60000, 1, 1, 1, f, stride, count) == KBC_OK);
+    CHECK(kbc_led_anim_render(KBC_ANIM_RAINBOW, 0, 200, 1, 1, 1, f, stride, count) == KBC_OK);
+    CHECK(kbc_led_anim_render(KBC_ANIM_RAINBOW, 0, 60000, 1, 1, 1, f, stride, count) == KBC_OK);
+    /* default periods are accepted for every kind */
+    CHECK(kbc_led_anim_render(KBC_ANIM_CYCLE, 0, kbc_led_anim_default_period(KBC_ANIM_CYCLE),
+                              0, 0, 0, f, stride, count) == KBC_OK);
+    CHECK(kbc_led_anim_render(KBC_ANIM_RAINBOW, 0, kbc_led_anim_default_period(KBC_ANIM_RAINBOW),
+                              0, 0, 0, f, stride, count) == KBC_OK);
+    CHECK(kbc_led_anim_default_period(KBC_ANIM_CYCLE) == 8000);
+    CHECK(kbc_led_anim_default_period(KBC_ANIM_RAINBOW) == 6000);
     CHECK(kbc_led_anim_render(KBC_ANIM_BREATH, 0, 4000, 1, 1, 1, f, stride, 71) == KBC_ERR_RANGE);
     CHECK(kbc_led_anim_render(KBC_ANIM_BREATH, 0, 4000, 1, 1, 1, f, 145, 70) == KBC_ERR_RANGE);
     CHECK(kbc_led_anim_render((kbc_led_anim)0, 0, 4000, 1, 1, 1, f, stride, count) == KBC_ERR_INVALID_ARGUMENT);

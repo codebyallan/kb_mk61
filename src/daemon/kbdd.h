@@ -77,6 +77,18 @@ typedef struct kbdd_ctx {
     long long restore_next_ms;
     kbdd_ipc_server_t *ipc;
 } kbdd_ctx_t;
+
+#define KBDD_CONFIG_NONE 0u
+#define KBDD_CONFIG_EFFECT 1u
+#define KBDD_CONFIG_SOLID 2u
+#define KBDD_CONFIG_POSITIONS 3u
+#define KBDD_CONFIG_ANIMATION 4u
+
+/* config */
+void kbdd_config_defaults(kbdd_ctx_t *k);
+int kbdd_load_config(kbdd_ctx_t *k);
+int kbdd_load_config_file(kbdd_ctx_t *k, const char *path);
+int kbdd_save_config(const kbdd_ctx_t *k);
 int kbdd_hidraw_enumerate(const kbdd_model_t *models, size_t model_count,
                           kbdd_hid_device_t **out_devs, size_t *out_count);
 void kbdd_hidraw_free(kbdd_hid_device_t *devs, size_t count);

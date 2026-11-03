@@ -24,6 +24,11 @@ struct kbdd_ipc_client {
     time_t rl_window_start;
     unsigned int rl_count;
     int watching;
+    uint8_t *tx;                /* queued outbound bytes: [tx_off, tx_len) */
+    size_t tx_off;
+    size_t tx_len;
+    size_t tx_cap;
+    unsigned long tx_dropped;   /* watch events dropped while the queue was full */
 };
 
 struct kbdd_ipc_server {
@@ -48,6 +53,9 @@ static void kbdd_ipc_client_reset(struct kbdd_ipc_client *c)
         return;
     }
     free(c->rx);
+    free(c->tx);
+    c->tx = NULL;
+    c->tx_off = c->tx_len = c->tx_cap = 0;
     c->rx = NULL;
     c->rx_len = 0;
     c->rx_cap = 0;
@@ -80,6 +88,111 @@ static void kbdd_ipc_client_close(struct kbdd_ipc_server *s, size_t idx)
     if (s->client_count > 0) {
         s->client_count--;
     }
+}
+
+/* Buffers above this size are released once the queue drains. */
+#define KBDD_IPC_TX_KEEP 65536u
+
+static size_t kbdd_ipc_tx_pending(const struct kbdd_ipc_client *c)
+{
+    return c->tx_len - c->tx_off;
+}
+
+/* Write as much queued data as the socket accepts. A full socket buffer
+ * (EAGAIN) is normal back-pressure: the rest stays queued and is retried on
+ * POLLOUT. Returns 0, or -1 if the client had to be closed. */
+static int kbdd_ipc_client_flush(struct kbdd_ipc_server *s, size_t idx)
+{
+    struct kbdd_ipc_client *c = &s->clients[idx];
+
+    while (c->tx_off < c->tx_len) {
+        ssize_t w = send(c->fd, c->tx + c->tx_off, c->tx_len - c->tx_off,
+                         MSG_NOSIGNAL);
+        if (w > 0) {
+            c->tx_off += (size_t)w;
+            continue;
+        }
+        if (w < 0 && errno == EINTR) {
+            continue;
+        }
+        if (w < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) {
+            return 0;
+        }
+        kbdd_ipc_client_close(s, idx);
+        return -1;
+    }
+    c->tx_off = 0;
+    c->tx_len = 0;
+    if (c->tx_cap > KBDD_IPC_TX_KEEP) {
+        free(c->tx);
+        c->tx = NULL;
+        c->tx_cap = 0;
+    }
+    return 0;
+}
+
+static void kbdd_ipc_put_header(uint8_t *h, uint16_t opcode, uint16_t request_id,
+                                uint16_t flags, uint32_t plen)
+{
+    uint32_t magic = KBDD_IPC_MAGIC;
+
+    h[0] = (uint8_t)magic;        h[1] = (uint8_t)(magic >> 8);
+    h[2] = (uint8_t)(magic >> 16); h[3] = (uint8_t)(magic >> 24);
+    h[4] = (uint8_t)KBDD_IPC_VERSION; h[5] = (uint8_t)(KBDD_IPC_VERSION >> 8);
+    h[6] = (uint8_t)flags;        h[7] = (uint8_t)(flags >> 8);
+    h[8] = (uint8_t)plen;         h[9] = (uint8_t)(plen >> 8);
+    h[10] = (uint8_t)(plen >> 16); h[11] = (uint8_t)(plen >> 24);
+    h[12] = (uint8_t)opcode;      h[13] = (uint8_t)(opcode >> 8);
+    h[14] = (uint8_t)request_id;  h[15] = (uint8_t)(request_id >> 8);
+}
+
+/* Append one frame (header + payload, contiguous) to the client's TX queue and
+ * try to send it. Returns 0 if queued, 1 if dropped (only when `droppable`
+ * and the queue is full), -1 if the client was closed. Replies are never
+ * dropped: a client that leaves KBDD_IPC_TX_MAX bytes unread is closed. */
+static int kbdd_ipc_queue_msg(struct kbdd_ipc_server *s, size_t idx,
+                              uint16_t opcode, uint16_t request_id,
+                              uint16_t flags, const uint8_t *payload,
+                              uint32_t plen, int droppable)
+{
+    struct kbdd_ipc_client *c = &s->clients[idx];
+    size_t total = KBDD_IPC_HEADER_SIZE + (size_t)plen;
+    size_t pending = kbdd_ipc_tx_pending(c);
+
+    if (pending + total > KBDD_IPC_TX_MAX) {
+        if (droppable) {
+            return 1;
+        }
+        fprintf(stderr, "kbdd: client fd %d is not reading replies; closing\n", c->fd);
+        kbdd_ipc_client_close(s, idx);
+        return -1;
+    }
+    if (c->tx_off > 0 && c->tx_len + total > c->tx_cap) {
+        memmove(c->tx, c->tx + c->tx_off, pending);
+        c->tx_len = pending;
+        c->tx_off = 0;
+    }
+    if (c->tx_len + total > c->tx_cap) {
+        size_t ncap = c->tx_cap != 0 ? c->tx_cap : 1024;
+        uint8_t *nb;
+
+        while (ncap < c->tx_len + total) {
+            ncap *= 2;
+        }
+        nb = realloc(c->tx, ncap);
+        if (nb == NULL) {
+            kbdd_ipc_client_close(s, idx);
+            return -1;
+        }
+        c->tx = nb;
+        c->tx_cap = ncap;
+    }
+    kbdd_ipc_put_header(c->tx + c->tx_len, opcode, request_id, flags, plen);
+    if (plen > 0) {
+        memcpy(c->tx + c->tx_len + KBDD_IPC_HEADER_SIZE, payload, plen);
+    }
+    c->tx_len += total;
+    return kbdd_ipc_client_flush(s, idx);
 }
 
 kbdd_ipc_server_t *kbdd_ipc_server_create(void)
@@ -239,12 +352,19 @@ static size_t kbdd_ipc_client_find(const kbdd_ipc_server_t *s, int fd)
 }
 
 static int kbdd_ipc_handle_client(struct kbdd_ipc_server *s, size_t idx,
-                                  kbdd_ipc_handler_t handler, void *ctx)
+                                  kbdd_ipc_handler_t handler, void *ctx,
+                                  int do_read)
 {
     struct kbdd_ipc_client *c = &s->clients[idx];
     const int client_fd = c->fd;
     /* read available data */
-    for (;;) {
+    for (; do_read;) {
+        /* One maximal frame is buffered: process it before reading more
+         * (the rest stays in the socket; poll wakes us again). Growing the
+         * buffer past this point used to close pipelining clients. */
+        if (c->rx_len >= KBDD_IPC_HEADER_SIZE + KBDD_IPC_MAX_PAYLOAD) {
+            break;
+        }
         if (kbdd_ipc_ensure_cap(c, c->rx_len + 4096) != 0) {
             kbdd_ipc_client_close(s, idx);
             return -1;
@@ -273,6 +393,12 @@ static int kbdd_ipc_handle_client(struct kbdd_ipc_server *s, size_t idx,
             return 0;
         }
         c = &s->clients[cidx];
+
+        /* Back-pressure: leave further requests unprocessed until the client
+         * has drained its replies (resumed from the POLLOUT path). */
+        if (kbdd_ipc_tx_pending(c) >= KBDD_IPC_TX_HIGH) {
+            break;
+        }
 
         if (!c->has_header) {
             if (c->rx_len < KBDD_IPC_HEADER_SIZE) {
@@ -374,54 +500,13 @@ static int kbdd_ipc_handle_client(struct kbdd_ipc_server *s, size_t idx,
         }
         c = &s->clients[cidx];
 
-        /* send response */
-        /* build header */
-        uint8_t header[KBDD_IPC_HEADER_SIZE];
-        uint32_t rmagic = KBDD_IPC_MAGIC;
-        header[0] = (uint8_t)(rmagic);
-        header[1] = (uint8_t)(rmagic >> 8);
-        header[2] = (uint8_t)(rmagic >> 16);
-        header[3] = (uint8_t)(rmagic >> 24);
-        header[4] = (uint8_t)(resp.version);
-        header[5] = (uint8_t)(resp.version >> 8);
-        header[6] = (uint8_t)(resp.flags);
-        header[7] = (uint8_t)(resp.flags >> 8);
-        uint32_t rplen = resp.payload_len;
-        header[8] = (uint8_t)(rplen);
-        header[9] = (uint8_t)(rplen >> 8);
-        header[10] = (uint8_t)(rplen >> 16);
-        header[11] = (uint8_t)(rplen >> 24);
-        header[12] = (uint8_t)(resp.opcode);
-        header[13] = (uint8_t)(resp.opcode >> 8);
-        header[14] = (uint8_t)(resp.request_id);
-        header[15] = (uint8_t)(resp.request_id >> 8);
-
-        /* send header */
-        size_t to_send = KBDD_IPC_HEADER_SIZE;
-        const uint8_t *p = header;
-        while (to_send > 0) {
-            ssize_t w = send(c->fd, p, to_send, MSG_NOSIGNAL);
-            if (w <= 0) {
-                kbdd_ipc_client_close(s, cidx);
-                free(resp.payload);
-                return -1;
-            }
-            p += w;
-            to_send -= (size_t)w;
-        }
-        if (resp.payload_len > 0 && resp.payload != NULL) {
-            size_t rem = resp.payload_len;
-            const uint8_t *pp = resp.payload;
-            while (rem > 0) {
-                ssize_t w = send(c->fd, pp, rem, MSG_NOSIGNAL);
-                if (w <= 0) {
-                    kbdd_ipc_client_close(s, cidx);
-                    free(resp.payload);
-                    return -1;
-                }
-                pp += w;
-                rem -= (size_t)w;
-            }
+        /* Queue the reply (one contiguous frame); a full socket buffer is not
+         * an error, the rest is flushed when the client becomes writable. */
+        if (kbdd_ipc_queue_msg(s, cidx, resp.opcode, resp.request_id, resp.flags,
+                               resp.payload, resp.payload != NULL ? resp.payload_len : 0,
+                               0) < 0) {
+            free(resp.payload);
+            return -1;
         }
         free(resp.payload);
     }
@@ -439,41 +524,33 @@ int kbdd_ipc_server_publish(kbdd_ipc_server_t *s, const char *event)
     if (len > KBDD_IPC_MAX_PAYLOAD) return -1;
     for (i = 0; i < s->client_count;) {
         struct kbdd_ipc_client *c = &s->clients[i];
-        uint8_t header[KBDD_IPC_HEADER_SIZE];
-        uint32_t magic = KBDD_IPC_MAGIC;
-        uint16_t opcode = KBDD_IPC_OP_EVENT;
-        uint16_t request_id = 0;
-        size_t sent, payload_sent;
+        int rc = 0;
 
         if (!c->watching) {
             i++;
             continue;
         }
-        header[0] = (uint8_t)magic; header[1] = (uint8_t)(magic >> 8);
-        header[2] = (uint8_t)(magic >> 16); header[3] = (uint8_t)(magic >> 24);
-        header[4] = KBDD_IPC_VERSION; header[5] = 0;
-        header[6] = 0; header[7] = 0;
-        header[8] = (uint8_t)len; header[9] = (uint8_t)(len >> 8);
-        header[10] = (uint8_t)(len >> 16); header[11] = (uint8_t)(len >> 24);
-        header[12] = (uint8_t)opcode; header[13] = (uint8_t)(opcode >> 8);
-        header[14] = (uint8_t)request_id; header[15] = (uint8_t)(request_id >> 8);
-        sent = 0;
-        while (sent < sizeof(header)) {
-            ssize_t n = send(c->fd, header + sent, sizeof(header) - sent,
-                             MSG_NOSIGNAL);
-            if (n <= 0) break;
-            sent += (size_t)n;
+        /* A slow watcher loses events instead of its connection; tell it. */
+        if (c->tx_dropped > 0) {
+            char note[96];
+            int n = snprintf(note, sizeof(note),
+                             "warning: %lu event(s) dropped, client reading too slowly",
+                             c->tx_dropped);
+            rc = kbdd_ipc_queue_msg(s, i, KBDD_IPC_OP_EVENT, 0, 0,
+                                    (const uint8_t *)note, (uint32_t)n + 1, 1);
+            if (rc == 0) {
+                c->tx_dropped = 0;
+            }
         }
-        payload_sent = 0;
-        while (sent == sizeof(header) && payload_sent < len) {
-            ssize_t n = send(c->fd, event + payload_sent, len - payload_sent,
-                             MSG_NOSIGNAL);
-            if (n <= 0) break;
-            payload_sent += (size_t)n;
+        if (rc >= 0) {
+            rc = kbdd_ipc_queue_msg(s, i, KBDD_IPC_OP_EVENT, 0, 0,
+                                    (const uint8_t *)event, (uint32_t)len, 1);
+            if (rc == 1) {
+                c->tx_dropped++;
+            }
         }
-        if (sent != sizeof(header) || payload_sent != len) {
-            kbdd_ipc_client_close(s, i);
-            continue;
+        if (rc < 0) {
+            continue;   /* client closed; slot now holds another client */
         }
         i++;
     }
@@ -501,46 +578,8 @@ int kbdd_ipc_server_send(kbdd_ipc_server_t *s, int fd, uint16_t opcode,
         return -1;
     }
 
-    uint8_t header[KBDD_IPC_HEADER_SIZE];
-    uint32_t rmagic = KBDD_IPC_MAGIC;
-    header[0] = (uint8_t)(rmagic);
-    header[1] = (uint8_t)(rmagic >> 8);
-    header[2] = (uint8_t)(rmagic >> 16);
-    header[3] = (uint8_t)(rmagic >> 24);
-    header[4] = KBDD_IPC_VERSION; header[5] = 0;
-    header[6] = 0; header[7] = 0;
-    header[8] = (uint8_t)payload_len; header[9] = (uint8_t)(payload_len >> 8);
-    header[10] = (uint8_t)(payload_len >> 16); header[11] = (uint8_t)(payload_len >> 24);
-    header[12] = (uint8_t)opcode; header[13] = (uint8_t)(opcode >> 8);
-    header[14] = (uint8_t)request_id; header[15] = (uint8_t)(request_id >> 8);
-
-    size_t to_send = KBDD_IPC_HEADER_SIZE;
-    const uint8_t *p = header;
-    while (to_send > 0) {
-        ssize_t w = send(c->fd, p, to_send, MSG_NOSIGNAL);
-        if (w <= 0) {
-            size_t idx = (size_t)(c - s->clients);
-            kbdd_ipc_client_close(s, idx);
-            return -1;
-        }
-        p += w;
-        to_send -= (size_t)w;
-    }
-    if (payload_len > 0) {
-        size_t rem = payload_len;
-        const uint8_t *pp = payload;
-        while (rem > 0) {
-            ssize_t w = send(c->fd, pp, rem, MSG_NOSIGNAL);
-            if (w <= 0) {
-                size_t idx = (size_t)(c - s->clients);
-                kbdd_ipc_client_close(s, idx);
-                return -1;
-            }
-            pp += w;
-            rem -= (size_t)w;
-        }
-    }
-    return 0;
+    return kbdd_ipc_queue_msg(s, (size_t)(c - s->clients), opcode, request_id, 0,
+                              payload, payload_len, 0) < 0 ? -1 : 0;
 }
 
 int kbdd_ipc_server_poll(kbdd_ipc_server_t *s, int timeout_ms,
@@ -559,8 +598,13 @@ int kbdd_ipc_server_poll(kbdd_ipc_server_t *s, int timeout_ms,
     nfds++;
 
     for (size_t i = 0; i < s->client_count; i++) {
-        fds[nfds].fd = s->clients[i].fd;
-        fds[nfds].events = POLLIN;
+        const struct kbdd_ipc_client *c = &s->clients[i];
+        size_t pending = kbdd_ipc_tx_pending(c);
+
+        fds[nfds].fd = c->fd;
+        /* Stop reading new requests while the client has a large unread backlog. */
+        fds[nfds].events = (short)((pending < KBDD_IPC_TX_HIGH ? POLLIN : 0) |
+                                   (pending > 0 ? POLLOUT : 0));
         fds[nfds].revents = 0;
         nfds++;
     }
@@ -577,29 +621,35 @@ int kbdd_ipc_server_poll(kbdd_ipc_server_t *s, int timeout_ms,
         kbdd_ipc_server_accept(s);
     }
 
-    /* process clients; iterate by index, but client_count may change */
+    /* Handle each client once. A close compacts the array (another client
+     * moves into slot i), so re-check the slot by descriptor afterwards. */
     size_t i = 0;
     while (i < s->client_count) {
-        /* find matching fd? We'll just process each current client once. */
-        int ready = 0;
-        /* map client index to fds index: 1 + original offset; but after accept compaction, simpler process all clients with POLLIN by checking recv readiness via poll per fd */
-        /* We'll call handle for each client whose fd had revents; but indices may shift after close. Handle one at a time and restart loop. */
-        /* Determine if this client's fd is in fds and ready */
-        /* Build a quick check: */
-        ready = 0;
+        const int fd = s->clients[i].fd;
+        short rev = 0;
+
         for (nfds_t j = 1; j < nfds; j++) {
-            if (fds[j].fd == s->clients[i].fd && (fds[j].revents & (POLLIN | POLLHUP | POLLERR))) {
-                ready = 1;
+            if (fds[j].fd == fd) {
+                rev = fds[j].revents;
                 break;
             }
         }
-        if (ready) {
-            if (kbdd_ipc_handle_client(s, i, handler, ctx) != 0) {
-                /* client closed; do not increment */
-                continue;
+        if ((rev & (POLLOUT | POLLERR | POLLHUP)) != 0 &&
+            kbdd_ipc_tx_pending(&s->clients[i]) > 0) {
+            (void)kbdd_ipc_client_flush(s, i);
+        }
+        if (i < s->client_count && s->clients[i].fd == fd) {
+            int want_read = (rev & (POLLIN | POLLHUP | POLLERR)) != 0;
+
+            /* POLLOUT without POLLIN: the backlog drained, so requests held
+             * back by back-pressure can now be processed. */
+            if (want_read || (rev & POLLOUT) != 0) {
+                (void)kbdd_ipc_handle_client(s, i, handler, ctx, want_read);
             }
         }
-        i++;
+        if (i < s->client_count && s->clients[i].fd == fd) {
+            i++;
+        }
     }
 
     return 0;

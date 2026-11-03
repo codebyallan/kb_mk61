@@ -11,6 +11,11 @@
 #define KBDD_MAX_DEVICES 16
 #define KBDD_MAX_CLIENTS 16
 
+/* Per-client outbound queue: stop reading requests above HIGH bytes of unread
+ * replies; close a client (or drop watch events) above MAX. */
+#define KBDD_IPC_TX_HIGH (256u * 1024u)
+#define KBDD_IPC_TX_MAX (1024u * 1024u)
+
 typedef struct kbdd_model {
     const char *name;
     uint16_t vid;

@@ -4,6 +4,7 @@
 #include <string.h>
 #include <unistd.h>
 
+#include <fcntl.h>
 #include <poll.h>
 #include <errno.h>
 #include <sys/socket.h>
@@ -462,6 +463,196 @@ static void test_deferred_reply(void)
     test_teardown(&ts);
 }
 
+/* ---- TX queue / back-pressure ------------------------------------------ */
+
+static void set_nonblock(int fd)
+{
+    int fl = fcntl(fd, F_GETFL, 0);
+    CHECK(fl >= 0 && fcntl(fd, F_SETFL, fl | O_NONBLOCK) == 0);
+}
+
+/* Parse complete frames at buf[*off..len). Returns 1 and fills the out
+ * fields when a whole frame is present, else 0. */
+static int next_frame(const uint8_t *buf, size_t len, size_t *off,
+                      uint16_t *opcode, uint16_t *rid,
+                      const uint8_t **payload, uint32_t *plen)
+{
+    uint32_t n;
+
+    if (len - *off < KBDD_IPC_HEADER_SIZE) return 0;
+    CHECK(le32(buf + *off) == KBDD_IPC_MAGIC);
+    n = le32(buf + *off + 8);
+    if (len - *off < KBDD_IPC_HEADER_SIZE + n) return 0;
+    *opcode = le16(buf + *off + 12);
+    *rid = le16(buf + *off + 14);
+    *payload = buf + *off + KBDD_IPC_HEADER_SIZE;
+    *plen = n;
+    *off += KBDD_IPC_HEADER_SIZE + n;
+    return 1;
+}
+
+/* Run the server and read everything the client can get, until `idle`
+ * consecutive rounds produce no bytes. Returns the new buffer length. */
+static size_t pump(test_srv_t *ts, uint8_t *buf, size_t cap, size_t len, int idle)
+{
+    int quiet = 0;
+
+    while (quiet < idle && len < cap) {
+        ssize_t r;
+        (void)poll_server(ts);
+        r = recv(ts->client, buf + len, cap - len, MSG_DONTWAIT);
+        if (r > 0) {
+            len += (size_t)r;
+            quiet = 0;
+        } else {
+            quiet++;
+        }
+    }
+    return len;
+}
+
+/* More pipelined replies than fit in the socket buffer must all arrive, in
+ * order, without the connection being dropped (EAGAIN is not fatal). */
+static void test_pipelined_replies_not_lost(void)
+{
+    enum { N = 200, PL = 40 };
+    test_srv_t ts;
+    uint8_t req[N * (KBDD_IPC_HEADER_SIZE + PL)];
+    size_t off = 0, rlen = 0, roff = 0, len;
+    uint8_t *rbuf;
+    int got = 0;
+
+    test_setup(&ts);
+    set_nonblock(ts.client);
+    rbuf = malloc(N * (KBDD_IPC_HEADER_SIZE + PL) + 64);
+    CHECK(rbuf != NULL);
+    for (int i = 0; i < N; i++) {
+        uint8_t pl[PL];
+        memset(pl, 'a' + (i % 26), sizeof(pl));
+        build_message(req + off, &len, KBDD_IPC_OP_PING, pl, PL, (uint16_t)(i + 1), 0);
+        off += len;
+    }
+    CHECK(write(ts.client, req, off) == (ssize_t)off);   /* never read until now */
+    rlen = pump(&ts, rbuf, N * (KBDD_IPC_HEADER_SIZE + PL) + 64, 0, 10);
+    for (;;) {
+        uint16_t op, rid; const uint8_t *pl; uint32_t pn;
+        if (!next_frame(rbuf, rlen, &roff, &op, &rid, &pl, &pn)) break;
+        CHECK(op == KBDD_IPC_OP_PING);
+        CHECK(rid == (uint16_t)(got + 1));
+        CHECK(pn == PL && pl[0] == (uint8_t)('a' + (got % 26)));
+        got++;
+    }
+    CHECK(got == N);
+    free(rbuf);
+    test_teardown(&ts);
+}
+
+/* A client that sends more request data than the daemon will answer at once
+ * gets every reply: reading pauses while its backlog is large, then resumes. */
+static void test_backpressure_resumes_processing(void)
+{
+    enum { N = 40, PL = 60000 };
+    test_srv_t ts;
+    uint8_t *pl = malloc(PL), *msg = malloc(KBDD_IPC_HEADER_SIZE + PL);
+    uint8_t *rbuf = malloc((size_t)N * (KBDD_IPC_HEADER_SIZE + PL));
+    size_t sent_total = 0, msg_len = 0, rlen = 0, roff = 0;
+    int next = 0, got = 0, idle = 0;
+
+    CHECK(pl != NULL && msg != NULL && rbuf != NULL);
+    memset(pl, 'z', PL);
+    test_setup(&ts);
+    set_nonblock(ts.client);
+
+    while (got < N && idle < 200) {
+        int progressed = 0;
+        ssize_t r;
+        uint16_t op, rid; const uint8_t *p; uint32_t pn;
+
+        if (next < N && sent_total == msg_len) {
+            build_message(msg, &msg_len, KBDD_IPC_OP_PING, pl, PL, (uint16_t)(next + 1), 0);
+            sent_total = 0;
+            next++;
+        }
+        if (sent_total < msg_len) {
+            r = send(ts.client, msg + sent_total, msg_len - sent_total, MSG_DONTWAIT);
+            if (r > 0) { sent_total += (size_t)r; progressed = 1; }
+        }
+        (void)poll_server(&ts);
+        r = recv(ts.client, rbuf + rlen, (size_t)N * (KBDD_IPC_HEADER_SIZE + PL) - rlen, MSG_DONTWAIT);
+        if (r > 0) { rlen += (size_t)r; progressed = 1; }
+        while (next_frame(rbuf, rlen, &roff, &op, &rid, &p, &pn)) {
+            CHECK(rid == (uint16_t)(got + 1) && pn == PL);
+            got++;
+            progressed = 1;
+        }
+        idle = progressed ? 0 : idle + 1;
+    }
+    CHECK(got == N);
+    free(pl); free(msg); free(rbuf);
+    test_teardown(&ts);
+}
+
+/* A watcher that does not read loses events, not its connection, and is told
+ * how many it missed once it catches up. */
+static void test_slow_watcher_keeps_connection(void)
+{
+    enum { EVENTS = 20000 };
+    test_srv_t ts;
+    uint8_t frame[KBDD_IPC_HEADER_SIZE];
+    size_t len, cap = (size_t)8 * 1024 * 1024, rlen, roff = 0;
+    uint8_t *rbuf = malloc(cap);
+    char ev[128];
+    int last = -1, events = 0, warned = 0;
+    uint16_t op, rid; const uint8_t *p; uint32_t pn;
+
+    CHECK(rbuf != NULL);
+    test_setup(&ts);
+    set_nonblock(ts.client);
+    build_message(frame, &len, KBDD_IPC_OP_WATCH, NULL, 0, 7, 0);
+    CHECK(write(ts.client, frame, len) == (ssize_t)len);
+    rlen = pump(&ts, rbuf, cap, 0, 3);              /* WATCH reply */
+    CHECK(next_frame(rbuf, rlen, &roff, &op, &rid, &p, &pn) && op == KBDD_IPC_OP_WATCH);
+
+    for (int i = 0; i < EVENTS; i++) {               /* 20000 x ~120 B, never read */
+        snprintf(ev, sizeof(ev), "event %06d %0*d", i, 90, 0);
+        CHECK(kbdd_ipc_server_publish(ts.server, ev) == 0);
+    }
+    rlen = pump(&ts, rbuf, cap, rlen, 5);
+    while (next_frame(rbuf, rlen, &roff, &op, &rid, &p, &pn)) {
+        CHECK(op == KBDD_IPC_OP_EVENT);
+        if (strncmp((const char *)p, "event ", 6) == 0) {
+            int n = atoi((const char *)p + 6);
+            CHECK(n > last);                         /* ordered, never torn */
+            last = n;
+            events++;
+        }
+    }
+    CHECK(events > 0 && events < EVENTS);            /* some were dropped */
+    CHECK(last >= 0);
+
+    /* Still connected: next event is preceded by a drop notice. */
+    CHECK(kbdd_ipc_server_publish(ts.server, "event after") == 0);
+    rlen = pump(&ts, rbuf, cap, rlen, 3);
+    while (next_frame(rbuf, rlen, &roff, &op, &rid, &p, &pn)) {
+        if (strstr((const char *)p, "dropped") != NULL) warned = 1;
+    }
+    CHECK(warned);
+
+    /* ...and requests still work on the same connection. */
+    build_message(frame, &len, KBDD_IPC_OP_PING, NULL, 0, 0x55, 0);
+    CHECK(write(ts.client, frame, len) == (ssize_t)len);
+    rlen = pump(&ts, rbuf, cap, rlen, 3);
+    {
+        int pong = 0;
+        while (next_frame(rbuf, rlen, &roff, &op, &rid, &p, &pn)) {
+            if (op == KBDD_IPC_OP_PING && rid == 0x55) pong = 1;
+        }
+        CHECK(pong);
+    }
+    free(rbuf);
+    test_teardown(&ts);
+}
+
 int main(void)
 {
     test_valid_ping();
@@ -473,6 +664,9 @@ int main(void)
     test_watch_receives_event();
     test_non_watch_does_not_receive_event();
     test_deferred_reply();
+    test_pipelined_replies_not_lost();
+    test_backpressure_resumes_processing();
+    test_slow_watcher_keeps_connection();
 
     if (failures != 0) {
         fprintf(stderr, "%d test(s) failed\n", failures);

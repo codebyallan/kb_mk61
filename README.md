@@ -168,6 +168,8 @@ kbctl active-profile
 - `enable-notifications` enables keyboard input notifications.
 - `watch` subscribes to profile, layer, and LED effect events and prints them
   until `Ctrl+C`.
+  A reader that falls behind loses events but keeps its connection; it then
+  receives a `warning: N event(s) dropped` line.
 - `active-profile` queries the active profile from the keyboard.
 
 ### Profile commands

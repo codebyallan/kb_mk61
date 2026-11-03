@@ -84,6 +84,8 @@ typedef struct kbdd_ctx {
 #define KBDD_CONFIG_POSITIONS 3u
 #define KBDD_CONFIG_ANIMATION 4u
 
+const char *kbdd_dev_err(int rc);
+
 /* config */
 void kbdd_config_defaults(kbdd_ctx_t *k);
 int kbdd_load_config(kbdd_ctx_t *k);
@@ -136,6 +138,7 @@ typedef struct {
 int kbdd_dev_set_colors(const kbdd_dev_io_t *io, const kbdd_color_edit_t *ce, uint8_t *profile_out);
 /* Human-readable detail of the last failed check in kbdd_dev_set_field (empty if none). */
 const char *kbdd_dev_last_diag(void);
+void kbdd_dev_clear_diag(void);
 int kbdd_dev_set_field(const kbdd_dev_io_t *io, int field, uint8_t value, uint8_t *profile_out);
 int kbdd_dev_restore_profile(const kbdd_dev_io_t *io, uint8_t profile,
                              const uint8_t block[264]);
@@ -166,7 +169,10 @@ typedef struct {
     uint16_t opcode;
     uint16_t request_id;
     uint8_t *payload;
+    int client_fd;                  /* internal: source client (or -1) */
 } kbdd_ipc_message_t;
+
+#define KBDD_HANDLER_DEFER (-2)
 
 typedef int (*kbdd_ipc_handler_t)(const kbdd_ipc_message_t *req,
                                   kbdd_ipc_message_t *resp, void *ctx);
@@ -177,9 +183,15 @@ int kbdd_ipc_server_fd(const kbdd_ipc_server_t *s);
 int kbdd_ipc_server_accept(kbdd_ipc_server_t *s);
 int kbdd_ipc_server_poll(kbdd_ipc_server_t *s, int timeout_ms,
                          kbdd_ipc_handler_t handler, void *ctx);
+int kbdd_ipc_server_send(kbdd_ipc_server_t *s, int fd, uint16_t opcode,
+                         uint16_t request_id, const uint8_t *payload,
+                         uint32_t payload_len);
+void kbdd_ipc_server_set_close_cb(void (*cb)(int fd, void *ctx), void *ctx);
 int kbdd_ipc_server_publish(kbdd_ipc_server_t *s, const char *event);
 
 /* daemon handlers (exposed for testing) */
+int kbdd_ipc_handle(const kbdd_ipc_message_t *req, kbdd_ipc_message_t *resp,
+                    void *ctx);
 int kbdd_handle_led(kbdd_ctx_t *k, const kbdd_ipc_message_t *req,
                     kbdd_ipc_message_t *resp);
 int kbdd_handle_effect(kbdd_ctx_t *k, const kbdd_ipc_message_t *req,
@@ -190,11 +202,31 @@ int kbdd_handle_anim(kbdd_ctx_t *k, const kbdd_ipc_message_t *req,
                      kbdd_ipc_message_t *resp);
 int kbdd_handle_colors(kbdd_ctx_t *k, const kbdd_ipc_message_t *req,
                        kbdd_ipc_message_t *resp);
-int kbdd_handle_save(kbdd_ctx_t *k, kbdd_ipc_message_t *resp);
+int kbdd_handle_save(kbdd_ctx_t *k, const kbdd_ipc_message_t *req,
+                     kbdd_ipc_message_t *resp);
 int kbdd_handle_field(kbdd_ctx_t *k, const kbdd_ipc_message_t *req,
                       kbdd_ipc_message_t *resp);
 
 /* daemon */
 int kbdd_run(int argc, char **argv);
+void kbdd_op_poll(kbdd_ctx_t *k);
+void kbdd_op_client_closed(kbdd_ctx_t *k, int fd);
+int kbdd_op_queue_read_active(const kbdd_ipc_message_t *req, const kbdd_hid_device_t *dev);
+int kbdd_op_queue_read_block(const kbdd_ipc_message_t *req, const kbdd_hid_device_t *dev);
+int kbdd_op_queue_switch(const kbdd_ipc_message_t *req, const kbdd_hid_device_t *dev);
+int kbdd_op_queue_effect(const kbdd_ipc_message_t *req, const kbdd_hid_device_t *dev);
+int kbdd_op_queue_field(const kbdd_ipc_message_t *req, const kbdd_hid_device_t *dev,
+                        size_t stride, uint8_t flags, const uint8_t *frame);
+int kbdd_op_queue_colors(const kbdd_ipc_message_t *req, const kbdd_hid_device_t *dev);
+int kbdd_op_queue_save(const kbdd_ipc_message_t *req, const kbdd_hid_device_t *dev, uint8_t flags);
+int kbdd_op_queue_restore(const kbdd_ipc_message_t *req, const kbdd_hid_device_t *dev);
+int kbdd_op_queue_enable_notif(const kbdd_ipc_message_t *req, const kbdd_hid_device_t *dev);
+int kbdd_op_queue_frame_from_base(const kbdd_ipc_message_t *req, const kbdd_hid_device_t *dev,
+                                  const uint8_t *frame, size_t stride, size_t count, uint8_t flags);
+void kbdd_op_cancel_led(void);
+int kbdd_op_pending(void);
+int kbdd_op_has_room(void);
+void kbdd_op_shutdown(void);
+extern int kbdd_ipc_sync_mode;
 
 #endif /* KBDD_H */

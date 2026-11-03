@@ -197,7 +197,7 @@ $(BIN_DIR)/test-device: $(DEVTEST_OBJS) $(LIB_STATIC)
 HANDLERTEST_OBJS := $(OBJ_DIR)/tests/test_handlers.o $(OBJ_DIR)/daemon/daemon.o \
                     $(OBJ_DIR)/daemon/config.o $(OBJ_DIR)/daemon/device.o \
                     $(OBJ_DIR)/daemon/hidraw.o $(OBJ_DIR)/daemon/ipc.o \
-                    $(OBJ_DIR)/daemon/uinput.o
+                    $(OBJ_DIR)/daemon/uinput.o $(OBJ_DIR)/daemon/op.o
 
 $(BIN_DIR)/test-handlers: $(HANDLERTEST_OBJS) $(LIB_STATIC)
 	@mkdir -p $(BIN_DIR)
@@ -263,7 +263,8 @@ ASAN_DEVTEST_OBJS := $(ASAN_DIR)/obj/tests/device/test_device.o \
 
 ASAN_DAEMON_OBJS := $(ASAN_DIR)/obj/daemon/daemon.o $(ASAN_DIR)/obj/daemon/config.o \
                     $(ASAN_DIR)/obj/daemon/device.o $(ASAN_DIR)/obj/daemon/hidraw.o \
-                    $(ASAN_DIR)/obj/daemon/ipc.o $(ASAN_DIR)/obj/daemon/uinput.o
+                    $(ASAN_DIR)/obj/daemon/ipc.o $(ASAN_DIR)/obj/daemon/uinput.o \
+                    $(ASAN_DIR)/obj/daemon/op.o
 
 $(ASAN_DIR)/test-device: $(ASAN_DEVTEST_OBJS) $(ASAN_CORE_OBJS)
 	@mkdir -p $(dir $@)

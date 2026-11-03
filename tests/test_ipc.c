@@ -399,6 +399,69 @@ static void test_non_watch_does_not_receive_event(void)
     test_teardown(&ts);
 }
 
+typedef struct defer_ctx {
+    int calls;
+    int fd;
+    uint16_t opcode;
+    uint16_t request_id;
+} defer_ctx_t;
+
+static int defer_first_handler(const kbdd_ipc_message_t *req,
+                               kbdd_ipc_message_t *resp, void *ctx)
+{
+    defer_ctx_t *d = (defer_ctx_t *)ctx;
+    if (d != NULL) {
+        d->calls++;
+        if (d->calls == 1) {
+            d->fd = req->client_fd;
+            d->opcode = req->opcode;
+            d->request_id = req->request_id;
+            return KBDD_HANDLER_DEFER;
+        }
+    }
+    return test_handler(req, resp, NULL);
+}
+
+static void test_deferred_reply(void)
+{
+    test_srv_t ts;
+    defer_ctx_t d;
+    test_setup(&ts);
+
+    memset(&d, 0, sizeof(d));
+    d.fd = -1;
+
+    uint8_t frame[2 * (KBDD_IPC_HEADER_SIZE + 4)];
+    size_t len1, len2;
+    build_message(frame, &len1, KBDD_IPC_OP_PING, (const uint8_t *)"slow", 4, 0x0001, 0);
+    build_message(frame + len1, &len2, KBDD_IPC_OP_PING, (const uint8_t *)"fast", 4, 0x0002, 0);
+    CHECK(write(ts.client, frame, len1 + len2) == (ssize_t)(len1 + len2));
+    CHECK(kbdd_ipc_server_poll(ts.server, 50, defer_first_handler, &d) == 0);
+    CHECK(d.calls == 2);
+    CHECK(d.fd >= 0);
+    CHECK(d.opcode == KBDD_IPC_OP_PING);
+    CHECK(d.request_id == 0x0001);
+
+    /* The second (non-deferred) request is answered immediately. */
+    test_reply_t fast;
+    CHECK(read_reply(ts.client, &fast) == 0);
+    CHECK(fast.request_id == 0x0002);
+    CHECK(fast.payload_len == 4 && memcmp(fast.payload, "fast", 4) == 0);
+    free_reply(&fast);
+
+    /* The deferred request is answered from outside the poll loop. */
+    CHECK(kbdd_ipc_server_send(ts.server, d.fd, d.opcode, d.request_id,
+                               (const uint8_t *)"slow-reply", 11) == 0);
+    test_reply_t slow;
+    CHECK(read_reply(ts.client, &slow) == 0);
+    CHECK(slow.request_id == 0x0001);
+    CHECK(slow.opcode == KBDD_IPC_OP_PING);
+    CHECK(slow.payload_len == 11 && memcmp(slow.payload, "slow-reply", 11) == 0);
+    free_reply(&slow);
+
+    test_teardown(&ts);
+}
+
 int main(void)
 {
     test_valid_ping();
@@ -409,6 +472,7 @@ int main(void)
     check_oversized_payload_len();
     test_watch_receives_event();
     test_non_watch_does_not_receive_event();
+    test_deferred_reply();
 
     if (failures != 0) {
         fprintf(stderr, "%d test(s) failed\n", failures);

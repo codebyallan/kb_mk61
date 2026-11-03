@@ -33,6 +33,15 @@ struct kbdd_ipc_server {
     size_t client_count;
 };
 
+static void (*kbdd_ipc_close_cb)(int fd, void *ctx);
+static void *kbdd_ipc_close_cb_ctx;
+
+void kbdd_ipc_server_set_close_cb(void (*cb)(int fd, void *ctx), void *ctx)
+{
+    kbdd_ipc_close_cb = cb;
+    kbdd_ipc_close_cb_ctx = ctx;
+}
+
 static void kbdd_ipc_client_reset(struct kbdd_ipc_client *c)
 {
     if (c == NULL) {
@@ -53,7 +62,11 @@ static void kbdd_ipc_client_close(struct kbdd_ipc_server *s, size_t idx)
     }
     struct kbdd_ipc_client *c = &s->clients[idx];
     if (c->fd >= 0) {
+        int old_fd = c->fd;
         close(c->fd);
+        if (kbdd_ipc_close_cb) {
+            kbdd_ipc_close_cb(old_fd, kbdd_ipc_close_cb_ctx);
+        }
     }
     kbdd_ipc_client_reset(c);
     memset(c, 0, sizeof(*c));
@@ -215,10 +228,21 @@ static int kbdd_ipc_ensure_cap(struct kbdd_ipc_client *c, size_t need)
     return 0;
 }
 
+static size_t kbdd_ipc_client_find(const kbdd_ipc_server_t *s, int fd)
+{
+    for (size_t i = 0; i < s->client_count; i++) {
+        if (s->clients[i].fd == fd) {
+            return i;
+        }
+    }
+    return SIZE_MAX;
+}
+
 static int kbdd_ipc_handle_client(struct kbdd_ipc_server *s, size_t idx,
                                   kbdd_ipc_handler_t handler, void *ctx)
 {
     struct kbdd_ipc_client *c = &s->clients[idx];
+    const int client_fd = c->fd;
     /* read available data */
     for (;;) {
         if (kbdd_ipc_ensure_cap(c, c->rx_len + 4096) != 0) {
@@ -242,24 +266,32 @@ static int kbdd_ipc_handle_client(struct kbdd_ipc_server *s, size_t idx,
 
     /* process complete messages */
     for (;;) {
+        /* A handler may close this client (which compacts the array), so
+         * re-resolve it by descriptor before touching any client state. */
+        size_t cidx = kbdd_ipc_client_find(s, client_fd);
+        if (cidx == SIZE_MAX) {
+            return 0;
+        }
+        c = &s->clients[cidx];
+
         if (!c->has_header) {
             if (c->rx_len < KBDD_IPC_HEADER_SIZE) {
                 break;
             }
             uint32_t magic = rd32(c->rx);
             if (magic != KBDD_IPC_MAGIC) {
-                kbdd_ipc_client_close(s, idx);
+                kbdd_ipc_client_close(s, cidx);
                 return -1;
             }
             uint16_t version = rd16(c->rx + 4);
             if (version != KBDD_IPC_VERSION) {
-                kbdd_ipc_client_close(s, idx);
+                kbdd_ipc_client_close(s, cidx);
                 return -1;
             }
             /* flags at +6 ignored */
             uint32_t plen = rd32(c->rx + 8);
             if (plen > KBDD_IPC_MAX_PAYLOAD) {
-                kbdd_ipc_client_close(s, idx);
+                kbdd_ipc_client_close(s, cidx);
                 return -1;
             }
             c->expected_payload = plen;
@@ -274,6 +306,7 @@ static int kbdd_ipc_handle_client(struct kbdd_ipc_server *s, size_t idx,
         /* build request */
         kbdd_ipc_message_t req;
         memset(&req, 0, sizeof(req));
+        req.client_fd = client_fd;
         req.magic = KBDD_IPC_MAGIC;
         req.version = KBDD_IPC_VERSION;
         req.flags = rd16(c->rx + 6);
@@ -283,7 +316,7 @@ static int kbdd_ipc_handle_client(struct kbdd_ipc_server *s, size_t idx,
         if (req.payload_len > 0) {
             req.payload = malloc(req.payload_len);
             if (req.payload == NULL) {
-                kbdd_ipc_client_close(s, idx);
+                kbdd_ipc_client_close(s, cidx);
                 return -1;
             }
             memcpy(req.payload, c->rx + KBDD_IPC_HEADER_SIZE, req.payload_len);
@@ -305,17 +338,41 @@ static int kbdd_ipc_handle_client(struct kbdd_ipc_server *s, size_t idx,
             c->rl_count = 0;
         }
         if (c->rl_count >= 256) {
-            kbdd_ipc_client_close(s, idx);
+            kbdd_ipc_client_close(s, cidx);
             free(req.payload);
             return -1;
         }
         c->rl_count++;
+
+        /* Consume the request before invoking the handler: deferred replies
+         * are keyed by descriptor, and the handler is free to close the
+         * client, which would invalidate this receive buffer. */
+        if (c->rx_len > total) {
+            memmove(c->rx, c->rx + total, c->rx_len - total);
+        }
+        c->rx_len -= total;
+        c->has_header = 0;
+        c->expected_payload = 0;
 
         int rc = -1;
         if (handler != NULL) {
             rc = handler(&req, &resp, ctx);
         }
         free(req.payload);
+
+        if (rc == KBDD_HANDLER_DEFER) {
+            free(resp.payload);
+            continue;
+        }
+
+        /* The handler may have closed or replaced the client: find the
+         * destination again before writing the reply. */
+        cidx = kbdd_ipc_client_find(s, client_fd);
+        if (cidx == SIZE_MAX) {
+            free(resp.payload);
+            return 0;
+        }
+        c = &s->clients[cidx];
 
         /* send response */
         /* build header */
@@ -345,10 +402,7 @@ static int kbdd_ipc_handle_client(struct kbdd_ipc_server *s, size_t idx,
         while (to_send > 0) {
             ssize_t w = send(c->fd, p, to_send, MSG_NOSIGNAL);
             if (w <= 0) {
-                if (w < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) {
-                    /* best effort; close if cannot send fully */
-                }
-                kbdd_ipc_client_close(s, idx);
+                kbdd_ipc_client_close(s, cidx);
                 free(resp.payload);
                 return -1;
             }
@@ -361,7 +415,7 @@ static int kbdd_ipc_handle_client(struct kbdd_ipc_server *s, size_t idx,
             while (rem > 0) {
                 ssize_t w = send(c->fd, pp, rem, MSG_NOSIGNAL);
                 if (w <= 0) {
-                    kbdd_ipc_client_close(s, idx);
+                    kbdd_ipc_client_close(s, cidx);
                     free(resp.payload);
                     return -1;
                 }
@@ -370,19 +424,6 @@ static int kbdd_ipc_handle_client(struct kbdd_ipc_server *s, size_t idx,
             }
         }
         free(resp.payload);
-
-        /* consume processed bytes */
-        size_t consumed = total;
-        if (c->rx_len > consumed) {
-            memmove(c->rx, c->rx + consumed, c->rx_len - consumed);
-        }
-        c->rx_len -= consumed;
-        c->has_header = 0;
-        c->expected_payload = 0;
-
-        if (rc != 0) {
-            /* error already signaled by closing? keep connection */
-        }
     }
 
     return 0;
@@ -435,6 +476,69 @@ int kbdd_ipc_server_publish(kbdd_ipc_server_t *s, const char *event)
             continue;
         }
         i++;
+    }
+    return 0;
+}
+
+int kbdd_ipc_server_send(kbdd_ipc_server_t *s, int fd, uint16_t opcode,
+                         uint16_t request_id, const uint8_t *payload,
+                         uint32_t payload_len)
+{
+    struct kbdd_ipc_client *c = NULL;
+    if (s == NULL || fd < 0 || (payload_len > 0 && payload == NULL)) {
+        return -1;
+    }
+    if (payload_len > KBDD_IPC_MAX_PAYLOAD) {
+        return -1;
+    }
+    for (size_t i = 0; i < s->client_count; i++) {
+        if (s->clients[i].fd == fd) {
+            c = &s->clients[i];
+            break;
+        }
+    }
+    if (c == NULL) {
+        return -1;
+    }
+
+    uint8_t header[KBDD_IPC_HEADER_SIZE];
+    uint32_t rmagic = KBDD_IPC_MAGIC;
+    header[0] = (uint8_t)(rmagic);
+    header[1] = (uint8_t)(rmagic >> 8);
+    header[2] = (uint8_t)(rmagic >> 16);
+    header[3] = (uint8_t)(rmagic >> 24);
+    header[4] = KBDD_IPC_VERSION; header[5] = 0;
+    header[6] = 0; header[7] = 0;
+    header[8] = (uint8_t)payload_len; header[9] = (uint8_t)(payload_len >> 8);
+    header[10] = (uint8_t)(payload_len >> 16); header[11] = (uint8_t)(payload_len >> 24);
+    header[12] = (uint8_t)opcode; header[13] = (uint8_t)(opcode >> 8);
+    header[14] = (uint8_t)request_id; header[15] = (uint8_t)(request_id >> 8);
+
+    size_t to_send = KBDD_IPC_HEADER_SIZE;
+    const uint8_t *p = header;
+    while (to_send > 0) {
+        ssize_t w = send(c->fd, p, to_send, MSG_NOSIGNAL);
+        if (w <= 0) {
+            size_t idx = (size_t)(c - s->clients);
+            kbdd_ipc_client_close(s, idx);
+            return -1;
+        }
+        p += w;
+        to_send -= (size_t)w;
+    }
+    if (payload_len > 0) {
+        size_t rem = payload_len;
+        const uint8_t *pp = payload;
+        while (rem > 0) {
+            ssize_t w = send(c->fd, pp, rem, MSG_NOSIGNAL);
+            if (w <= 0) {
+                size_t idx = (size_t)(c - s->clients);
+                kbdd_ipc_client_close(s, idx);
+                return -1;
+            }
+            pp += w;
+            rem -= (size_t)w;
+        }
     }
     return 0;
 }

@@ -126,6 +126,11 @@ const char *kbdd_dev_last_diag(void)
     return g_diag;
 }
 
+void kbdd_dev_clear_diag(void)
+{
+    g_diag[0] = '\0';
+}
+
 /* Appends "@off want 0x.. got 0x.." for the first differences (bytes 3..263). */
 static void diag_append_diffs(const uint8_t *want, const uint8_t *got)
 {

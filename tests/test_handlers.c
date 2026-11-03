@@ -2,6 +2,12 @@
 #include <stdlib.h>
 #include <string.h>
 #include <errno.h>
+#include <time.h>
+#include <poll.h>
+#include <unistd.h>
+#include <sys/socket.h>
+#include <sys/stat.h>
+#include <sys/un.h>
 
 #include "../src/daemon/kbdd.h"
 #include "kbipc.h"
@@ -263,7 +269,7 @@ static void test_no_device(void)
 
     /* save */
     setup_resp(&resp);
-    CHECK(kbdd_handle_save(&g_ctx, &resp) == 0);
+    CHECK(kbdd_handle_save(&g_ctx, &req, &resp) == 0);
     CHECK(resp.payload != NULL && strstr((char *)resp.payload, "no keyboard") != NULL);
 
     /* field */
@@ -396,8 +402,299 @@ static void test_colors_validation(void)
     free_resp(&resp);
 }
 
+static void test_async_frame_queue(void)
+{
+    struct mock m;
+    uint8_t frame[KBC_LED_BUFFER_SIZE];
+    int waited = 0;
+
+    mock_init(&m);
+    g_mock = &m;
+    setup_ctx(1, 0);
+    CHECK(kbc_led_frame_fill(frame, 70, 70, 1, 2, 3) == KBC_OK);
+    kbdd_op_queue_frame_from_base(NULL, &g_dev, frame, 70, 70, KBDD_LED_FLAG_HOLD);
+    CHECK(kbdd_op_pending());
+    while (kbdd_op_pending() && waited < 200) {
+        struct timespec ts = {0, 10 * 1000 * 1000};
+        nanosleep(&ts, NULL);
+        kbdd_op_poll(&g_ctx);
+        waited++;
+    }
+    CHECK(!kbdd_op_pending());
+    CHECK(g_ctx.led_active == 1);
+    CHECK(g_ctx.led_hold == 1);
+    CHECK(g_ctx.led_stride == 70);
+    kbdd_op_shutdown();
+}
+
+static void test_async_frame_cancel(void)
+{
+    struct mock m;
+    uint8_t frame[KBC_LED_BUFFER_SIZE];
+    int waited = 0;
+
+    mock_init(&m);
+    g_mock = &m;
+    setup_ctx(1, 0);
+    /* Pretend a stream is already running: a stale completion must not turn
+     * streaming back on after the release path clears these flags. */
+    g_ctx.led_active = 1;
+    g_ctx.led_hold = 1;
+    g_ctx.led_stride = 70;
+    CHECK(kbc_led_frame_fill(frame, 70, 70, 4, 5, 6) == KBC_OK);
+    CHECK(kbdd_op_queue_frame_from_base(NULL, &g_dev, frame, 70, 70,
+                                        KBDD_LED_FLAG_HOLD) == 0);
+    /* A release arriving while the frame is in flight must win. The child has
+     * been forked but its completion has not been processed yet. */
+    kbdd_op_cancel_led();
+    g_ctx.led_active = 0;
+    g_ctx.led_hold = 0;
+    while (kbdd_op_pending() && waited < 200) {
+        struct timespec ts = {0, 10 * 1000 * 1000};
+        nanosleep(&ts, NULL);
+        kbdd_op_poll(&g_ctx);
+        waited++;
+    }
+    CHECK(!kbdd_op_pending());
+    CHECK(g_ctx.led_active == 0);
+    CHECK(g_ctx.led_hold == 0);
+    kbdd_op_shutdown();
+}
+
+static void test_async_queue_full(void)
+{
+    struct mock m;
+    kbdd_ipc_message_t req;
+    uint8_t field[2] = {KBC_FIELD_BRIGHTNESS, 128};
+    uint8_t frame[KBC_LED_BUFFER_SIZE];
+    int queued = 0;
+
+    mock_init(&m);
+    g_mock = &m;
+    setup_ctx(1, 1);
+    CHECK(kbc_led_frame_fill(frame, 70, 70, 1, 2, 3) == KBC_OK);
+    make_msg(&req, KBDD_IPC_OP_SET_FIELD, field, sizeof(field));
+
+    while (kbdd_op_has_room() && queued < 64) {
+        CHECK(kbdd_op_queue_field(&req, &g_dev, 70, 0, frame) == 0);
+        queued++;
+    }
+    CHECK(queued > 0 && queued < 64); /* stopped by the queue cap, not the loop */
+    CHECK(!kbdd_op_has_room());
+    CHECK(kbdd_op_queue_field(&req, &g_dev, 70, 0, frame) == -1);
+    kbdd_op_shutdown();
+    CHECK(kbdd_op_has_room());
+    CHECK(!kbdd_op_pending());
+}
+
+static void test_async_shutdown_discards_queue(void)
+{
+    struct mock m;
+    kbdd_ipc_message_t req;
+    uint8_t field[2] = {KBC_FIELD_BRIGHTNESS, 128};
+    uint8_t frame[KBC_LED_BUFFER_SIZE];
+
+    mock_init(&m);
+    g_mock = &m;
+    setup_ctx(1, 1);
+    CHECK(kbc_led_frame_fill(frame, 70, 70, 3, 3, 3) == KBC_OK);
+    make_msg(&req, KBDD_IPC_OP_SET_FIELD, field, sizeof(field));
+
+    for (int i = 0; i < 4; i++) {
+        CHECK(kbdd_op_queue_field(&req, &g_dev, 70, 0, frame) == 0);
+    }
+    CHECK(kbdd_op_pending());
+    kbdd_op_shutdown();
+    CHECK(!kbdd_op_pending());
+    CHECK(kbdd_op_has_room());
+}
+
+/* ------------------------------------------------------------------ */
+/* End-to-end: async handler -> worker child -> deferred IPC reply     */
+/* ------------------------------------------------------------------ */
+
+typedef struct ipc_fixture {
+    char dir[108];
+    char path[108];
+    kbdd_ipc_server_t *server;
+    int client;
+} ipc_fixture_t;
+
+static void ipc_fixture_open(ipc_fixture_t *f)
+{
+    char tmpl[] = "/tmp/kbdd-handler-e2e-XXXXXX";
+    char *dir = mkdtemp(tmpl);
+    struct sockaddr_un addr;
+
+    memset(f, 0, sizeof(*f));
+    f->client = -1;
+    CHECK(dir != NULL);
+    if (dir == NULL) {
+        return;
+    }
+    size_t dlen = strlen(dir);
+    CHECK(dlen < sizeof(f->dir));
+    memcpy(f->dir, dir, dlen + 1);
+    CHECK(dlen + sizeof("/kbdd.sock") <= sizeof(f->path));
+    memcpy(f->path, f->dir, dlen);
+    memcpy(f->path + dlen, "/kbdd.sock", sizeof("/kbdd.sock"));
+    CHECK(setenv("XDG_RUNTIME_DIR", f->dir, 1) == 0);
+
+    f->server = kbdd_ipc_server_create();
+    CHECK(f->server != NULL);
+    if (f->server == NULL) {
+        return;
+    }
+    f->client = socket(AF_UNIX, SOCK_STREAM, 0);
+    CHECK(f->client >= 0);
+    if (f->client < 0) {
+        return;
+    }
+    memset(&addr, 0, sizeof(addr));
+    addr.sun_family = AF_UNIX;
+    memcpy(addr.sun_path, f->path, strlen(f->path) + 1);
+    CHECK(connect(f->client, (struct sockaddr *)&addr, sizeof(addr)) == 0);
+}
+
+static void ipc_fixture_close(ipc_fixture_t *f)
+{
+    if (f->client >= 0) {
+        close(f->client);
+    }
+    if (f->server != NULL) {
+        kbdd_ipc_server_destroy(f->server);
+    }
+    if (f->dir[0] != '\0') {
+        CHECK(rmdir(f->dir) == 0);
+    }
+    unsetenv("XDG_RUNTIME_DIR");
+}
+
+static uint16_t rd16le(const uint8_t *p)
+{
+    return (uint16_t)(p[0] | ((uint16_t)p[1] << 8));
+}
+
+static uint32_t rd32le(const uint8_t *p)
+{
+    return (uint32_t)p[0] | ((uint32_t)p[1] << 8) |
+           ((uint32_t)p[2] << 16) | ((uint32_t)p[3] << 24);
+}
+
+static ssize_t read_exact_fd(int fd, void *buf, size_t len)
+{
+    size_t got = 0;
+    while (got < len) {
+        ssize_t r = recv(fd, (uint8_t *)buf + got, len - got, 0);
+        if (r == 0) {
+            return (ssize_t)got;
+        }
+        if (r < 0) {
+            if (errno == EINTR) {
+                continue;
+            }
+            return -1;
+        }
+        got += (size_t)r;
+    }
+    return (ssize_t)got;
+}
+
+static void build_wire_request(uint8_t *buf, size_t *out_len, uint16_t opcode,
+                               const uint8_t *payload, uint32_t payload_len,
+                               uint16_t request_id)
+{
+    uint32_t magic = KBDD_IPC_MAGIC;
+
+    memset(buf, 0, KBDD_IPC_HEADER_SIZE);
+    buf[0] = (uint8_t)magic;
+    buf[1] = (uint8_t)(magic >> 8);
+    buf[2] = (uint8_t)(magic >> 16);
+    buf[3] = (uint8_t)(magic >> 24);
+    buf[4] = (uint8_t)KBDD_IPC_VERSION;
+    buf[5] = (uint8_t)(KBDD_IPC_VERSION >> 8);
+    buf[8] = (uint8_t)payload_len;
+    buf[9] = (uint8_t)(payload_len >> 8);
+    buf[10] = (uint8_t)(payload_len >> 16);
+    buf[11] = (uint8_t)(payload_len >> 24);
+    buf[12] = (uint8_t)opcode;
+    buf[13] = (uint8_t)(opcode >> 8);
+    buf[14] = (uint8_t)request_id;
+    buf[15] = (uint8_t)(request_id >> 8);
+    if (payload_len > 0 && payload != NULL) {
+        memcpy(buf + KBDD_IPC_HEADER_SIZE, payload, payload_len);
+    }
+    *out_len = KBDD_IPC_HEADER_SIZE + payload_len;
+}
+
+static void test_async_led_deferred_reply(void)
+{
+    struct mock m;
+    ipc_fixture_t f;
+    uint8_t payload[KBDD_LED_PAYLOAD_SIZE];
+    uint8_t frame[KBDD_IPC_HEADER_SIZE + KBDD_LED_PAYLOAD_SIZE];
+    uint8_t header[KBDD_IPC_HEADER_SIZE];
+    size_t frame_len = sizeof(frame);
+    int waited = 0;
+
+    mock_init(&m);
+    g_mock = &m;
+    setup_ctx(1, 0);
+    ipc_fixture_open(&f);
+    if (f.server == NULL || f.client < 0) {
+        ipc_fixture_close(&f);
+        return;
+    }
+    g_ctx.ipc = f.server;
+    kbdd_ipc_sync_mode = 0;
+
+    memset(payload, 0, sizeof(payload));
+    payload[0] = KBDD_LED_FLAG_HOLD;
+    payload[1] = 70;
+    payload[2] = KBDD_LED_MODE_SOLID;
+    payload[4] = 0xFF;
+    build_wire_request(frame, &frame_len, KBDD_IPC_OP_LED_SET, payload,
+                       sizeof(payload), 0x4242);
+    CHECK(send(f.client, frame, frame_len, 0) == (ssize_t)frame_len);
+
+    /* The handler must defer instead of blocking on the (mock) keyboard. The
+     * deferred reply is sent later by op_complete via kbdd_ipc_server_send. */
+    CHECK(kbdd_ipc_server_poll(f.server, 50, kbdd_ipc_handle, &g_ctx) == 0);
+    CHECK(kbdd_op_pending());
+
+    while (kbdd_op_pending() && waited < 500) {
+        struct timespec ts = {0, 10 * 1000 * 1000};
+        nanosleep(&ts, NULL);
+        kbdd_op_poll(&g_ctx);
+        waited++;
+    }
+    CHECK(!kbdd_op_pending());
+    CHECK(g_ctx.led_active == 1);
+    CHECK(g_ctx.led_hold == 1);
+
+    CHECK(read_exact_fd(f.client, header, sizeof(header)) ==
+          (ssize_t)sizeof(header));
+    CHECK(rd32le(header) == KBDD_IPC_MAGIC);
+    CHECK(rd16le(header + 12) == KBDD_IPC_OP_LED_SET);
+    CHECK(rd16le(header + 14) == 0x4242);
+    uint32_t plen = rd32le(header + 8);
+    CHECK(plen > 0 && plen <= 256);
+    if (plen > 0 && plen <= 256) {
+        char body[256];
+        CHECK(read_exact_fd(f.client, body, plen) == (ssize_t)plen);
+        body[plen < sizeof(body) ? plen : sizeof(body) - 1] = '\0';
+        CHECK(strstr(body, "ok: LED frame sent") != NULL);
+    }
+
+    kbdd_op_shutdown();
+    g_ctx.ipc = NULL;
+    ipc_fixture_close(&f);
+    kbdd_ipc_sync_mode = 1;
+}
+
 int main(void)
 {
+    kbdd_ipc_sync_mode = 1;
     test_env_gates();
     test_payload_validation();
     test_no_device();
@@ -405,6 +702,11 @@ int main(void)
     test_led_solid_success();
     test_anim_validation();
     test_colors_validation();
+    test_async_frame_queue();
+    test_async_frame_cancel();
+    test_async_queue_full();
+    test_async_shutdown_discards_queue();
+    test_async_led_deferred_reply();
 
     if (failures != 0) {
         fprintf(stderr, "%d test(s) failed\n", failures);

@@ -28,12 +28,11 @@ Status: experimental; device writes are disabled until validated on hardware.
 
 %post
 %systemd_user_post kbdd.service
-systemctl --global enable kbdd.service >/dev/null 2>&1 || :
-loginctl list-users --no-legend 2>/dev/null | while read -r uid _; do
-    [ -n "$uid" ] || continue
-    systemctl --user --machine="${uid}@.host" daemon-reload >/dev/null 2>&1 || :
-    systemctl --user --machine="${uid}@.host" start kbdd.service >/dev/null 2>&1 || :
-done
+# Do not enable or start the user service for all logged-in users.
+# Installation must not activate input notifications without an explicit
+# per-user opt-in. A user who wants the daemon should run:
+#   systemctl --user enable --now kbdd.service
+systemctl --global disable kbdd.service >/dev/null 2>&1 || :
 
 %preun
 %systemd_user_preun kbdd.service

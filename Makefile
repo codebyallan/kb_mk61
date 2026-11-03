@@ -72,10 +72,21 @@ ASAN_IPC_OBJS := $(ASAN_DIR)/obj/daemon/ipc.o $(ASAN_DIR)/obj/tests/test_ipc.o
 ASAN_CONFIG_OBJS := $(ASAN_DIR)/obj/daemon/config.o $(ASAN_DIR)/obj/tests/test_config.o
 ASAN_CLI_PARSER_OBJS := $(ASAN_DIR)/obj/cli/parse.o $(ASAN_DIR)/obj/tests/test_cli_parse.o
 
-DEPFILES := $(OBJ_DIR)/tests/device/test_device.d $(OBJ_DIR)/tests/test_cli_parse.d $(ASAN_DIR)/obj/tests/device/test_device.d $(ASAN_DIR)/obj/tests/test_cli_parse.d $(CLI_PARSER_OBJS:.o=.d) $(CORE_OBJS:.o=.d) $(DAEMON_OBJS:.o=.d) $(CLI_OBJS:.o=.d) \
+# Fuzz harness: replayed as a regression suite by `make test` / `make asan`;
+# `make fuzz` builds the real libFuzzer binary (clang) and runs it.
+FUZZ_CORPUS    := tests/fuzz/corpus
+FUZZ_MUTATIONS ?= 20000
+FUZZ_CC        ?= clang
+FUZZ_TIME      ?= 60
+FUZZ_OBJS      := $(OBJ_DIR)/tests/fuzz/fuzz_main.o $(OBJ_DIR)/daemon/ipc.o \
+                  $(OBJ_DIR)/daemon/config.o $(CLI_PARSER_OBJS)
+ASAN_FUZZ_OBJS := $(ASAN_DIR)/obj/tests/fuzz/fuzz_main.o $(ASAN_DIR)/obj/daemon/ipc.o \
+                  $(ASAN_DIR)/obj/daemon/config.o $(ASAN_DIR)/obj/cli/parse.o
+
+DEPFILES := $(FUZZ_OBJS:.o=.d) $(ASAN_FUZZ_OBJS:.o=.d) $(OBJ_DIR)/tests/device/test_device.d $(OBJ_DIR)/tests/test_cli_parse.d $(ASAN_DIR)/obj/tests/device/test_device.d $(ASAN_DIR)/obj/tests/test_cli_parse.d $(CLI_PARSER_OBJS:.o=.d) $(CORE_OBJS:.o=.d) $(DAEMON_OBJS:.o=.d) $(CLI_OBJS:.o=.d) \
             $(TEST_OBJS:.o=.d) $(ASAN_CORE_OBJS:.o=.d) $(ASAN_TEST_OBJS:.o=.d)
 
-.PHONY: all core daemon cli test asan asan-run install clean check-arch help
+.PHONY: all core daemon cli test test-e2e fuzz asan asan-run install clean check-arch help
 
 all: check-arch core daemon cli
 
@@ -86,7 +97,7 @@ daemon: check-arch $(BIN_DIR)/kbdd
 
 cli: check-arch $(BIN_DIR)/kbctl
 
-test: check-arch $(BIN_DIR)/test-core $(BIN_DIR)/test-device $(BIN_DIR)/test-handlers $(BIN_DIR)/test-cli $(BIN_DIR)/test-config $(BIN_DIR)/test-ipc
+test: check-arch $(BIN_DIR)/kbdd $(BIN_DIR)/kbctl $(BIN_DIR)/fuzz-replay $(BIN_DIR)/test-core $(BIN_DIR)/test-device $(BIN_DIR)/test-handlers $(BIN_DIR)/test-cli $(BIN_DIR)/test-config $(BIN_DIR)/test-ipc
 	@echo "==> running unit tests"
 	@$(BIN_DIR)/test-core
 	@$(BIN_DIR)/test-device
@@ -94,6 +105,25 @@ test: check-arch $(BIN_DIR)/test-core $(BIN_DIR)/test-device $(BIN_DIR)/test-han
 	@$(BIN_DIR)/test-cli
 	@$(BIN_DIR)/test-config
 	@$(BIN_DIR)/test-ipc
+	@$(BIN_DIR)/fuzz-replay -m $(FUZZ_MUTATIONS) $(FUZZ_CORPUS)
+	@$(MAKE) --no-print-directory test-e2e
+
+# End-to-end: real kbdd + kbctl over the socket, no keyboard attached.
+test-e2e: check-arch $(BIN_DIR)/kbdd $(BIN_DIR)/kbctl
+	@echo "==> running e2e tests"
+	@sh tests/integration/test_e2e.sh $(BIN_DIR)
+
+# Coverage-guided fuzzing (libFuzzer needs clang): make fuzz FUZZ_TIME=300
+fuzz: check-arch
+	@mkdir -p $(BUILD_DIR)/fuzz/work
+	$(FUZZ_CC) $(CSTD) -O1 $(DEBUG) -fno-omit-frame-pointer \
+		-fsanitize=fuzzer,address,undefined -fno-sanitize-recover=undefined \
+		-DFUZZ_LIBFUZZER $(CPPFLAGS) -o $(BUILD_DIR)/fuzz/fuzz \
+		tests/fuzz/fuzz_main.c src/daemon/ipc.c src/daemon/config.c \
+		src/cli/parse.c $(CORE_SRCS)
+	@cp -n $(FUZZ_CORPUS)/* $(BUILD_DIR)/fuzz/work/ 2>/dev/null || true
+	$(BUILD_DIR)/fuzz/fuzz -max_total_time=$(FUZZ_TIME) -timeout=10 \
+		-artifact_prefix=$(BUILD_DIR)/fuzz/ $(BUILD_DIR)/fuzz/work
 
 asan: check-arch
 	@mkdir -p $(BUILD_DIR)
@@ -108,7 +138,7 @@ asan: check-arch
 		$(MAKE) --no-print-directory test; \
 	fi
 
-asan-run: check-arch $(ASAN_DIR)/test-core $(ASAN_DIR)/test-device $(ASAN_DIR)/test-handlers $(ASAN_DIR)/test-cli $(ASAN_DIR)/test-config $(ASAN_DIR)/test-ipc
+asan-run: check-arch $(ASAN_DIR)/fuzz-replay $(ASAN_DIR)/test-core $(ASAN_DIR)/test-device $(ASAN_DIR)/test-handlers $(ASAN_DIR)/test-cli $(ASAN_DIR)/test-config $(ASAN_DIR)/test-ipc
 	@echo "==> running ASan/UBSan tests"
 	@ASAN_OPTIONS=detect_leaks=1:abort_on_error=1 \
 	 UBSAN_OPTIONS=halt_on_error=1:print_stacktrace=1 \
@@ -128,6 +158,9 @@ asan-run: check-arch $(ASAN_DIR)/test-core $(ASAN_DIR)/test-device $(ASAN_DIR)/t
 	@ASAN_OPTIONS=detect_leaks=1:abort_on_error=1 \
 	 UBSAN_OPTIONS=halt_on_error=1:print_stacktrace=1 \
 	 $(ASAN_DIR)/test-ipc
+	@ASAN_OPTIONS=detect_leaks=1:abort_on_error=1 \
+	 UBSAN_OPTIONS=halt_on_error=1:print_stacktrace=1 \
+	 $(ASAN_DIR)/fuzz-replay -m $(FUZZ_MUTATIONS) $(FUZZ_CORPUS)
 
 install: all
 	$(INSTALL) -d $(DESTDIR)$(BINDIR) $(DESTDIR)$(LIBDIR) \
@@ -228,6 +261,16 @@ $(BIN_DIR)/test-config: $(OBJ_DIR)/tests/test_config.o $(CONFIG_OBJS) $(LIB_STAT
 	@mkdir -p $(BIN_DIR)
 	@echo "==> link $@"
 	$(CC) $(LDFLAGS) $(EXE_LDFLAGS) -o $@ $(OBJ_DIR)/tests/test_config.o $(CONFIG_OBJS) $(LIB_STATIC) $(LDLIBS)
+
+$(BIN_DIR)/fuzz-replay: $(FUZZ_OBJS) $(LIB_STATIC)
+	@mkdir -p $(BIN_DIR)
+	@echo "==> link $@"
+	$(CC) $(LDFLAGS) $(EXE_LDFLAGS) -o $@ $(FUZZ_OBJS) $(LIB_STATIC) $(LDLIBS)
+
+$(ASAN_DIR)/fuzz-replay: $(ASAN_FUZZ_OBJS) $(ASAN_CORE_OBJS)
+	@mkdir -p $(dir $@)
+	@echo "==> link $@"
+	$(CC) $(ASAN_LDFLAGS) -o $@ $(ASAN_FUZZ_OBJS) $(ASAN_CORE_OBJS) $(LDLIBS)
 
 $(BIN_DIR)/test-core: $(TEST_OBJS) $(LIB_STATIC)
 	@mkdir -p $(BIN_DIR)

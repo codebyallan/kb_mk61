@@ -20,11 +20,23 @@ static ssize_t hr_get(void *ctx, uint8_t *buf, size_t len)
 
 static void hr_sleep(void *ctx, unsigned ms)
 {
-    struct timespec ts;
-    (void)ctx;
-    ts.tv_sec = (time_t)(ms / 1000u);
-    ts.tv_nsec = (long)(ms % 1000u) * 1000000L;
-    nanosleep(&ts, NULL);
+    kbdd_hid_device_t *dev = (kbdd_hid_device_t *)ctx;
+    unsigned slept = 0;
+    const unsigned chunk_ms = 10u;
+
+    while (slept < ms) {
+        unsigned this_chunk = (ms - slept) < chunk_ms ? (ms - slept) : chunk_ms;
+        struct timespec ts;
+        ts.tv_sec = (time_t)(this_chunk / 1000u);
+        ts.tv_nsec = (long)(this_chunk % 1000u) * 1000000L;
+        nanosleep(&ts, NULL);
+        slept += this_chunk;
+        /* Yield to the daemon while blocked, so input reports (keyboard
+         * notifications) keep being processed during long HID writes. */
+        if (dev != NULL && dev->yield != NULL && dev->kctx != NULL) {
+            dev->yield(dev->kctx);
+        }
+    }
 }
 
 void kbdd_dev_io_init_hidraw(kbdd_dev_io_t *io, const kbdd_hid_device_t *dev)

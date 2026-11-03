@@ -37,6 +37,8 @@ typedef struct kbdd_hid_device {
     uint16_t usage;
     int role; /* 0 = control (feature reports), 1 = input (notifications) */
     const kbdd_model_t *model;
+    void *kctx;                       /* daemon context, for yielding during I/O */
+    void (*yield)(void *kctx);        /* process input reports while blocked */
 } kbdd_hid_device_t;
 
 /* hidraw module */

@@ -164,6 +164,7 @@ static int kbdd_save_config(const kbdd_ctx_t *k);
 static int kbdd_load_config(kbdd_ctx_t *k);
 static int kbdd_restore_config(kbdd_ctx_t *k);
 static long long kbdd_now_ms(void);
+static void kbdd_yield_input_reports(void *kctx_ptr);
 
 static void kbdd_enable_device_notifications(kbdd_hid_device_t *devices, size_t count)
 {
@@ -221,6 +222,10 @@ static int kbdd_refresh_devices(kbdd_ctx_t *k)
     kbdd_hidraw_free(k->devices, k->count);
     k->devices = found;
     k->count = found_count;
+    for (size_t i = 0; i < found_count; i++) {
+        found[i].kctx = k;
+        found[i].yield = kbdd_yield_input_reports;
+    }
     k->led_hold = 0;
     k->led_active = 0;
     k->led_fail = 0;
@@ -261,6 +266,28 @@ static void kbdd_publish_input_event(kbdd_ctx_t *k, const uint8_t *buf, size_t l
                  (unsigned)event.system_subtype, (unsigned)event.value);
     }
     (void)kbdd_ipc_server_publish(k->ipc, text);
+}
+
+static void kbdd_yield_input_reports(void *kctx_ptr)
+{
+    kbdd_ctx_t *k = (kbdd_ctx_t *)kctx_ptr;
+    if (k == NULL) {
+        return;
+    }
+    for (size_t i = 0; i < k->count; i++) {
+        if (k->devices[i].role != 1 || k->devices[i].fd < 0) {
+            continue;
+        }
+        uint8_t buf[256];
+        ssize_t r = kbdd_hidraw_read(&k->devices[i], buf, sizeof(buf));
+        if (r > 0) {
+            kbdd_publish_input_event(k, buf, (size_t)r);
+        } else if (r < 0 &&
+                   (errno == EBADF || errno == EIO ||
+                    errno == ENODEV || errno == ENXIO)) {
+            kbdd_hidraw_close(&k->devices[i]);
+        }
+    }
 }
 
 static long long kbdd_now_ms(void)
@@ -1334,6 +1361,10 @@ int kbdd_run(int argc, char **argv)
     kctx.led_brightness = KBC_BRIGHTNESS_RAW_MAX;
     kctx.devices = devices;
     kctx.count = device_count;
+    for (size_t i = 0; i < device_count; i++) {
+        devices[i].kctx = &kctx;
+        devices[i].yield = kbdd_yield_input_reports;
+    }
     kctx.ipc = ipc;
     kbdd_config_defaults(&kctx);
     if (kbdd_load_config(&kctx) != 0) {

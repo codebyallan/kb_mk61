@@ -341,6 +341,18 @@ static int kbdd_ipc_ensure_cap(struct kbdd_ipc_client *c, size_t need)
     return 0;
 }
 
+#define KBDD_IPC_RATE_LIMIT 256u   /* requests per second per client */
+
+/* Rolls the one-second window and reports whether the budget is spent. */
+static int kbdd_ipc_rl_blocked(struct kbdd_ipc_client *c, time_t now)
+{
+    if (c->rl_window_start != now) {
+        c->rl_window_start = now;
+        c->rl_count = 0;
+    }
+    return c->rl_count >= KBDD_IPC_RATE_LIMIT;
+}
+
 static size_t kbdd_ipc_client_find(const kbdd_ipc_server_t *s, int fd)
 {
     for (size_t i = 0; i < s->client_count; i++) {
@@ -429,6 +441,13 @@ static int kbdd_ipc_handle_client(struct kbdd_ipc_server *s, size_t idx,
             break;
         }
 
+        /* Per-client rate limit: past the budget, leave the request queued and
+         * retry in a later window instead of dropping the connection. */
+        if (kbdd_ipc_rl_blocked(c, time(NULL))) {
+            break;
+        }
+        c->rl_count++;
+
         /* build request */
         kbdd_ipc_message_t req;
         memset(&req, 0, sizeof(req));
@@ -456,19 +475,6 @@ static int kbdd_ipc_handle_client(struct kbdd_ipc_server *s, size_t idx,
         if (req.opcode == KBDD_IPC_OP_WATCH) {
             c->watching = 1;
         }
-
-        /* simple per-client rate limiting (requests per second) */
-        time_t now = time(NULL);
-        if (c->rl_window_start == 0 || c->rl_window_start != now) {
-            c->rl_window_start = now;
-            c->rl_count = 0;
-        }
-        if (c->rl_count >= 256) {
-            kbdd_ipc_client_close(s, cidx);
-            free(req.payload);
-            return -1;
-        }
-        c->rl_count++;
 
         /* Consume the request before invoking the handler: deferred replies
          * are keyed by descriptor, and the handler is free to close the
@@ -603,7 +609,9 @@ int kbdd_ipc_server_poll(kbdd_ipc_server_t *s, int timeout_ms,
 
         fds[nfds].fd = c->fd;
         /* Stop reading new requests while the client has a large unread backlog. */
-        fds[nfds].events = (short)((pending < KBDD_IPC_TX_HIGH ? POLLIN : 0) |
+        fds[nfds].events = (short)((pending < KBDD_IPC_TX_HIGH &&
+                                    !kbdd_ipc_rl_blocked(&s->clients[i], time(NULL))
+                                        ? POLLIN : 0) |
                                    (pending > 0 ? POLLOUT : 0));
         fds[nfds].revents = 0;
         nfds++;
@@ -641,9 +649,10 @@ int kbdd_ipc_server_poll(kbdd_ipc_server_t *s, int timeout_ms,
         if (i < s->client_count && s->clients[i].fd == fd) {
             int want_read = (rev & (POLLIN | POLLHUP | POLLERR)) != 0;
 
-            /* POLLOUT without POLLIN: the backlog drained, so requests held
-             * back by back-pressure can now be processed. */
-            if (want_read || (rev & POLLOUT) != 0) {
+            /* Also resumes requests held back by back-pressure or the rate
+             * limit once their window or backlog has cleared. */
+            if (want_read || (rev & POLLOUT) != 0 ||
+                s->clients[i].rx_len >= KBDD_IPC_HEADER_SIZE) {
                 (void)kbdd_ipc_handle_client(s, i, handler, ctx, want_read);
             }
         }

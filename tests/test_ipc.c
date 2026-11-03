@@ -6,6 +6,7 @@
 
 #include <fcntl.h>
 #include <poll.h>
+#include <time.h>
 #include <errno.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
@@ -653,6 +654,38 @@ static void test_slow_watcher_keeps_connection(void)
     test_teardown(&ts);
 }
 
+/* Exceeding the per-second request budget delays requests, never closes. */
+static void test_rate_limit_delays_not_closes(void)
+{
+    enum { N = 300 };
+    test_srv_t ts;
+    uint8_t req[N * KBDD_IPC_HEADER_SIZE], rbuf[N * KBDD_IPC_HEADER_SIZE];
+    size_t off = 0, len, rlen = 0, roff = 0;
+    int got = 0;
+    time_t t0 = time(NULL);
+
+    test_setup(&ts);
+    set_nonblock(ts.client);
+    for (int i = 0; i < N; i++) {
+        build_message(req + off, &len, KBDD_IPC_OP_PING, NULL, 0, (uint16_t)(i + 1), 0);
+        off += len;
+    }
+    CHECK(write(ts.client, req, off) == (ssize_t)off);
+    while (got < N && time(NULL) - t0 < 6) {
+        uint16_t op, rid; const uint8_t *p; uint32_t pn;
+        ssize_t r;
+        (void)poll_server(&ts);
+        r = recv(ts.client, rbuf + rlen, sizeof(rbuf) - rlen, MSG_DONTWAIT);
+        if (r > 0) rlen += (size_t)r;
+        while (next_frame(rbuf, rlen, &roff, &op, &rid, &p, &pn)) {
+            CHECK(rid == (uint16_t)(got + 1));
+            got++;
+        }
+    }
+    CHECK(got == N);
+    test_teardown(&ts);
+}
+
 int main(void)
 {
     test_valid_ping();
@@ -667,6 +700,7 @@ int main(void)
     test_pipelined_replies_not_lost();
     test_backpressure_resumes_processing();
     test_slow_watcher_keeps_connection();
+    test_rate_limit_delays_not_closes();
 
     if (failures != 0) {
         fprintf(stderr, "%d test(s) failed\n", failures);

@@ -8,6 +8,7 @@
 #include <sys/socket.h>
 #include <sys/stat.h>
 #include <sys/un.h>
+#include <sys/mman.h>
 
 #include "../src/daemon/kbdd.h"
 #include "kbipc.h"
@@ -24,7 +25,7 @@ static int failures;
     } while (0)
 
 /* ------------------------------------------------------------------ */
-/* Mock transport (reused from test_device.c)                          */
+/* Mock transport (shared across parent and worker child)              */
 /* ------------------------------------------------------------------ */
 
 struct mock {
@@ -47,6 +48,11 @@ static ssize_t m_set(void *ctx, const uint8_t *buf, size_t len)
         memcpy(m->sent[m->nsent], buf, len);
         m->nsent++;
     }
+    if (len == 264 && buf[0] == 0x07 && buf[1] == 0x02) {
+        memcpy(m->reply, buf, 264);
+    } else if (len >= 3 && buf[0] == 0x07 && buf[1] == 0x04) {
+        m->reply[2] = buf[2];
+    }
     return (ssize_t)len;
 }
 
@@ -58,6 +64,17 @@ static ssize_t m_get(void *ctx, uint8_t *buf, size_t len)
     if (m->reply_len == 0) m->reply_len = 264;
     size_t n = m->reply_len < len ? m->reply_len : len;
     memcpy(buf, m->reply, n);
+    if (m->nsent > 0) {
+        uint8_t op = m->sent[m->nsent - 1][1];
+        if (op == KBC_OP_READ_ACTIVE_PROFILE) {
+            buf[0] = 0x07;
+            buf[1] = KBC_OP_READ_ACTIVE_PROFILE;
+            buf[2] = (m->reply[2] >= 1 && m->reply[2] <= 4) ? m->reply[2] : 1;
+        } else if (op == KBC_OP_READ_PROFILE_BLOCK) {
+            buf[0] = 0x07;
+            buf[1] = KBC_OP_READ_PROFILE_BLOCK;
+        }
+    }
     /* zero the rest */
     if (n < len) memset(buf + n, 0, len - n);
     return (ssize_t)n;
@@ -69,13 +86,33 @@ static void m_sleep(void *ctx, unsigned ms)
     if (m->nsleeps < 16) m->sleeps[m->nsleeps++] = ms;
 }
 
-static void mock_init(struct mock *m)
+static void mock_init(void)
 {
-    memset(m, 0, sizeof(*m));
-    m->reply[0] = 0x07;
-    m->reply[1] = 0x02;   /* default: profile params reply */
-    m->reply[2] = 1;      /* profile 1 */
-    m->reply_len = 264;
+    if (g_mock == NULL) {
+        g_mock = mmap(NULL, sizeof(struct mock),
+                      PROT_READ | PROT_WRITE,
+                      MAP_SHARED | MAP_ANONYMOUS, -1, 0);
+        if (g_mock == MAP_FAILED) {
+            perror("mmap");
+            exit(1);
+        }
+    }
+    memset(g_mock, 0, sizeof(*g_mock));
+    g_mock->reply[0] = 0x07;
+    g_mock->reply[1] = 0x02;   /* default: profile params reply */
+    g_mock->reply[2] = 1;      /* profile 1 */
+    g_mock->reply_len = 264;
+}
+
+static void wait_for_op(kbdd_ctx_t *ctx)
+{
+    int waited = 0;
+    while (kbdd_op_pending() && waited < 500) {
+        struct timespec ts = {0, 10 * 1000 * 1000};
+        nanosleep(&ts, NULL);
+        kbdd_op_poll(ctx);
+        waited++;
+    }
 }
 
 /* Override the weak init function to bind mock transport. */
@@ -290,8 +327,6 @@ static void test_no_device(void)
     free_resp(&resp);
 }
 
-static struct mock g_m;
-
 static void test_led_release(void)
 {
     kbdd_ipc_message_t req, resp;
@@ -299,8 +334,7 @@ static void test_led_release(void)
     uint8_t payload[KBDD_LED_PAYLOAD_SIZE];
 
     setup_ctx(1, 1);
-    g_mock = &g_m;
-    mock_init(g_mock);
+    mock_init();
 
     memset(payload, 0, sizeof(payload));
     payload[0] = 0; /* flags */
@@ -321,8 +355,7 @@ static void test_led_solid_success(void)
     uint8_t payload[KBDD_LED_PAYLOAD_SIZE];
 
     setup_ctx(1, 1);
-    g_mock = &g_m;
-    mock_init(g_mock);
+    mock_init();
 
     memset(payload, 0, sizeof(payload));
     payload[0] = KBDD_LED_FLAG_HOLD; /* flags: hold */
@@ -332,11 +365,15 @@ static void test_led_solid_success(void)
     payload[4] = 0xFF; payload[5] = 0x00; payload[6] = 0x00; /* red */
     make_msg(&req, KBDD_IPC_OP_LED_SET, payload, sizeof(payload));
     setup_resp(&resp);
-    CHECK(kbdd_handle_led(&g_ctx, &req, &resp) == 0);
-    CHECK(resp.payload != NULL && strstr((char *)resp.payload, "ok: LED frame sent") != NULL);
+    CHECK(kbdd_handle_led(&g_ctx, &req, &resp) == KBDD_HANDLER_DEFER);
+    CHECK(kbdd_op_pending());
+
+    wait_for_op(&g_ctx);
+    CHECK(!kbdd_op_pending());
     CHECK(g_ctx.led_active == 1);
     CHECK(g_ctx.led_hold == 1);
     CHECK(g_mock->nsent >= 1);
+    kbdd_op_shutdown();
     free_resp(&resp);
 }
 
@@ -404,22 +441,14 @@ static void test_colors_validation(void)
 
 static void test_async_frame_queue(void)
 {
-    struct mock m;
     uint8_t frame[KBC_LED_BUFFER_SIZE];
-    int waited = 0;
 
-    mock_init(&m);
-    g_mock = &m;
+    mock_init();
     setup_ctx(1, 0);
     CHECK(kbc_led_frame_fill(frame, 70, 70, 1, 2, 3) == KBC_OK);
     kbdd_op_queue_frame_from_base(NULL, &g_dev, frame, 70, 70, KBDD_LED_FLAG_HOLD);
     CHECK(kbdd_op_pending());
-    while (kbdd_op_pending() && waited < 200) {
-        struct timespec ts = {0, 10 * 1000 * 1000};
-        nanosleep(&ts, NULL);
-        kbdd_op_poll(&g_ctx);
-        waited++;
-    }
+    wait_for_op(&g_ctx);
     CHECK(!kbdd_op_pending());
     CHECK(g_ctx.led_active == 1);
     CHECK(g_ctx.led_hold == 1);
@@ -429,12 +458,9 @@ static void test_async_frame_queue(void)
 
 static void test_async_frame_cancel(void)
 {
-    struct mock m;
     uint8_t frame[KBC_LED_BUFFER_SIZE];
-    int waited = 0;
 
-    mock_init(&m);
-    g_mock = &m;
+    mock_init();
     setup_ctx(1, 0);
     /* Pretend a stream is already running: a stale completion must not turn
      * streaming back on after the release path clears these flags. */
@@ -449,12 +475,7 @@ static void test_async_frame_cancel(void)
     kbdd_op_cancel_led();
     g_ctx.led_active = 0;
     g_ctx.led_hold = 0;
-    while (kbdd_op_pending() && waited < 200) {
-        struct timespec ts = {0, 10 * 1000 * 1000};
-        nanosleep(&ts, NULL);
-        kbdd_op_poll(&g_ctx);
-        waited++;
-    }
+    wait_for_op(&g_ctx);
     CHECK(!kbdd_op_pending());
     CHECK(g_ctx.led_active == 0);
     CHECK(g_ctx.led_hold == 0);
@@ -463,14 +484,12 @@ static void test_async_frame_cancel(void)
 
 static void test_async_queue_full(void)
 {
-    struct mock m;
     kbdd_ipc_message_t req;
     uint8_t field[2] = {KBC_FIELD_BRIGHTNESS, 128};
     uint8_t frame[KBC_LED_BUFFER_SIZE];
     int queued = 0;
 
-    mock_init(&m);
-    g_mock = &m;
+    mock_init();
     setup_ctx(1, 1);
     CHECK(kbc_led_frame_fill(frame, 70, 70, 1, 2, 3) == KBC_OK);
     make_msg(&req, KBDD_IPC_OP_SET_FIELD, field, sizeof(field));
@@ -489,13 +508,11 @@ static void test_async_queue_full(void)
 
 static void test_async_shutdown_discards_queue(void)
 {
-    struct mock m;
     kbdd_ipc_message_t req;
     uint8_t field[2] = {KBC_FIELD_BRIGHTNESS, 128};
     uint8_t frame[KBC_LED_BUFFER_SIZE];
 
-    mock_init(&m);
-    g_mock = &m;
+    mock_init();
     setup_ctx(1, 1);
     CHECK(kbc_led_frame_fill(frame, 70, 70, 3, 3, 3) == KBC_OK);
     make_msg(&req, KBDD_IPC_OP_SET_FIELD, field, sizeof(field));
@@ -629,16 +646,13 @@ static void build_wire_request(uint8_t *buf, size_t *out_len, uint16_t opcode,
 
 static void test_async_led_deferred_reply(void)
 {
-    struct mock m;
     ipc_fixture_t f;
     uint8_t payload[KBDD_LED_PAYLOAD_SIZE];
     uint8_t frame[KBDD_IPC_HEADER_SIZE + KBDD_LED_PAYLOAD_SIZE];
     uint8_t header[KBDD_IPC_HEADER_SIZE];
     size_t frame_len = sizeof(frame);
-    int waited = 0;
 
-    mock_init(&m);
-    g_mock = &m;
+    mock_init();
     setup_ctx(1, 0);
     ipc_fixture_open(&f);
     if (f.server == NULL || f.client < 0) {
@@ -646,7 +660,6 @@ static void test_async_led_deferred_reply(void)
         return;
     }
     g_ctx.ipc = f.server;
-    kbdd_ipc_sync_mode = 0;
 
     memset(payload, 0, sizeof(payload));
     payload[0] = KBDD_LED_FLAG_HOLD;
@@ -662,12 +675,7 @@ static void test_async_led_deferred_reply(void)
     CHECK(kbdd_ipc_server_poll(f.server, 50, kbdd_ipc_handle, &g_ctx) == 0);
     CHECK(kbdd_op_pending());
 
-    while (kbdd_op_pending() && waited < 500) {
-        struct timespec ts = {0, 10 * 1000 * 1000};
-        nanosleep(&ts, NULL);
-        kbdd_op_poll(&g_ctx);
-        waited++;
-    }
+    wait_for_op(&g_ctx);
     CHECK(!kbdd_op_pending());
     CHECK(g_ctx.led_active == 1);
     CHECK(g_ctx.led_hold == 1);
@@ -689,7 +697,6 @@ static void test_async_led_deferred_reply(void)
     kbdd_op_shutdown();
     g_ctx.ipc = NULL;
     ipc_fixture_close(&f);
-    kbdd_ipc_sync_mode = 1;
 }
 
 /* LED-only deployments (ENABLE_LED=1, no PROFILE_WRITE) must not reach flash. */
@@ -703,8 +710,7 @@ static void test_led_only_has_no_flash_access(void)
     memset(blk, 0, sizeof(blk));
     blk[0] = 1;
     setup_ctx(1, 0);
-    g_mock = &g_m;
-    mock_init(g_mock);
+    mock_init();
 
     make_msg(&req, KBDD_IPC_OP_SAVE_BLOCK, NULL, 0);
     setup_resp(&resp);
@@ -729,79 +735,177 @@ static void test_led_only_has_no_flash_access(void)
 static void test_save_cooldown(void)
 {
     kbdd_ipc_message_t req, resp;
-    size_t sent_after_first;
 
     memset(&resp, 0, sizeof(resp));
     setup_ctx(0, 1);
-    g_mock = &g_m;
-    mock_init(g_mock);
+    mock_init();
     make_msg(&req, KBDD_IPC_OP_SAVE_BLOCK, NULL, 0);
 
-    /* first attempt reaches the device (whatever its outcome) and arms the cooldown */
+    /* first attempt queues async op to the device and arms the cooldown */
+    setup_resp(&resp);
+    CHECK(kbdd_handle_save(&g_ctx, &req, &resp) == KBDD_HANDLER_DEFER);
+    CHECK(g_ctx.save_next_ms != 0);
+
+    wait_for_op(&g_ctx);
+    CHECK(!kbdd_op_pending());
+    CHECK(g_mock->get_calls > 0);
+    size_t sent_after_first = g_mock->nsent;
+
+    /* an immediate retry is refused synchronously without touching the device */
+    int gets = g_mock->get_calls;
     setup_resp(&resp);
     CHECK(kbdd_handle_save(&g_ctx, &req, &resp) == 0);
-    CHECK(resp.payload != NULL && strstr((char *)resp.payload, "rate-limited") == NULL);
-    CHECK(g_mock->get_calls > 0);
-    CHECK(g_ctx.save_next_ms != 0);
-    sent_after_first = g_mock->nsent;
-
-    /* an immediate retry is refused without touching the device */
-    {
-        int gets = g_mock->get_calls;
-        setup_resp(&resp);
-        CHECK(kbdd_handle_save(&g_ctx, &req, &resp) == 0);
-        CHECK(resp.payload != NULL && strstr((char *)resp.payload, "rate-limited") != NULL);
-        CHECK(g_mock->nsent == sent_after_first);
-        CHECK(g_mock->get_calls == gets);
-    }
+    CHECK(resp.payload != NULL && strstr((char *)resp.payload, "rate-limited") != NULL);
+    CHECK(g_mock->nsent == sent_after_first);
+    CHECK(g_mock->get_calls == gets);
 
     /* once the window has passed, saving is allowed again */
     g_ctx.save_next_ms = 1;          /* monotonic clock is long past 1 ms */
     setup_resp(&resp);
-    CHECK(kbdd_handle_save(&g_ctx, &req, &resp) == 0);
-    CHECK(resp.payload != NULL && strstr((char *)resp.payload, "rate-limited") == NULL);
+    CHECK(kbdd_handle_save(&g_ctx, &req, &resp) == KBDD_HANDLER_DEFER);
     CHECK(g_ctx.save_next_ms > 1);
+
+    wait_for_op(&g_ctx);
+    CHECK(!kbdd_op_pending());
+    kbdd_op_shutdown();
     free_resp(&resp);
 }
 
-/* Async (production) path: the second save inside the window never reaches the queue. */
-static void test_save_cooldown_async(void)
+static void test_async_profile(void)
 {
     kbdd_ipc_message_t req, resp;
-    int waited = 0;
-
+    uint8_t prof = 2;
     memset(&resp, 0, sizeof(resp));
-    setup_ctx(0, 1);
-    g_mock = &g_m;
-    mock_init(g_mock);
-    make_msg(&req, KBDD_IPC_OP_SAVE_BLOCK, NULL, 0);
+    setup_ctx(1, 1);
+    mock_init();
 
-    kbdd_ipc_sync_mode = 0;
+    make_msg(&req, KBDD_IPC_OP_SET_PROFILE, &prof, 1);
     setup_resp(&resp);
-    CHECK(kbdd_handle_save(&g_ctx, &req, &resp) == KBDD_HANDLER_DEFER);
-    CHECK(g_ctx.save_next_ms != 0);
-    while (kbdd_op_pending() && waited < 400) {
-        struct timespec ts = {0, 10 * 1000 * 1000};
-        nanosleep(&ts, NULL);
-        kbdd_op_poll(&g_ctx);
-        waited++;
-    }
-    setup_resp(&resp);
-    CHECK(kbdd_handle_save(&g_ctx, &req, &resp) == 0);
-    CHECK(resp.payload != NULL && strstr((char *)resp.payload, "rate-limited") != NULL);
+    CHECK(kbdd_handle_profile(&g_ctx, &req, &resp) == KBDD_HANDLER_DEFER);
+    CHECK(kbdd_op_pending());
+
+    wait_for_op(&g_ctx);
     CHECK(!kbdd_op_pending());
+    CHECK(g_mock->nsent >= 1);
     kbdd_op_shutdown();
-    kbdd_ipc_sync_mode = 1;
     free_resp(&resp);
+}
+
+static void test_async_effect(void)
+{
+    kbdd_ipc_message_t req, resp;
+    uint8_t effect = 3;
+    memset(&resp, 0, sizeof(resp));
+    setup_ctx(1, 1);
+    mock_init();
+
+    make_msg(&req, KBDD_IPC_OP_SET_EFFECT, &effect, 1);
+    setup_resp(&resp);
+    CHECK(kbdd_handle_effect(&g_ctx, &req, &resp) == KBDD_HANDLER_DEFER);
+    CHECK(kbdd_op_pending());
+
+    wait_for_op(&g_ctx);
+    CHECK(!kbdd_op_pending());
+    CHECK(g_mock->nsent >= 1);
+    kbdd_op_shutdown();
+    free_resp(&resp);
+}
+
+static void test_async_field(void)
+{
+    kbdd_ipc_message_t req, resp;
+    uint8_t field[2] = {KBC_FIELD_BRIGHTNESS, 128};
+    memset(&resp, 0, sizeof(resp));
+    setup_ctx(1, 1);
+    mock_init();
+
+    make_msg(&req, KBDD_IPC_OP_SET_FIELD, field, 2);
+    setup_resp(&resp);
+    CHECK(kbdd_handle_field(&g_ctx, &req, &resp) == KBDD_HANDLER_DEFER);
+    CHECK(kbdd_op_pending());
+
+    wait_for_op(&g_ctx);
+    CHECK(!kbdd_op_pending());
+    CHECK(g_mock->nsent >= 1);
+    kbdd_op_shutdown();
+    free_resp(&resp);
+}
+
+static void test_async_restore_config(void)
+{
+    setup_ctx(1, 1);
+    mock_init();
+
+    g_ctx.config_mode = KBDD_CONFIG_SOLID;
+    g_ctx.config_solid[0] = 0xAA;
+    g_ctx.config_solid[1] = 0xBB;
+    g_ctx.config_solid[2] = 0xCC;
+    g_ctx.config_brightness = KBC_BRIGHTNESS_RAW_MAX;
+    g_ctx.restore_pending = 1;
+    g_ctx.restore_next_ms = 0;
+
+    kbdd_restore_tick(&g_ctx);
+    CHECK(kbdd_op_pending());
+
+    wait_for_op(&g_ctx);
+    CHECK(!kbdd_op_pending());
+    CHECK(g_ctx.restore_pending == 0);
+    CHECK(g_mock->nsent >= 1);
+    kbdd_op_shutdown();
+}
+
+static void test_async_read_active(void)
+{
+    ipc_fixture_t f;
+    uint8_t frame[KBDD_IPC_HEADER_SIZE];
+    uint8_t header[KBDD_IPC_HEADER_SIZE];
+    size_t frame_len = sizeof(frame);
+
+    mock_init();
+    g_mock->reply[0] = 0x07;
+    g_mock->reply[1] = KBC_OP_READ_ACTIVE_PROFILE;
+    g_mock->reply[2] = 2; /* profile 2 */
+
+    setup_ctx(1, 1);
+    ipc_fixture_open(&f);
+    if (f.server == NULL || f.client < 0) {
+        ipc_fixture_close(&f);
+        return;
+    }
+    g_ctx.ipc = f.server;
+
+    build_wire_request(frame, &frame_len, KBDD_IPC_OP_READ_ACTIVE, NULL, 0, 0x1111);
+    CHECK(send(f.client, frame, frame_len, 0) == (ssize_t)frame_len);
+
+    CHECK(kbdd_ipc_server_poll(f.server, 50, kbdd_ipc_handle, &g_ctx) == 0);
+    CHECK(kbdd_op_pending());
+
+    wait_for_op(&g_ctx);
+    CHECK(!kbdd_op_pending());
+
+    CHECK(read_exact_fd(f.client, header, sizeof(header)) == (ssize_t)sizeof(header));
+    CHECK(rd32le(header) == KBDD_IPC_MAGIC);
+    CHECK(rd16le(header + 12) == KBDD_IPC_OP_READ_ACTIVE);
+    CHECK(rd16le(header + 14) == 0x1111);
+    uint32_t plen = rd32le(header + 8);
+    CHECK(plen > 0 && plen <= 256);
+    if (plen > 0 && plen <= 256) {
+        char body[256];
+        CHECK(read_exact_fd(f.client, body, plen) == (ssize_t)plen);
+        body[plen < sizeof(body) ? plen : sizeof(body) - 1] = '\0';
+        CHECK(strstr(body, "active profile: 2") != NULL);
+    }
+
+    kbdd_op_shutdown();
+    g_ctx.ipc = NULL;
+    ipc_fixture_close(&f);
 }
 
 int main(void)
 {
-    kbdd_ipc_sync_mode = 1;
     test_env_gates();
     test_led_only_has_no_flash_access();
     test_save_cooldown();
-    test_save_cooldown_async();
     test_payload_validation();
     test_no_device();
     test_led_release();
@@ -813,6 +917,11 @@ int main(void)
     test_async_queue_full();
     test_async_shutdown_discards_queue();
     test_async_led_deferred_reply();
+    test_async_profile();
+    test_async_effect();
+    test_async_field();
+    test_async_restore_config();
+    test_async_read_active();
 
     if (failures != 0) {
         fprintf(stderr, "%d test(s) failed\n", failures);

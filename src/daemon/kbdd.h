@@ -222,7 +222,6 @@ int kbdd_handle_save(kbdd_ctx_t *k, const kbdd_ipc_message_t *req,
                      kbdd_ipc_message_t *resp);
 int kbdd_handle_field(kbdd_ctx_t *k, const kbdd_ipc_message_t *req,
                       kbdd_ipc_message_t *resp);
-int kbdd_restore_config(kbdd_ctx_t *k);
 void kbdd_restore_tick(kbdd_ctx_t *k);
 
 /* daemon */
@@ -246,6 +245,5 @@ void kbdd_op_cancel_led(void);
 int kbdd_op_pending(void);
 int kbdd_op_has_room(void);
 void kbdd_op_shutdown(void);
-extern int kbdd_ipc_sync_mode;
 
 #endif /* KBDD_H */

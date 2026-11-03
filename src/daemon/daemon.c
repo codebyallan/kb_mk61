@@ -58,20 +58,6 @@ static long long kbdd_now_ms(void);
 static const kbdd_hid_device_t *kbdd_control_dev(const kbdd_ctx_t *k);
 static void kbdd_yield_input_reports(void *kctx_ptr);
 
-static void kbdd_enable_device_notifications(kbdd_hid_device_t *devices, size_t count)
-{
-    size_t i;
-    for (i = 0; i < count; i++) {
-        kbdd_dev_io_t io;
-        if (devices[i].role != 0 || devices[i].fd < 0) continue;
-        kbdd_dev_io_init_hidraw(&io, &devices[i]);
-        if (kbdd_dev_enable_notifications(&io) != KBDD_DEV_OK) {
-            fprintf(stderr, "kbdd: could not enable keyboard notifications on %s\n",
-                    devices[i].path);
-        }
-    }
-}
-
 static int kbdd_same_devices(const kbdd_hid_device_t *a, size_t acount,
                              const kbdd_hid_device_t *b, size_t bcount)
 {
@@ -128,13 +114,9 @@ static int kbdd_refresh_devices(kbdd_ctx_t *k)
     k->led_fail = 0;
     /* A frame queued before the hotplug must not bring streaming back. */
     kbdd_op_cancel_led();
-    if (kbdd_ipc_sync_mode) {
-        kbdd_enable_device_notifications(found, found_count);
-    } else {
-        for (size_t i = 0; i < found_count; i++) {
-            if (found[i].role == 0 && found[i].fd >= 0) {
-                (void)kbdd_op_queue_enable_notif(NULL, &found[i]);
-            }
+    for (size_t i = 0; i < found_count; i++) {
+        if (found[i].role == 0 && found[i].fd >= 0) {
+            (void)kbdd_op_queue_enable_notif(NULL, &found[i]);
         }
     }
     fprintf(stderr, "kbdd: device set changed, now tracking %zu interface(s)\n",
@@ -216,15 +198,6 @@ static const kbdd_hid_device_t *kbdd_control_dev(const kbdd_ctx_t *k)
     return NULL;
 }
 
-static int kbdd_reply_bytes(kbdd_ipc_message_t *resp, const uint8_t *data, size_t n)
-{
-    resp->payload = malloc(n > 0 ? n : 1);
-    if (resp->payload == NULL) return -1;
-    memcpy(resp->payload, data, n);
-    resp->payload_len = (uint32_t)n;
-    return 0;
-}
-
 const char *kbdd_dev_err(int rc)
 {
     switch (rc) {
@@ -245,8 +218,8 @@ static int kbdd_queue_busy(kbdd_ipc_message_t *resp)
     return kbdd_reply_text(resp, "error: device queue full, try again shortly");
 }
 
-static int kbdd_handle_led_async(kbdd_ctx_t *k, const kbdd_ipc_message_t *req,
-                                 kbdd_ipc_message_t *resp)
+int kbdd_handle_led(kbdd_ctx_t *k, const kbdd_ipc_message_t *req,
+                    kbdd_ipc_message_t *resp)
 {
     const uint8_t *p = req->payload;
     const kbdd_hid_device_t *dev;
@@ -315,8 +288,8 @@ static int kbdd_handle_led_async(kbdd_ctx_t *k, const kbdd_ipc_message_t *req,
                : kbdd_queue_busy(resp);
 }
 
-static int kbdd_handle_effect_async(kbdd_ctx_t *k, const kbdd_ipc_message_t *req,
-                                    kbdd_ipc_message_t *resp)
+int kbdd_handle_effect(kbdd_ctx_t *k, const kbdd_ipc_message_t *req,
+                       kbdd_ipc_message_t *resp)
 {
     if (!k->allow_profile_write) {
         return kbdd_reply_text(resp,
@@ -340,8 +313,8 @@ static int kbdd_handle_effect_async(kbdd_ctx_t *k, const kbdd_ipc_message_t *req
                : kbdd_queue_busy(resp);
 }
 
-static int kbdd_handle_profile_async(kbdd_ctx_t *k, const kbdd_ipc_message_t *req,
-                                     kbdd_ipc_message_t *resp)
+int kbdd_handle_profile(kbdd_ctx_t *k, const kbdd_ipc_message_t *req,
+                        kbdd_ipc_message_t *resp)
 {
     if (!k->allow_profile_write) {
         return kbdd_reply_text(resp,
@@ -364,8 +337,8 @@ static int kbdd_handle_profile_async(kbdd_ctx_t *k, const kbdd_ipc_message_t *re
                : kbdd_queue_busy(resp);
 }
 
-static int kbdd_handle_anim_async(kbdd_ctx_t *k, const kbdd_ipc_message_t *req,
-                                  kbdd_ipc_message_t *resp)
+int kbdd_handle_anim(kbdd_ctx_t *k, const kbdd_ipc_message_t *req,
+                            kbdd_ipc_message_t *resp)
 {
     const uint8_t *p = req->payload;
     const kbdd_hid_device_t *dev;
@@ -424,8 +397,8 @@ static int kbdd_handle_anim_async(kbdd_ctx_t *k, const kbdd_ipc_message_t *req,
     }
 }
 
-static int kbdd_handle_colors_async(kbdd_ctx_t *k, const kbdd_ipc_message_t *req,
-                                    kbdd_ipc_message_t *resp)
+int kbdd_handle_colors(kbdd_ctx_t *k, const kbdd_ipc_message_t *req,
+                              kbdd_ipc_message_t *resp)
 {
     const uint8_t *p = req->payload;
 
@@ -473,8 +446,8 @@ static int kbdd_save_rate_limited(kbdd_ipc_message_t *resp, long long wait_ms)
     return kbdd_reply_text(resp, buf);
 }
 
-static int kbdd_handle_save_async(kbdd_ctx_t *k, const kbdd_ipc_message_t *req,
-                                  kbdd_ipc_message_t *resp)
+int kbdd_handle_save(kbdd_ctx_t *k, const kbdd_ipc_message_t *req,
+                     kbdd_ipc_message_t *resp)
 {
     const kbdd_hid_device_t *dev;
     long long wait_ms;
@@ -504,8 +477,8 @@ static int kbdd_handle_save_async(kbdd_ctx_t *k, const kbdd_ipc_message_t *req,
     return KBDD_HANDLER_DEFER;
 }
 
-static int kbdd_handle_field_async(kbdd_ctx_t *k, const kbdd_ipc_message_t *req,
-                                   kbdd_ipc_message_t *resp)
+int kbdd_handle_field(kbdd_ctx_t *k, const kbdd_ipc_message_t *req,
+                             kbdd_ipc_message_t *resp)
 {
     int field, resume_led;
     const kbdd_hid_device_t *dev;
@@ -542,534 +515,6 @@ static int kbdd_handle_field_async(kbdd_ctx_t *k, const kbdd_ipc_message_t *req,
                : kbdd_queue_busy(resp);
 }
 
-int kbdd_handle_led(kbdd_ctx_t *k, const kbdd_ipc_message_t *req,
-                           kbdd_ipc_message_t *resp)
-{
-    if (!kbdd_ipc_sync_mode) {
-        return kbdd_handle_led_async(k, req, resp);
-    }
-
-    const uint8_t *p = req->payload;
-    const kbdd_hid_device_t *dev;
-    kbdd_dev_io_t io;
-    size_t matrix, stride, count;
-    uint8_t flags, mode, pos, r, g, b;
-    int rc;
-
-    if (!k->allow_led) {
-        return kbdd_reply_text(resp,
-            "error: LED control is disabled. Start kbdd with KBDD_ENABLE_LED=1");
-    }
-    if (p == NULL || req->payload_len != KBDD_LED_PAYLOAD_SIZE) {
-        return kbdd_reply_text(resp, "error: bad LED payload");
-    }
-    flags = p[0]; mode = p[2]; pos = p[3]; r = p[4]; g = p[5]; b = p[6];
-
-    k->led_anim = 0;      /* any non-animation LED command ends a running animation */
-    if (mode == KBDD_LED_MODE_RELEASE) {
-        k->led_hold = 0;
-        k->led_active = 0;
-        return kbdd_reply_text(resp, "ok: LED streaming stopped");
-    }
-    dev = kbdd_control_dev(k);
-    if (dev == NULL) {
-        return kbdd_reply_text(resp, "error: no keyboard control interface available");
-    }
-    matrix = dev->model->matrix_size;
-    stride = p[1] != 0 ? (size_t)p[1] : matrix;
-    if (kbc_led_frame_page_count(stride) == 0) {
-        return kbdd_reply_text(resp, "error: invalid stride (1..144)");
-    }
-    count = matrix < stride ? matrix : stride;
-
-    if (mode == KBDD_LED_MODE_SOLID) {
-        memset(k->led_frame, 0, sizeof(k->led_frame));
-        memset(k->led_base_frame, 0, sizeof(k->led_base_frame));
-        kbc_led_frame_fill(k->led_base_frame, stride, count, r, g, b);
-        k->config_mode = KBDD_CONFIG_SOLID;
-        k->config_solid[0] = r;
-        k->config_solid[1] = g;
-        k->config_solid[2] = b;
-        memset(k->config_positions, 0, sizeof(k->config_positions));
-    } else if (mode == KBDD_LED_MODE_CLEAR) {
-        memset(k->led_frame, 0, sizeof(k->led_frame));
-        memset(k->led_base_frame, 0, sizeof(k->led_base_frame));
-        k->config_mode = KBDD_CONFIG_NONE;
-        memset(k->config_solid, 0, sizeof(k->config_solid));
-        memset(k->config_positions, 0, sizeof(k->config_positions));
-    } else if (mode == KBDD_LED_MODE_POS) {
-        if (pos >= count) {
-            return kbdd_reply_text(resp, "error: position out of range");
-        }
-        if (!k->led_active || k->led_stride != stride) {
-            memset(k->led_frame, 0, sizeof(k->led_frame));
-            memset(k->led_base_frame, 0, sizeof(k->led_base_frame));
-        }
-        kbc_led_frame_set(k->led_base_frame, stride, pos, r, g, b);
-        if (k->config_mode != KBDD_CONFIG_POSITIONS ||
-            k->config_stride != stride) {
-            memset(k->config_positions, 0, sizeof(k->config_positions));
-        }
-        k->config_mode = KBDD_CONFIG_POSITIONS;
-        k->config_positions[pos][0] = r;
-        k->config_positions[pos][1] = g;
-        k->config_positions[pos][2] = b;
-    } else {
-        return kbdd_reply_text(resp, "error: unknown LED mode");
-    }
-    memcpy(k->led_frame, k->led_base_frame, sizeof(k->led_frame));
-    if (kbc_led_frame_apply_brightness(k->led_frame, stride, k->led_brightness) != KBC_OK) {
-        return kbdd_reply_text(resp, "error: invalid LED brightness");
-    }
-
-    kbdd_dev_io_init_hidraw(&io, dev);
-    rc = kbdd_dev_send_frame(&io, k->led_frame, stride);
-    if (rc != KBDD_DEV_OK) {
-        k->led_hold = 0;
-        return kbdd_reply_text(resp, kbdd_dev_err(rc));
-    }
-    k->led_stride = stride;
-    k->led_active = 1;
-    k->led_fail = 0;
-    k->led_next_ms = kbdd_now_ms() + 40;
-    k->led_hold = (flags & KBDD_LED_FLAG_HOLD) ? 1 : 0;
-    k->config_stride = stride;
-    if (kbdd_save_config(k) != 0) {
-        return kbdd_reply_text(resp, "error: LED sent but configuration could not be saved");
-    }
-    return kbdd_reply_text(resp, k->led_hold
-        ? "ok: LED frame sent, streaming every 40 ms (kbctl led release to stop)"
-        : "ok: LED frame sent once");
-}
-
-static int kbdd_reply_dev_err(kbdd_ipc_message_t *resp, int rc)
-{
-    char buf[480];
-    const char *diag = kbdd_dev_last_diag();
-    if ((rc == KBDD_DEV_EVERIFY || rc == KBDD_DEV_EPROTO) && diag != NULL && diag[0] != '\0') {
-        snprintf(buf, sizeof(buf), "%s [%s]", kbdd_dev_err(rc), diag);
-        return kbdd_reply_text(resp, buf);
-    }
-    return kbdd_reply_text(resp, kbdd_dev_err(rc));
-}
-
-int kbdd_handle_effect(kbdd_ctx_t *k, const kbdd_ipc_message_t *req,
-                              kbdd_ipc_message_t *resp)
-{
-    if (!kbdd_ipc_sync_mode) {
-        return kbdd_handle_effect_async(k, req, resp);
-    }
-
-    const kbdd_hid_device_t *dev;
-    kbdd_dev_io_t io;
-    uint8_t prof = 0;
-    char buf[160];
-    int rc;
-
-    if (!k->allow_profile_write) {
-        return kbdd_reply_text(resp,
-            "error: profile writes are disabled. Start kbdd with KBDD_ENABLE_PROFILE_WRITE=1");
-    }
-    if (req->payload == NULL || req->payload_len != 1) {
-        return kbdd_reply_text(resp, "error: payload must be [mode]");
-    }
-    dev = kbdd_control_dev(k);
-    if (dev == NULL) {
-        return kbdd_reply_text(resp, "error: no keyboard control interface available");
-    }
-    k->led_hold = 0; /* stop host streaming so the effect is visible */
-    k->led_active = 0;
-    k->led_anim = 0;
-    kbdd_dev_io_init_hidraw(&io, dev);
-    rc = kbdd_dev_set_effect(&io, req->payload[0], &prof);
-    if (rc != KBDD_DEV_OK) {
-        return kbdd_reply_dev_err(resp, rc);
-    }
-    k->config_mode = KBDD_CONFIG_EFFECT;
-    k->config_effect = req->payload[0];
-    if (kbdd_save_config(k) != 0) {
-        return kbdd_reply_text(resp, "error: effect set but configuration could not be saved");
-    }
-    snprintf(buf, sizeof(buf), "ok: effect %s (%u) set on profile %u, verified by read-back",
-             kbc_led_effect_name(req->payload[0]), (unsigned)req->payload[0], (unsigned)prof);
-    return kbdd_reply_text(resp, buf);
-}
-
-int kbdd_handle_profile(kbdd_ctx_t *k, const kbdd_ipc_message_t *req,
-                               kbdd_ipc_message_t *resp)
-{
-    if (!kbdd_ipc_sync_mode) {
-        return kbdd_handle_profile_async(k, req, resp);
-    }
-
-    const kbdd_hid_device_t *dev;
-    kbdd_dev_io_t io;
-    char buf[120];
-    int rc, changed = 0;
-    unsigned p;
-
-    if (!k->allow_profile_write) {
-        return kbdd_reply_text(resp,
-            "error: profile switching is disabled. Start kbdd with KBDD_ENABLE_PROFILE_WRITE=1");
-    }
-    if (req->payload == NULL || req->payload_len != 1 || req->payload[0] < 1 || req->payload[0] > 4) {
-        return kbdd_reply_text(resp, "error: payload must be [profile 1..4]");
-    }
-    p = req->payload[0];
-    dev = kbdd_control_dev(k);
-    if (dev == NULL) {
-        return kbdd_reply_text(resp, "error: no keyboard control interface available");
-    }
-    k->led_hold = 0;      /* host frames belong to the previous profile's lighting */
-    k->led_active = 0;
-    kbdd_dev_io_init_hidraw(&io, dev);
-    rc = kbdd_dev_switch_profile(&io, (uint8_t)p, &changed);
-    if (rc == KBDD_DEV_EVERIFY) {
-        return kbdd_reply_text(resp,
-            "error: the keyboard did not confirm the profile switch; previous profile requested back");
-    }
-    if (rc != KBDD_DEV_OK) {
-        return kbdd_reply_text(resp, kbdd_dev_err(rc));
-    }
-    snprintf(buf, sizeof(buf), changed ? "ok: profile %u is now active (confirmed by 0x81)"
-                                       : "ok: profile %u was already active", p);
-    return kbdd_reply_text(resp, buf);
-}
-
-int kbdd_handle_anim(kbdd_ctx_t *k, const kbdd_ipc_message_t *req,
-                            kbdd_ipc_message_t *resp)
-{
-    if (!kbdd_ipc_sync_mode) {
-        return kbdd_handle_anim_async(k, req, resp);
-    }
-
-    static const char *const names[] = {"?", "breath", "cycle", "rainbow"};
-    const uint8_t *p = req->payload;
-    const kbdd_hid_device_t *dev;
-    kbdd_dev_io_t io;
-    size_t matrix, stride, count;
-    uint32_t period;
-    char buf[160];
-    int rc;
-
-    if (!k->allow_led) {
-        return kbdd_reply_text(resp,
-            "error: LED control is disabled. Start kbdd with KBDD_ENABLE_LED=1");
-    }
-    if (p == NULL || req->payload_len != KBDD_ANIM_PAYLOAD_SIZE || p[0] < 1 || p[0] > 3) {
-        return kbdd_reply_text(resp, "error: bad animation payload");
-    }
-    dev = kbdd_control_dev(k);
-    if (dev == NULL) {
-        return kbdd_reply_text(resp, "error: no keyboard control interface available");
-    }
-    matrix = dev->model->matrix_size;
-    stride = p[1] != 0 ? (size_t)p[1] : matrix;
-    if (kbc_led_frame_page_count(stride) == 0) {
-        return kbdd_reply_text(resp, "error: invalid stride (1..144)");
-    }
-    count = matrix < stride ? matrix : stride;
-    period = ((uint32_t)p[2] << 8) | p[3];
-    if (period == 0) period = kbc_led_anim_default_period((kbc_led_anim)p[0]);
-
-    memset(k->led_base_frame, 0, sizeof(k->led_base_frame));
-    if (kbc_led_anim_render((kbc_led_anim)p[0], 0, period, p[4], p[5], p[6],
-                            k->led_base_frame, stride, count) != KBC_OK) {
-        return kbdd_reply_text(resp, "error: invalid animation period (200..60000 ms)");
-    }
-    memcpy(k->led_frame, k->led_base_frame, sizeof(k->led_frame));
-    if (kbc_led_frame_apply_brightness(k->led_frame, stride, k->led_brightness) != KBC_OK) {
-        return kbdd_reply_text(resp, "error: invalid LED brightness");
-    }
-    kbdd_dev_io_init_hidraw(&io, dev);
-    rc = kbdd_dev_send_frame(&io, k->led_frame, stride);
-    if (rc != KBDD_DEV_OK) {
-        k->led_hold = 0;
-        k->led_anim = 0;
-        return kbdd_reply_text(resp, kbdd_dev_err(rc));
-    }
-    k->led_stride = stride;
-    k->led_active = 1;
-    k->led_fail = 0;
-    k->led_anim = p[0];
-    k->led_anim_period = period;
-    k->led_anim_rgb[0] = p[4];
-    k->led_anim_rgb[1] = p[5];
-    k->led_anim_rgb[2] = p[6];
-    k->led_anim_count = count;
-    k->led_anim_start_ms = kbdd_now_ms();
-    k->led_next_ms = k->led_anim_start_ms + 40;
-    k->led_hold = 1;
-    k->config_mode = KBDD_CONFIG_ANIMATION;
-    k->config_anim = p[0];
-    k->config_anim_period = period;
-    k->config_anim_rgb[0] = p[4];
-    k->config_anim_rgb[1] = p[5];
-    k->config_anim_rgb[2] = p[6];
-    k->config_stride = stride;
-    if (kbdd_save_config(k) != 0) {
-        return kbdd_reply_text(resp,
-            "error: animation started but configuration could not be saved");
-    }
-    snprintf(buf, sizeof(buf),
-             "ok: %s animation started (25 fps, period %u ms); kbctl led release to stop",
-             names[p[0]], (unsigned)period);
-    return kbdd_reply_text(resp, buf);
-}
-
-int kbdd_handle_colors(kbdd_ctx_t *k, const kbdd_ipc_message_t *req,
-                              kbdd_ipc_message_t *resp)
-{
-    if (!kbdd_ipc_sync_mode) {
-        return kbdd_handle_colors_async(k, req, resp);
-    }
-
-    const uint8_t *p = req->payload;
-    const kbdd_hid_device_t *dev;
-    kbdd_dev_io_t io;
-    kbdd_color_edit_t ce;
-    uint8_t prof = 0;
-    char buf[160];
-    size_t j;
-    int rc;
-
-    if (!k->allow_profile_write) {
-        return kbdd_reply_text(resp,
-            "error: profile writes are disabled. Start kbdd with KBDD_ENABLE_PROFILE_WRITE=1");
-    }
-    if (p == NULL || req->payload_len < 5 || p[1] < 1 || p[1] > 14 ||
-        req->payload_len != 2u + 3u * p[1]) {
-        return kbdd_reply_text(resp, "error: payload must be [effect, count 1..14, r,g,b * count]");
-    }
-    memset(&ce, 0, sizeof(ce));
-    ce.effect = p[0];
-    ce.count = p[1];
-    for (j = 0; j < ce.count; j++) {
-        memcpy(ce.rgb[j], p + 2 + 3 * j, 3);
-    }
-    dev = kbdd_control_dev(k);
-    if (dev == NULL) {
-        return kbdd_reply_text(resp, "error: no keyboard control interface available");
-    }
-    k->led_hold = 0;
-    k->led_active = 0;
-    kbdd_dev_io_init_hidraw(&io, dev);
-    rc = kbdd_dev_set_colors(&io, &ce, &prof);
-    if (rc == KBDD_DEV_EINVAL) {
-        return kbdd_reply_text(resp, "error: this effect has no color slots (cycle and game mode), or too many colors");
-    }
-    if (rc != KBDD_DEV_OK) {
-        return kbdd_reply_dev_err(resp, rc);
-    }
-    snprintf(buf, sizeof(buf),
-             "ok: %s colors set on profile %u, verified by read-back (RAM only; use --save or 'led save')",
-             kbc_led_effect_name(ce.effect), (unsigned)prof);
-    return kbdd_reply_text(resp, buf);
-}
-
-int kbdd_handle_save(kbdd_ctx_t *k, const kbdd_ipc_message_t *req,
-                     kbdd_ipc_message_t *resp)
-{
-    if (!kbdd_ipc_sync_mode) {
-        return kbdd_handle_save_async(k, req, resp);
-    }
-
-    const kbdd_hid_device_t *dev;
-    kbdd_dev_io_t io;
-    uint8_t prof = 0;
-    char buf[160];
-    long long wait_ms;
-    int rc, was_hold;
-
-    if (!k->allow_profile_write) {
-        return kbdd_reply_text(resp,
-            "error: profile writes are disabled. Start kbdd with KBDD_ENABLE_PROFILE_WRITE=1");
-    }
-    dev = kbdd_control_dev(k);
-    if (dev == NULL) {
-        return kbdd_reply_text(resp, "error: no keyboard control interface available");
-    }
-    wait_ms = kbdd_save_cooldown_take(k);
-    if (wait_ms != 0) {
-        return kbdd_save_rate_limited(resp, wait_ms);
-    }
-    was_hold = k->led_hold;
-    k->led_hold = 0;                 /* no host frames while the block is committed */
-    kbdd_dev_io_init_hidraw(&io, dev);
-    rc = kbdd_dev_save_profile(&io, &prof);
-    if (was_hold && k->led_active) {
-        k->led_next_ms = kbdd_now_ms() + 40;
-        k->led_hold = 1;
-    }
-    if (rc != KBDD_DEV_OK) {
-        return kbdd_reply_text(resp, rc == KBDD_DEV_EVERIFY
-            ? "error: save not confirmed by the keyboard; nothing was committed or the block was restored"
-            : kbdd_dev_err(rc));
-    }
-    snprintf(buf, sizeof(buf),
-             "ok: profile %u committed to flash (replug the keyboard to confirm it persists)",
-             (unsigned)prof);
-    return kbdd_reply_text(resp, buf);
-}
-
-int kbdd_handle_field(kbdd_ctx_t *k, const kbdd_ipc_message_t *req,
-                             kbdd_ipc_message_t *resp)
-{
-    if (!kbdd_ipc_sync_mode) {
-        return kbdd_handle_field_async(k, req, resp);
-    }
-
-    static const char *const names[] = {
-        "?", "effect", "brightness", "speed", "direction", "report rate"
-    };
-    const kbdd_hid_device_t *dev;
-    kbdd_dev_io_t io;
-    uint8_t prof = 0;
-    char buf[160];
-    int rc, field, resume_led;
-
-    if (!k->allow_profile_write) {
-        return kbdd_reply_text(resp,
-            "error: profile writes are disabled. Start kbdd with KBDD_ENABLE_PROFILE_WRITE=1");
-    }
-    if (req->payload == NULL || req->payload_len != 2 || req->payload[0] < 1 || req->payload[0] > 5) {
-        return kbdd_reply_text(resp, "error: payload must be [field 1..5, value]");
-    }
-    field = req->payload[0];
-    dev = kbdd_control_dev(k);
-    if (dev == NULL) {
-        return kbdd_reply_text(resp, "error: no keyboard control interface available");
-    }
-    resume_led = (field == KBC_FIELD_BRIGHTNESS) ? k->led_hold : 0;
-    k->led_hold = 0;
-    if (field != KBC_FIELD_BRIGHTNESS) {
-        k->led_active = 0;
-    }
-    kbdd_dev_io_init_hidraw(&io, dev);
-    rc = kbdd_dev_set_field(&io, field, req->payload[1], &prof);
-    if (rc != KBDD_DEV_OK) {
-        return kbdd_reply_dev_err(resp, rc);
-    }
-    if (field == KBC_FIELD_BRIGHTNESS) {
-        k->led_brightness = req->payload[1];
-        k->config_brightness = req->payload[1];
-        if (k->led_active) {
-            memcpy(k->led_frame, k->led_base_frame, sizeof(k->led_frame));
-            if (kbc_led_frame_apply_brightness(k->led_frame, k->led_stride,
-                                               k->led_brightness) != KBC_OK ||
-                kbdd_dev_send_frame(&io, k->led_frame, k->led_stride) != KBDD_DEV_OK) {
-                k->led_active = 0;
-                return kbdd_reply_text(resp, "error: brightness changed, but solid LED frame could not be refreshed");
-            }
-            k->led_next_ms = kbdd_now_ms() + 40;
-            k->led_hold = resume_led;
-        }
-    } else if (field == KBC_FIELD_SPEED) {
-        k->config_speed[k->config_effect] = req->payload[1];
-    } else if (field == KBC_FIELD_MODE) {
-        k->config_mode = KBDD_CONFIG_EFFECT;
-        k->config_effect = req->payload[1];
-    }
-    if (kbdd_save_config(k) != 0) {
-        return kbdd_reply_text(resp, "error: profile set but configuration could not be saved");
-    }
-    snprintf(buf, sizeof(buf), "ok: %s set to %u on profile %u, verified by read-back",
-             names[field], (unsigned)req->payload[1], (unsigned)prof);
-    return kbdd_reply_text(resp, buf);
-}
-
-int kbdd_restore_config(kbdd_ctx_t *k)
-{
-    const kbdd_hid_device_t *dev;
-    kbdd_dev_io_t io;
-    size_t matrix, stride, count, i;
-    int rc;
-
-    if (k == NULL || k->config_mode == KBDD_CONFIG_NONE) return 0;
-    k->led_anim = 0;      /* restoring the saved mode replaces any animation */
-    dev = kbdd_control_dev(k);
-    if (dev == NULL) return 0;
-    kbdd_dev_io_init_hidraw(&io, dev);
-    matrix = dev->model->matrix_size;
-
-    if (k->allow_profile_write) {
-        rc = kbdd_dev_set_field(&io, KBC_FIELD_BRIGHTNESS,
-                                k->config_brightness, NULL);
-        if (rc != KBDD_DEV_OK) {
-            fprintf(stderr, "kbdd: could not restore brightness (%d)\n", rc);
-            return -1;
-        }
-        if (k->config_mode == KBDD_CONFIG_EFFECT) {
-            rc = kbdd_dev_set_field(&io, KBC_FIELD_MODE,
-                                    k->config_effect, NULL);
-            if (rc == KBDD_DEV_OK) {
-                rc = kbdd_dev_set_field(&io, KBC_FIELD_SPEED,
-                                        k->config_speed[k->config_effect], NULL);
-            }
-            if (rc != KBDD_DEV_OK) {
-                fprintf(stderr, "kbdd: could not restore effect (%d)\n", rc);
-                return -1;
-            }
-        }
-    }
-    if (k->config_mode == KBDD_CONFIG_EFFECT) {
-        k->led_hold = 0;
-        k->led_active = 0;
-        return 0;
-    }
-    if (!k->allow_led) return 0;
-
-    stride = k->config_stride != 0 ? k->config_stride : matrix;
-    count = matrix < stride ? matrix : stride;
-    if (kbc_led_frame_page_count(stride) == 0) return -1;
-    memset(k->led_base_frame, 0, sizeof(k->led_base_frame));
-    if (k->config_mode == KBDD_CONFIG_SOLID) {
-        kbc_led_frame_fill(k->led_base_frame, stride, count,
-                           k->config_solid[0], k->config_solid[1],
-                           k->config_solid[2]);
-    } else if (k->config_mode == KBDD_CONFIG_ANIMATION) {
-        if (kbc_led_anim_render((kbc_led_anim)k->config_anim, 0,
-                                k->config_anim_period,
-                                k->config_anim_rgb[0],
-                                k->config_anim_rgb[1],
-                                k->config_anim_rgb[2],
-                                k->led_base_frame, stride, count) != KBC_OK) {
-            return -1;
-        }
-    } else {
-        for (i = 0; i < count; i++) {
-            kbc_led_frame_set(k->led_base_frame, stride, i,
-                              k->config_positions[i][0],
-                              k->config_positions[i][1],
-                              k->config_positions[i][2]);
-        }
-    }
-    memcpy(k->led_frame, k->led_base_frame, sizeof(k->led_frame));
-    if (kbc_led_frame_apply_brightness(k->led_frame, stride,
-                                       k->config_brightness) != KBC_OK ||
-        kbdd_dev_send_frame(&io, k->led_frame, stride) != KBDD_DEV_OK) {
-        fprintf(stderr, "kbdd: could not restore host LED configuration\n");
-        k->led_hold = 0;
-        k->led_active = 0;
-        return -1;
-    }
-    k->led_brightness = k->config_brightness;
-    k->led_stride = stride;
-    k->led_active = 1;
-    k->led_hold = 1;
-    k->led_next_ms = kbdd_now_ms() + 40;
-    if (k->config_mode == KBDD_CONFIG_ANIMATION) {
-        k->led_anim = k->config_anim;
-        k->led_anim_period = k->config_anim_period;
-        memcpy(k->led_anim_rgb, k->config_anim_rgb, sizeof(k->led_anim_rgb));
-        k->led_anim_count = count;
-        k->led_anim_start_ms = kbdd_now_ms();
-    } else {
-        k->led_anim = 0;
-    }
-    return 0;
-}
-
 void kbdd_restore_tick(kbdd_ctx_t *k)
 {
     if (k == NULL || !k->restore_pending ||
@@ -1085,43 +530,24 @@ void kbdd_restore_tick(kbdd_ctx_t *k)
         return;
     }
 
-    if (!kbdd_ipc_sync_mode) {
-        if (kbdd_op_pending()) {
-            return; /* retry once the worker is idle */
-        }
-        if (kbdd_op_queue_restore_config(k, dev) == 0) {
-            k->restore_next_ms = kbdd_now_ms() + 10000;
-        }
-        return;
+    if (kbdd_op_pending()) {
+        return; /* retry once the worker is idle */
     }
-
-    int rc = kbdd_restore_config(k);
-    if (rc == 0) {
-        k->restore_pending = 0;
-        fprintf(stderr, "kbdd: restored saved LED configuration\n");
-        return;
+    if (kbdd_op_queue_restore_config(k, dev) == 0) {
+        k->restore_next_ms = kbdd_now_ms() + 10000;
     }
-    k->restore_attempts++;
-    if (k->restore_attempts >= 10) {
-        k->restore_pending = 0;
-        fprintf(stderr, "kbdd: could not restore saved LED configuration after %u attempts\n",
-                k->restore_attempts);
-        return;
-    }
-    k->restore_next_ms = kbdd_now_ms() + 500;
 }
 
 static void kbdd_led_tick(kbdd_ctx_t *k)
 {
     const kbdd_hid_device_t *dev;
-    kbdd_dev_io_t io;
     long long now;
 
     if (k->led_anim && !k->led_active) k->led_anim = 0;   /* another mode took over */
     if (!k->led_hold) return;
     now = kbdd_now_ms();
     if (now < k->led_next_ms) return;
-    if (!kbdd_ipc_sync_mode && kbdd_op_pending()) {
+    if (kbdd_op_pending()) {
         return; /* device busy with another request; retry on the next loop */
     }
     dev = kbdd_control_dev(k);
@@ -1135,26 +561,13 @@ static void kbdd_led_tick(kbdd_ctx_t *k)
             (void)kbc_led_frame_apply_brightness(k->led_frame, k->led_stride, k->led_brightness);
         }
     }
-    if (!kbdd_ipc_sync_mode) {
-        /* Stream through the worker so a slow write never stalls other
-         * clients; the next frame is queued only once this one completes. */
-        if (kbdd_op_queue_frame_from_base(NULL, dev, k->led_frame, k->led_stride,
-                                          k->led_anim ? k->led_anim_count : k->led_stride,
-                                          KBDD_LED_FLAG_HOLD) == 0) {
-            k->led_next_ms = now + 40;
-        }
-        return;
+    /* Stream through the worker so a slow write never stalls other
+     * clients; the next frame is queued only once this one completes. */
+    if (kbdd_op_queue_frame_from_base(NULL, dev, k->led_frame, k->led_stride,
+                                      k->led_anim ? k->led_anim_count : k->led_stride,
+                                      KBDD_LED_FLAG_HOLD) == 0) {
+        k->led_next_ms = now + 40;
     }
-    kbdd_dev_io_init_hidraw(&io, dev);
-    if (kbdd_dev_send_frame(&io, k->led_frame, k->led_stride) != KBDD_DEV_OK) {
-        if (++k->led_fail >= 5) {
-            k->led_hold = 0;
-            fprintf(stderr, "kbdd: LED streaming stopped after repeated I/O errors\n");
-        }
-    } else {
-        k->led_fail = 0;
-    }
-    k->led_next_ms = now + 40;
 }
 
 static int kbdd_reply_text(kbdd_ipc_message_t *resp, const char *msg)
@@ -1237,10 +650,6 @@ int kbdd_ipc_handle(const kbdd_ipc_message_t *req, kbdd_ipc_message_t *resp,
         case KBDD_IPC_OP_READ_PROFILE:
         {
             const kbdd_hid_device_t *dev = kbdd_control_dev(kctx);
-            kbdd_dev_io_t io;
-            uint8_t out[264];
-            uint8_t profile;
-            int rc;
 
             if (req->payload == NULL || req->payload_len != 1 ||
                 req->payload[0] < 1 || req->payload[0] > 4) {
@@ -1250,18 +659,9 @@ int kbdd_ipc_handle(const kbdd_ipc_message_t *req, kbdd_ipc_message_t *resp,
             if (dev == NULL) {
                 return kbdd_reply_text(resp, "error: no keyboard control interface available");
             }
-            if (!kbdd_ipc_sync_mode) {
-                return kbdd_op_queue_read_block(req, dev) == 0
-                           ? KBDD_HANDLER_DEFER
-                           : kbdd_queue_busy(resp);
-            }
-            profile = req->payload[0];
-            kbdd_dev_io_init_hidraw(&io, dev);
-            rc = kbdd_dev_query(&io, KBC_OP_READ_PROFILE_BLOCK, profile, out);
-            if (rc != KBDD_DEV_OK) {
-                return kbdd_reply_text(resp, kbdd_dev_err(rc));
-            }
-            return kbdd_reply_bytes(resp, out, sizeof(out));
+            return kbdd_op_queue_read_block(req, dev) == 0
+                       ? KBDD_HANDLER_DEFER
+                       : kbdd_queue_busy(resp);
         }
         case KBDD_IPC_OP_READ_CONFIG: {
             const char *msg = "config: <XDG_CONFIG_HOME>/kbdd";
@@ -1276,92 +676,40 @@ int kbdd_ipc_handle(const kbdd_ipc_message_t *req, kbdd_ipc_message_t *resp,
             return 0;
         }
         case KBDD_IPC_OP_ENABLE_NOTIFICATIONS: {
-            size_t i;
-            int failed = 0;
-            if (!kbdd_ipc_sync_mode && kbdd_op_pending()) {
-                return kbdd_reply_text(resp, "error: device busy, try again shortly");
+            const kbdd_hid_device_t *dev = kbdd_control_dev(kctx);
+            if (dev == NULL) {
+                return kbdd_reply_text(resp, "error: no keyboard control interface available");
             }
-            for (i = 0; i < kctx->count; i++) {
-                kbdd_dev_io_t io;
-                if (kctx->devices[i].role != 0 || kctx->devices[i].fd < 0) continue;
-                kbdd_dev_io_init_hidraw(&io, &kctx->devices[i]);
-                if (kbdd_dev_enable_notifications(&io) != KBDD_DEV_OK) failed = 1;
-            }
-            return kbdd_reply_text(resp, failed
-                ? "error: could not enable keyboard notifications"
-                : "notifications enabled");
+            return kbdd_op_queue_enable_notif(req, dev) == 0
+                       ? KBDD_HANDLER_DEFER
+                       : kbdd_queue_busy(resp);
         }
         case KBDD_IPC_OP_WATCH:
             return kbdd_reply_text(resp,
                 "watching keyboard system events (Ctrl+C to stop)");
         case KBDD_IPC_OP_READ_ACTIVE: {
             const kbdd_hid_device_t *dev = kbdd_control_dev(kctx);
-            kbdd_dev_io_t io;
-            uint8_t out[264];
-            char buf[160];
-            int rc;
-            if (!kbdd_ipc_sync_mode) {
-                if (dev == NULL) {
-                    return kbdd_reply_text(resp, "error: no keyboard control interface available");
-                }
-                return kbdd_op_queue_read_active(req, dev) == 0
-                           ? KBDD_HANDLER_DEFER
-                           : kbdd_queue_busy(resp);
-            }
             if (dev == NULL) {
                 return kbdd_reply_text(resp, "error: no keyboard control interface available");
             }
-            kbdd_dev_io_init_hidraw(&io, dev);
-            rc = kbdd_dev_query(&io, KBC_OP_READ_ACTIVE_PROFILE, 0, out);
-            if (rc != KBDD_DEV_OK) {
-                return kbdd_reply_text(resp, kbdd_dev_err(rc));
-            }
-            /* hardware reply: 07 81 <profile> ... (profile in byte 2) */
-            if (out[1] == KBC_OP_READ_ACTIVE_PROFILE && out[2] >= 1 && out[2] <= 4) {
-                snprintf(buf, sizeof(buf), "active profile: %u", (unsigned)out[2]);
-            } else {
-                snprintf(buf, sizeof(buf),
-                         "unexpected reply; first bytes: "
-                         "%02x %02x %02x %02x %02x %02x %02x %02x",
-                         out[0], out[1], out[2], out[3], out[4],
-                         out[5], out[6], out[7]);
-            }
-            return kbdd_reply_text(resp, buf);
+            return kbdd_op_queue_read_active(req, dev) == 0
+                       ? KBDD_HANDLER_DEFER
+                       : kbdd_queue_busy(resp);
         }
         case KBDD_IPC_OP_READ_BLOCK: {
             const kbdd_hid_device_t *dev = kbdd_control_dev(kctx);
-            kbdd_dev_io_t io;
-            uint8_t out[264];
-            int rc;
-            if (!kbdd_ipc_sync_mode) {
-                if (req->payload == NULL || req->payload_len != 1) {
-                    return kbdd_reply_text(resp, "error: payload must be [profile]");
-                }
-                if (dev == NULL) {
-                    return kbdd_reply_text(resp, "error: no keyboard control interface available");
-                }
-                return kbdd_op_queue_read_block(req, dev) == 0
-                           ? KBDD_HANDLER_DEFER
-                           : kbdd_queue_busy(resp);
-            }
             if (req->payload == NULL || req->payload_len != 1) {
                 return kbdd_reply_text(resp, "error: payload must be [profile]");
             }
             if (dev == NULL) {
                 return kbdd_reply_text(resp, "error: no keyboard control interface available");
             }
-            kbdd_dev_io_init_hidraw(&io, dev);
-            rc = kbdd_dev_query(&io, KBC_OP_READ_PROFILE_BLOCK, req->payload[0], out);
-            if (rc != KBDD_DEV_OK) {
-                return kbdd_reply_text(resp, kbdd_dev_err(rc));
-            }
-            return kbdd_reply_bytes(resp, out, sizeof(out));
+            return kbdd_op_queue_read_block(req, dev) == 0
+                       ? KBDD_HANDLER_DEFER
+                       : kbdd_queue_busy(resp);
         }
         case KBDD_IPC_OP_RESTORE_PROFILE: {
             const kbdd_hid_device_t *dev;
-            kbdd_dev_io_t io;
-            uint8_t profile;
-            int rc;
 
             if (!kctx->allow_profile_write) {
                 return kbdd_reply_text(resp,
@@ -1376,26 +724,13 @@ int kbdd_ipc_handle(const kbdd_ipc_message_t *req, kbdd_ipc_message_t *resp,
             if (dev == NULL) {
                 return kbdd_reply_text(resp, "error: no keyboard control interface available");
             }
-            if (!kbdd_ipc_sync_mode) {
-                kctx->led_hold = 0;
-                kctx->led_active = 0;
-                kctx->led_anim = 0;
-                kbdd_op_cancel_led();
-                return kbdd_op_queue_restore(req, dev) == 0
-                           ? KBDD_HANDLER_DEFER
-                           : kbdd_queue_busy(resp);
-            }
-            profile = req->payload[0];
             kctx->led_hold = 0;
             kctx->led_active = 0;
             kctx->led_anim = 0;
-            kbdd_dev_io_init_hidraw(&io, dev);
-            rc = kbdd_dev_restore_profile(&io, profile, req->payload + 1);
-            if (rc != KBDD_DEV_OK) {
-                return kbdd_reply_dev_err(resp, rc);
-            }
-            return kbdd_reply_text(resp,
-                "ok: profile restored and verified by read-back (RAM only; use 'led save' for the active profile)");
+            kbdd_op_cancel_led();
+            return kbdd_op_queue_restore(req, dev) == 0
+                       ? KBDD_HANDLER_DEFER
+                       : kbdd_queue_busy(resp);
         }
         case KBDD_IPC_OP_LED_SET:
             return kbdd_handle_led(kctx, req, resp);
@@ -1460,7 +795,7 @@ int kbdd_run(int argc, char **argv)
     for (size_t i = 0; i < device_count; i++) {
         kbdd_hidraw_open(&devices[i]);
     }
-    kbdd_enable_device_notifications(devices, device_count);
+    /* Notifications will be enabled via the async path after context init */
 
     /* uinput (optional, mockable) */
     /* Off by default: nothing uses the virtual keyboard yet, and creating it
@@ -1521,6 +856,13 @@ int kbdd_run(int argc, char **argv)
         kctx.restore_next_ms = kbdd_now_ms() + 300;
     }
     kbdd_ipc_server_set_close_cb(kbdd_op_client_closed_cb, &kctx);
+
+    /* Enable notifications on all control interfaces via async path */
+    for (size_t i = 0; i < kctx.count; i++) {
+        if (kctx.devices[i].role == 0 && kctx.devices[i].fd >= 0) {
+            (void)kbdd_op_queue_enable_notif(NULL, &kctx.devices[i]);
+        }
+    }
 
     /* main loop */
     long long next_device_scan_ms = kbdd_now_ms();

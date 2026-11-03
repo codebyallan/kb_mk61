@@ -75,8 +75,6 @@ typedef struct {
     char diag[256];
 } kbdd_op_result_t;
 
-int kbdd_ipc_sync_mode;
-
 static kbdd_ctx_t *g_ctx;
 static kbdd_op_node_t *g_head;
 static kbdd_op_node_t *g_tail;

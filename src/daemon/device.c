@@ -74,7 +74,16 @@ int kbdd_dev_query(const kbdd_dev_io_t *io, uint8_t opcode, uint8_t profile,
     rsp[0] = KBC_FEATURE_REPORT_ID;
     n = io->get_feature(io->ctx, rsp, sizeof(rsp));
     if (n < 0) return KBDD_DEV_EIO;
-    if (n < 2 || rsp[0] != KBC_FEATURE_REPORT_ID) return KBDD_DEV_EPROTO;
+    /* A short read leaves the tail zeroed and would pass for a real block, so
+     * require the full report, echoing the opcode (and profile) we asked for. */
+    if (n != KBC_FEATURE_REPORT_SIZE || rsp[0] != KBC_FEATURE_REPORT_ID ||
+        rsp[1] != opcode) {
+        return KBDD_DEV_EPROTO;
+    }
+    if (opcode == KBC_OP_READ_PROFILE_BLOCK ? rsp[2] != profile
+                                            : (rsp[2] < 1 || rsp[2] > 4)) {
+        return KBDD_DEV_EPROTO;
+    }
     memcpy(out, rsp, sizeof(rsp));
     return KBDD_DEV_OK;
 }

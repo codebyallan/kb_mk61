@@ -67,16 +67,18 @@ static void test_query_active(void)
 {
     struct mock m; kbdd_dev_io_t io; uint8_t out[264];
     mock_init(&m, &io);
+    m.reply[1] = 0x81; m.reply[2] = 2;
     CHECK(kbdd_dev_query(&io, 0x81, 0, out) == KBDD_DEV_OK);
     CHECK(m.nsent == 1 && m.sent[0][0] == 0x07 && m.sent[0][1] == 0x81);
     CHECK(m.nsleeps == 1 && m.sleeps[0] == 100);
-    CHECK(out[0] == 0x07 && out[1] == 0x02);
+    CHECK(out[0] == 0x07 && out[1] == 0x81 && out[2] == 2);
 }
 
 static void test_query_block(void)
 {
     struct mock m; kbdd_dev_io_t io; uint8_t out[264];
     mock_init(&m, &io);
+    m.reply[1] = 0x82; m.reply[2] = 3;
     CHECK(kbdd_dev_query(&io, 0x82, 3, out) == KBDD_DEV_OK);
     CHECK(m.sent[0][1] == 0x82 && m.sent[0][2] == 3);
     CHECK(m.sleeps[0] == 50);
@@ -99,13 +101,31 @@ static void test_query_allowlist(void)
 static void test_query_errors(void)
 {
     struct mock m; kbdd_dev_io_t io; uint8_t out[264];
-    mock_init(&m, &io); m.fail_set = 1;
+    mock_init(&m, &io); m.reply[1] = 0x81; m.reply[2] = 2; m.fail_set = 1;
     CHECK(kbdd_dev_query(&io, 0x81, 0, out) == KBDD_DEV_EIO);
-    mock_init(&m, &io); m.fail_get = 1;
+    mock_init(&m, &io); m.reply[1] = 0x81; m.reply[2] = 2; m.fail_get = 1;
     CHECK(kbdd_dev_query(&io, 0x81, 0, out) == KBDD_DEV_EIO);
-    mock_init(&m, &io); m.reply[0] = 0x05;            /* wrong report id */
+    mock_init(&m, &io); m.reply[1] = 0x81; m.reply[2] = 2; m.reply[0] = 0x05;  /* wrong report id */
     CHECK(kbdd_dev_query(&io, 0x81, 0, out) == KBDD_DEV_EPROTO);
-    mock_init(&m, &io); m.reply_len = 1;              /* too short */
+    mock_init(&m, &io); m.reply[1] = 0x81; m.reply[2] = 2; m.reply_len = 1;    /* too short */
+    CHECK(kbdd_dev_query(&io, 0x81, 0, out) == KBDD_DEV_EPROTO);
+    /* truncated reads: the zeroed tail must not pass for a real block */
+    mock_init(&m, &io); m.reply[1] = 0x82; m.reply[2] = 3; m.reply_len = 20;
+    CHECK(kbdd_dev_query(&io, 0x82, 3, out) == KBDD_DEV_EPROTO);
+    mock_init(&m, &io); m.reply[1] = 0x82; m.reply[2] = 3; m.reply_len = 263;
+    CHECK(kbdd_dev_query(&io, 0x82, 3, out) == KBDD_DEV_EPROTO);
+    mock_init(&m, &io); m.reply[1] = 0x82; m.reply[2] = 3; m.reply_len = 2;
+    CHECK(kbdd_dev_query(&io, 0x82, 3, out) == KBDD_DEV_EPROTO);
+    /* reply must echo the requested opcode and profile */
+    mock_init(&m, &io); m.reply[1] = 0x02; m.reply[2] = 3;
+    CHECK(kbdd_dev_query(&io, 0x82, 3, out) == KBDD_DEV_EPROTO);
+    mock_init(&m, &io); m.reply[1] = 0x81; m.reply[2] = 3;
+    CHECK(kbdd_dev_query(&io, 0x82, 3, out) == KBDD_DEV_EPROTO);
+    mock_init(&m, &io); m.reply[1] = 0x82; m.reply[2] = 2;
+    CHECK(kbdd_dev_query(&io, 0x82, 3, out) == KBDD_DEV_EPROTO);
+    mock_init(&m, &io); m.reply[1] = 0x81; m.reply[2] = 0;
+    CHECK(kbdd_dev_query(&io, 0x81, 0, out) == KBDD_DEV_EPROTO);
+    mock_init(&m, &io); m.reply[1] = 0x81; m.reply[2] = 5;
     CHECK(kbdd_dev_query(&io, 0x81, 0, out) == KBDD_DEV_EPROTO);
     CHECK(kbdd_dev_query(NULL, 0x81, 0, out) == KBDD_DEV_EINVAL);
 }
@@ -172,6 +192,7 @@ struct kb {
     int ignore_write;
     int fail_after_arm;
     int ignore_select;
+    size_t short_reply;        /* if set, replies are truncated to this many bytes */
     uint8_t flash[264];
     size_t ncommits;
     size_t nselects;
@@ -211,8 +232,9 @@ static ssize_t kb_get(void *ctx, uint8_t *buf, size_t len)
     struct kb *k = ctx;
     memset(buf, 0, len);
     buf[0] = 0x07;
-    if (k->last_op == 0x81) { buf[1] = 0x81; buf[2] = k->active; return 264; }
+    if (k->last_op == 0x81) { buf[1] = 0x81; buf[2] = k->active; return k->short_reply ? (ssize_t)k->short_reply : 264; }
     memcpy(buf, k->block, len < 264 ? len : 264);
+    if (k->short_reply) { memset(buf + k->short_reply, 0, len - k->short_reply); return (ssize_t)k->short_reply; }
     return 264;
 }
 
@@ -285,6 +307,16 @@ static void test_restore_profile(void)
     k.ignore_write = 1;
     CHECK(kbdd_dev_restore_profile(&io, 3, block) == KBDD_DEV_EVERIFY);
     CHECK(k.nwrites == 2 && memcmp(k.block, original, sizeof(original)) == 0);
+
+    /* a keyboard (or fake io) answering with a truncated report must neither
+     * be accepted as a block nor lead to a write */
+    kb_init(&k, &io);
+    memcpy(block, k.block, sizeof(block));
+    block[12] = 7;
+    k.short_reply = 20;
+    CHECK(kbdd_dev_restore_profile(&io, 3, block) == KBDD_DEV_EPROTO);
+    CHECK(k.nwrites == 0);
+    CHECK(kbdd_dev_query(&io, 0x82, 3, original) == KBDD_DEV_EPROTO);
 }
 
 static void test_set_field(void)

@@ -42,7 +42,7 @@ ASAN_DIR   := $(BUILD_DIR)/asan
 
 # Versioning: libkbcore.so.<SOVERSION> is the soname (ABI), libkbcore.so.<VERSION>
 # the real file, libkbcore.so the development symlink.  Both come from kbcore.h.
-LIB_VERSION    := $(shell sed -n 's/^\#define KBCORE_VERSION_STRING "\(.*\)"/\1/p' include/kbcore.h)
+LIB_VERSION    := $(shell sed -nE 's/^\#define KBCORE_VERSION_(MAJOR|MINOR|PATCH)[[:space:]]+([0-9]+)/\2/p' include/kbcore.h | paste -sd.)
 LIB_SOVERSION  := $(shell sed -n 's/^\#define KBCORE_SOVERSION \([0-9]*\)/\1/p' include/kbcore.h)
 LIB_STATIC     := libkbcore.a
 LIB_SHARED     := libkbcore.so

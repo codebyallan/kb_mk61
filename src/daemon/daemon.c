@@ -607,7 +607,7 @@ int kbdd_ipc_handle(const kbdd_ipc_message_t *req, kbdd_ipc_message_t *resp,
             return 0;
         }
         case KBDD_IPC_OP_GET_VERSION: {
-            const char *msg = "kbdd 0.4.1";
+            const char *msg = "kbdd " KBCORE_VERSION_STRING;
             size_t n = strlen(msg);
             resp->payload = malloc(n + 1);
             if (resp->payload == NULL) {
@@ -643,7 +643,7 @@ int kbdd_ipc_handle(const kbdd_ipc_message_t *req, kbdd_ipc_message_t *resp,
         }
         case KBDD_IPC_OP_STATUS: {
             char buf[96];
-            snprintf(buf, sizeof(buf), "kbdd 0.4.1: running, %zu hid interface(s)",
+            snprintf(buf, sizeof(buf), "kbdd " KBCORE_VERSION_STRING ": running, %zu hid interface(s)",
                      kctx != NULL ? kctx->count : (size_t)0);
             return kbdd_reply_text(resp, buf);
         }

@@ -248,6 +248,34 @@ static uint32_t rd32(const uint8_t *p)
            ((uint32_t)p[2] << 16) | ((uint32_t)p[3] << 24);
 }
 
+/* Sets SO_RCVTIMEO/SO_SNDTIMEO on fd. ms == 0 means "no timeout" (blocking). */
+static void set_socket_timeouts(int fd, unsigned long ms)
+{
+    struct timeval tv;
+    if (ms == 0) {
+        tv.tv_sec = 0;
+        tv.tv_usec = 0;
+    } else {
+        tv.tv_sec = (time_t)(ms / 1000UL);
+        tv.tv_usec = (suseconds_t)((ms % 1000UL) * 1000UL);
+    }
+    (void)setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+    (void)setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
+}
+
+static unsigned long kbctl_recv_timeout_ms(void)
+{
+    const char *env = getenv("KBCTL_RECV_TIMEOUT_MS");
+    unsigned long wait_ms = 30000UL; /* 30 s default */
+    if (env != NULL && env[0] != '\0') {
+        char *end = NULL;
+        unsigned long v = strtoul(env, &end, 10);
+        if (end != NULL && *end == '\0' && v <= 300000UL) {
+            wait_ms = v;
+        }
+    }
+    return wait_ms;
+}
 /* Connects to the kbdd socket, retrying while the daemon is still starting
  * (socket missing or refusing connections). KBCTL_CONNECT_TIMEOUT_MS: total wait,
  * default 3000, 0 = single attempt. Returns an fd, or -1 with errno set. */
@@ -311,6 +339,7 @@ static int ipc_request(uint16_t opcode, const uint8_t *payload, uint32_t plen,
                 path, strerror(errno));
         return -1;
     }
+    set_socket_timeouts(fd, kbctl_recv_timeout_ms());
 
     uint8_t header[KBDD_IPC_HEADER_SIZE];
     uint32_t magic = KBDD_IPC_MAGIC;
@@ -346,7 +375,12 @@ static int ipc_request(uint16_t opcode, const uint8_t *payload, uint32_t plen,
 
     uint8_t rheader[KBDD_IPC_HEADER_SIZE];
     if (recv_all(fd, rheader, sizeof(rheader)) != 0) {
-        fprintf(stderr, "kbctl: recv: %s\n", strerror(errno));
+        if (errno == EAGAIN || errno == EWOULDBLOCK) {
+            fprintf(stderr, "kbctl: timed out waiting for daemon response (KBCTL_RECV_TIMEOUT_MS=%lu)\n",
+                    kbctl_recv_timeout_ms());
+        } else {
+            fprintf(stderr, "kbctl: recv: %s\n", strerror(errno));
+        }
         close(fd);
         return -1;
     }
@@ -379,7 +413,12 @@ static int ipc_request(uint16_t opcode, const uint8_t *payload, uint32_t plen,
             return -1;
         }
         if (recv_all(fd, rbuf, rplen) != 0) {
-            fprintf(stderr, "kbctl: recv payload: %s\n", strerror(errno));
+            if (errno == EAGAIN || errno == EWOULDBLOCK) {
+                fprintf(stderr, "kbctl: timed out waiting for daemon response (KBCTL_RECV_TIMEOUT_MS=%lu)\n",
+                        kbctl_recv_timeout_ms());
+            } else {
+                fprintf(stderr, "kbctl: recv payload: %s\n", strerror(errno));
+            }
             free(rbuf);
             close(fd);
             return -1;

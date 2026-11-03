@@ -179,6 +179,8 @@ kbctl profile <1-4>
   `systemctl --user restart kbdd`). Set `KBCTL_CONNECT_TIMEOUT_MS` to change the
   wait (`0` = single attempt, maximum 60000). Offline commands (`led keys`,
   `led effects`, `diff-block`, `help`) never connect.
+- Receive timeout: `kbctl` waits up to 30 s for a daemon response. Set
+  `KBCTL_RECV_TIMEOUT_MS` to change it (`0` = wait indefinitely, maximum 300000).
 - `led direction` changes the animation direction (`0` through `3`) in profile
   byte 5, which is report byte 13.
 - `led report-rate` changes the report-rate index (`0` through `254`); the

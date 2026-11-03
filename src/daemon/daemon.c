@@ -79,8 +79,7 @@ static int kbdd_same_devices(const kbdd_hid_device_t *a, size_t acount,
         return 0;
     }
     for (size_t i = 0; i < acount; i++) {
-        if (a[i].fd < 0 ||
-            strcmp(a[i].path, b[i].path) != 0 ||
+        if (strcmp(a[i].path, b[i].path) != 0 ||
             a[i].vid != b[i].vid ||
             a[i].pid != b[i].pid ||
             a[i].usage_page != b[i].usage_page ||
@@ -104,6 +103,13 @@ static int kbdd_refresh_devices(kbdd_ctx_t *k)
     }
     if (kbdd_same_devices(k->devices, k->count, found, found_count)) {
         kbdd_hidraw_free(found, found_count);
+        /* Same device set — try to re-open any interfaces whose fd is
+         * still closed (open() may have failed on a previous scan). */
+        for (size_t i = 0; i < k->count; i++) {
+            if (k->devices[i].fd < 0) {
+                (void)kbdd_hidraw_open(&k->devices[i]);
+            }
+        }
         return 0;
     }
 
@@ -1471,8 +1477,22 @@ int kbdd_run(int argc, char **argv)
         }
     }
 
-    /* ipc server (optional if runtime dir present) */
+    /* ipc server (required for client communication) */
     kbdd_ipc_server_t *ipc = kbdd_ipc_server_create();
+    if (ipc == NULL) {
+        fprintf(stderr,
+                "kbdd: could not create IPC socket "
+                "(is XDG_RUNTIME_DIR set and valid?)\n");
+        kbdd_hidraw_free(devices, device_count);
+        if (uinput != NULL) {
+            kbdd_uinput_close(uinput);
+        }
+        if (lock_fd >= 0) {
+            flock(lock_fd, LOCK_UN);
+            close(lock_fd);
+        }
+        return 1;
+    }
 
     kbdd_ctx_t kctx;
     memset(&kctx, 0, sizeof(kctx));
@@ -1500,29 +1520,45 @@ int kbdd_run(int argc, char **argv)
         kctx.restore_pending = 1;
         kctx.restore_next_ms = kbdd_now_ms() + 300;
     }
-    if (ipc != NULL) {
-        kbdd_ipc_server_set_close_cb(kbdd_op_client_closed_cb, &kctx);
-    }
+    kbdd_ipc_server_set_close_cb(kbdd_op_client_closed_cb, &kctx);
 
     /* main loop */
     long long next_device_scan_ms = kbdd_now_ms();
+    long long device_scan_interval_ms = 500;
     while (!kbdd_stop_flag) {
-        if (ipc != NULL) {
+        {
             int ipc_timeout = kctx.led_hold ? 20 : 50;
             if (kbdd_op_pending()) {
                 ipc_timeout = 10; /* a worker result may be waiting */
             }
             kbdd_ipc_server_poll(ipc, ipc_timeout, kbdd_ipc_handle, &kctx);
-        } else {
-            /* sleep briefly */
-            struct timespec ts = {0, 50000000L};
-            nanosleep(&ts, NULL);
         }
         kbdd_op_poll(&kctx);
 
         if (kbdd_now_ms() >= next_device_scan_ms) {
-            (void)kbdd_refresh_devices(&kctx);
-            next_device_scan_ms = kbdd_now_ms() + 500;
+            int changed = kbdd_refresh_devices(&kctx);
+            if (changed) {
+                device_scan_interval_ms = 500;
+            } else {
+                /* Check whether any device fd is still closed. If so,
+                 * back off the scan interval to avoid log spam when
+                 * open() keeps failing after a successful enumerate. */
+                int any_closed = 0;
+                for (size_t i = 0; i < kctx.count; i++) {
+                    if (kctx.devices[i].fd < 0) {
+                        any_closed = 1;
+                        break;
+                    }
+                }
+                if (any_closed && device_scan_interval_ms < 30000) {
+                    device_scan_interval_ms *= 2;
+                    if (device_scan_interval_ms > 30000)
+                        device_scan_interval_ms = 30000;
+                } else if (!any_closed) {
+                    device_scan_interval_ms = 500;
+                }
+            }
+            next_device_scan_ms = kbdd_now_ms() + device_scan_interval_ms;
         }
         kbdd_restore_tick(&kctx);
         kbdd_led_tick(&kctx);
@@ -1549,9 +1585,7 @@ int kbdd_run(int argc, char **argv)
 
     /* cleanup */
     kbdd_op_shutdown();
-    if (ipc != NULL) {
-        kbdd_ipc_server_destroy(ipc);
-    }
+    kbdd_ipc_server_destroy(ipc);
     if (uinput != NULL) {
         kbdd_uinput_close(uinput);
     }

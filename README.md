@@ -308,7 +308,10 @@ Frame commands accept `--once` to send one frame without periodic refresh and
 `--stride N` to override the frame layout (default: the detected matrix size).
 The daemon persists the selected lighting mode, custom colors, per-effect
 speed, and global brightness in `$XDG_CONFIG_HOME/kbdd/config` (or
-`~/.config/kbdd/config`). Selecting `solid`, `pos`, or `effect` replaces the
+`~/.config/kbdd/config`). Keys unknown to this version are ignored and kept on save (so a downgrade
+does not lose newer settings); a file with invalid values is moved to
+`config.invalid` rather than overwritten. `kbdd/` may be a symlink to a
+directory you own. Selecting `solid`, `pos`, or `effect` replaces the
 other visual modes, so only one is restored after a keyboard reconnect or
 daemon restart. `led clear` removes all saved colors and disables the saved
 visual mode; brightness remains available as the global setting for the next

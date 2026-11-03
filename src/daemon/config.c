@@ -26,10 +26,18 @@ static int kbdd_ensure_dir(const char *path)
             return -1;
         }
     }
-    if (!S_ISDIR(st.st_mode)) {
-        return -1;
-    }
     if (S_ISLNK(st.st_mode)) {
+        /* A symlinked config dir is normal with dotfile managers (stow).
+         * Accept it when the target is a directory we own that others cannot
+         * write to. Never chmod through the link: that would change the
+         * permissions of the user's dotfiles repository. */
+        if (stat(path, &st) != 0 || !S_ISDIR(st.st_mode) ||
+            st.st_uid != getuid() || (st.st_mode & 0022) != 0) {
+            return -1;
+        }
+        return 0;
+    }
+    if (!S_ISDIR(st.st_mode)) {
         return -1;
     }
     if (st.st_uid != getuid()) {
@@ -89,6 +97,8 @@ static int kbdd_config_path(char *path, size_t size)
 void kbdd_config_defaults(kbdd_ctx_t *k)
 {
     size_t i;
+    k->config_extra[0] = '\0';
+    k->config_extra_len = 0;
     memset(k->config_solid, 0, sizeof(k->config_solid));
     memset(k->config_positions, 0, sizeof(k->config_positions));
     k->config_mode = KBDD_CONFIG_NONE;
@@ -188,8 +198,29 @@ int kbdd_load_config_file(kbdd_ctx_t *k, const char *path)
             k->config_positions[pos][1] = (uint8_t)g;
             k->config_positions[pos][2] = (uint8_t)b;
         } else {
-            fclose(f);
-            return -1;
+            /* Unknown key (probably from a newer version): skip the line and
+             * keep it so the next save does not destroy it. */
+            char rest[256];
+            size_t klen = strlen(key), rlen;
+
+            rest[0] = '\0';
+            if (fgets(rest, sizeof(rest), f) != NULL && strchr(rest, '\n') == NULL) {
+                int ch;
+                while ((ch = fgetc(f)) != EOF && ch != '\n') {
+                }
+            }
+            rest[strcspn(rest, "\r\n")] = '\0';
+            rlen = strlen(rest);
+            fprintf(stderr, "kbdd: config: ignoring unknown key '%s'\n", key);
+            if (k->config_extra_len + klen + rlen + 1 < sizeof(k->config_extra)) {
+                memcpy(k->config_extra + k->config_extra_len, key, klen);
+                memcpy(k->config_extra + k->config_extra_len + klen, rest, rlen);
+                k->config_extra_len += klen + rlen;
+                k->config_extra[k->config_extra_len++] = '\n';
+                k->config_extra[k->config_extra_len] = '\0';
+            } else {
+                fprintf(stderr, "kbdd: config: too many unknown keys to preserve '%s'\n", key);
+            }
         }
     }
     fclose(f);
@@ -200,8 +231,21 @@ int kbdd_load_config_file(kbdd_ctx_t *k, const char *path)
 int kbdd_load_config(kbdd_ctx_t *k)
 {
     char path[768];
+    int rc;
+
     if (k == NULL || kbdd_config_path(path, sizeof(path)) != 0) return -1;
-    return kbdd_load_config_file(k, path);
+    rc = kbdd_load_config_file(k, path);
+    if (rc != 0 && access(path, F_OK) == 0) {
+        /* The caller falls back to defaults and the next save would overwrite
+         * the file: keep the user's original next to it. */
+        char bad[800];
+
+        if (snprintf(bad, sizeof(bad), "%s.invalid", path) < (int)sizeof(bad) &&
+            rename(path, bad) == 0) {
+            fprintf(stderr, "kbdd: invalid config moved to %s\n", bad);
+        }
+    }
+    return rc;
 }
 int kbdd_save_config(const kbdd_ctx_t *k)
 {
@@ -262,6 +306,12 @@ int kbdd_save_config(const kbdd_ctx_t *k)
                         (unsigned)k->config_positions[i][2]);
             }
         }
+    }
+    if (k->config_extra_len > 0 &&
+        fwrite(k->config_extra, 1, k->config_extra_len, f) != k->config_extra_len) {
+        fclose(f);
+        unlink(tmp);
+        return -1;
     }
     if (fclose(f) != 0 || rename(tmp, path) != 0) {
         unlink(tmp);

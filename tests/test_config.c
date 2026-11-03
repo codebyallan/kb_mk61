@@ -3,6 +3,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/stat.h>
 #include <unistd.h>
 
 #include "../src/daemon/kbdd.h"
@@ -134,7 +135,6 @@ static void test_invalid_cases(void)
         "solid 10 20 256\n",              /* blue > 255 */
         "stride 76\n",                    /* stride > max matrix size */
         "pos 75 10 20 30\n",              /* pos out of range */
-        "unknown 1\n",                    /* unknown key */
         "mode\n",                         /* missing value */
         "solid 1 2\n",                    /* missing value */
         "pos 0 1 2\n",                    /* missing value */
@@ -222,6 +222,114 @@ static void test_save_writes_animation_once(void)
     unsetenv("XDG_CONFIG_HOME");
 }
 
+/* A newer version's keys are ignored, not fatal, and survive a save. */
+static void test_unknown_keys_tolerated_and_preserved(void)
+{
+    char dir[] = "/tmp/kbdd-config-unk-XXXXXX";
+    char path[512], line[256];
+    kbdd_ctx_t k, r;
+    int kept = 0;
+    FILE *f;
+
+    memset(&k, 0, sizeof(k));
+    CHECK(load_temp("mode 2\nfuture_key 1 two 3\nbrightness 7\n", &k) == 0);
+    CHECK(k.config_mode == KBDD_CONFIG_SOLID && k.config_brightness == 7);
+
+    CHECK(mkdtemp(dir) != NULL);
+    CHECK(setenv("XDG_CONFIG_HOME", dir, 1) == 0);
+    CHECK(kbdd_save_config(&k) == 0);
+    snprintf(path, sizeof(path), "%s/kbdd/config", dir);
+    f = fopen(path, "r");
+    CHECK(f != NULL);
+    while (f != NULL && fgets(line, sizeof(line), f) != NULL) {
+        if (strcmp(line, "future_key 1 two 3\n") == 0) kept++;
+    }
+    if (f != NULL) fclose(f);
+    CHECK(kept == 1);
+    memset(&r, 0, sizeof(r));
+    CHECK(kbdd_load_config_file(&r, path) == 0);
+    CHECK(r.config_extra_len == k.config_extra_len);   /* no duplication on reload */
+    unlink(path);
+    snprintf(path, sizeof(path), "%s/kbdd", dir);
+    rmdir(path);
+    rmdir(dir);
+    unsetenv("XDG_CONFIG_HOME");
+}
+
+/* Genuinely invalid files are set aside, not overwritten by the next save. */
+static void test_invalid_config_is_kept(void)
+{
+    char dir[] = "/tmp/kbdd-config-bad-XXXXXX";
+    char cfg[600], bad[700], line[64];
+    kbdd_ctx_t k;
+    FILE *f;
+
+    CHECK(mkdtemp(dir) != NULL);
+    CHECK(setenv("XDG_CONFIG_HOME", dir, 1) == 0);
+    snprintf(cfg, sizeof(cfg), "%s/kbdd", dir);
+    CHECK(mkdir(cfg, 0700) == 0);
+    snprintf(cfg, sizeof(cfg), "%s/kbdd/config", dir);
+    f = fopen(cfg, "w");
+    CHECK(f != NULL);
+    if (f != NULL) { fputs("brightness 99\n", f); fclose(f); }
+
+    memset(&k, 0, sizeof(k));
+    CHECK(kbdd_load_config(&k) != 0);
+    CHECK(access(cfg, F_OK) != 0);
+    snprintf(bad, sizeof(bad), "%s.invalid", cfg);
+    f = fopen(bad, "r");
+    CHECK(f != NULL && fgets(line, sizeof(line), f) != NULL && strcmp(line, "brightness 99\n") == 0);
+    if (f != NULL) fclose(f);
+
+    unlink(bad);
+    snprintf(cfg, sizeof(cfg), "%s/kbdd", dir);
+    rmdir(cfg);
+    rmdir(dir);
+    unsetenv("XDG_CONFIG_HOME");
+}
+
+/* ~/.config/kbdd as a symlink (stow, dotfiles) must work, read and write. */
+static void test_symlinked_config_dir(void)
+{
+    char base[] = "/tmp/kbdd-config-lnk-XXXXXX";
+    char target[512], xdg[512], link[600], file[700], bad[800];
+    kbdd_ctx_t k, r;
+    struct stat st;
+
+    CHECK(mkdtemp(base) != NULL);
+    snprintf(target, sizeof(target), "%s/dotfiles", base);
+    snprintf(xdg, sizeof(xdg), "%s/config", base);
+    snprintf(link, sizeof(link), "%s/kbdd", xdg);
+    CHECK(mkdir(target, 0755) == 0);
+    CHECK(mkdir(xdg, 0700) == 0);
+    CHECK(symlink(target, link) == 0);
+    CHECK(setenv("XDG_CONFIG_HOME", xdg, 1) == 0);
+
+    memset(&k, 0, sizeof(k));
+    kbdd_config_defaults(&k);
+    k.config_mode = KBDD_CONFIG_SOLID;
+    k.config_solid[0] = 9;
+    CHECK(kbdd_save_config(&k) == 0);
+    snprintf(file, sizeof(file), "%s/config", target);
+    CHECK(access(file, F_OK) == 0);               /* written through the link */
+    CHECK(stat(target, &st) == 0 && (st.st_mode & 0777) == 0755);   /* not chmod'ed */
+    memset(&r, 0, sizeof(r));
+    CHECK(kbdd_load_config(&r) == 0 && r.config_solid[0] == 9);
+
+    /* a target other users can write to is still refused */
+    CHECK(chmod(target, 0777) == 0);
+    CHECK(kbdd_save_config(&k) != 0);
+
+    unlink(file);
+    snprintf(bad, sizeof(bad), "%s.tmp", file);
+    unlink(bad);
+    unlink(link);
+    rmdir(target);
+    rmdir(xdg);
+    rmdir(base);
+    unsetenv("XDG_CONFIG_HOME");
+}
+
 int main(void)
 {
     test_missing_file_defaults();
@@ -231,6 +339,9 @@ int main(void)
     test_invalid_cases();
     test_boundary_cases();
     test_save_writes_animation_once();
+    test_unknown_keys_tolerated_and_preserved();
+    test_invalid_config_is_kept();
+    test_symlinked_config_dir();
 
     if (failures != 0) {
         fprintf(stderr, "%d test(s) failed\n", failures);

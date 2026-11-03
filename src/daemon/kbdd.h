@@ -11,6 +11,10 @@
 #define KBDD_MAX_DEVICES 16
 #define KBDD_MAX_CLIENTS 16
 
+/* Config lines with keys this version does not know (written by a newer
+ * version) are kept verbatim and written back by save_config. */
+#define KBDD_CONFIG_EXTRA_MAX 4096
+
 /* Per-client outbound queue: stop reading requests above HIGH bytes of unread
  * replies; close a client (or drop watch events) above MAX. */
 #define KBDD_IPC_TX_HIGH (256u * 1024u)
@@ -81,6 +85,8 @@ typedef struct kbdd_ctx {
     uint8_t config_anim;
     uint32_t config_anim_period;
     uint8_t config_anim_rgb[3];
+    char config_extra[KBDD_CONFIG_EXTRA_MAX];
+    size_t config_extra_len;
     int restore_pending;
     unsigned restore_attempts;
     long long restore_next_ms;

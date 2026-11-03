@@ -233,17 +233,17 @@ int kbdd_save_config(const kbdd_ctx_t *k)
             unlink(tmp);
             return -1;
         }
-        if (k->config_mode == KBDD_CONFIG_ANIMATION) {
-            if (fprintf(f, "animation %u %u %u %u %u\n",
-                        (unsigned)k->config_anim,
-                        (unsigned)k->config_anim_period,
-                        (unsigned)k->config_anim_rgb[0],
-                        (unsigned)k->config_anim_rgb[1],
-                        (unsigned)k->config_anim_rgb[2]) < 0) {
-                fclose(f);
-                unlink(tmp);
-                return -1;
-            }
+    }
+    if (k->config_mode == KBDD_CONFIG_ANIMATION) {
+        if (fprintf(f, "animation %u %u %u %u %u\n",
+                    (unsigned)k->config_anim,
+                    (unsigned)k->config_anim_period,
+                    (unsigned)k->config_anim_rgb[0],
+                    (unsigned)k->config_anim_rgb[1],
+                    (unsigned)k->config_anim_rgb[2]) < 0) {
+            fclose(f);
+            unlink(tmp);
+            return -1;
         }
     }
     if (k->config_mode == KBDD_CONFIG_SOLID) {

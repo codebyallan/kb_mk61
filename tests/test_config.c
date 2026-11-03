@@ -180,6 +180,48 @@ static void test_boundary_cases(void)
           k.config_positions[74][2] == 255);
 }
 
+/* save_config must write the animation line once, not once per speed entry. */
+static void test_save_writes_animation_once(void)
+{
+    char dir[] = "/tmp/kbdd-config-save-XXXXXX";
+    char path[512], line[256];
+    kbdd_ctx_t k, r;
+    int anim = 0, speed = 0;
+    FILE *f;
+
+    CHECK(mkdtemp(dir) != NULL);
+    CHECK(setenv("XDG_CONFIG_HOME", dir, 1) == 0);
+    memset(&k, 0, sizeof(k));
+    kbdd_config_defaults(&k);
+    k.config_mode = KBDD_CONFIG_ANIMATION;
+    k.config_anim = KBC_ANIM_CYCLE;
+    k.config_anim_period = 4000;
+    k.config_anim_rgb[0] = 10; k.config_anim_rgb[1] = 20; k.config_anim_rgb[2] = 30;
+    CHECK(kbdd_save_config(&k) == 0);
+
+    snprintf(path, sizeof(path), "%s/kbdd/config", dir);
+    f = fopen(path, "r");
+    CHECK(f != NULL);
+    while (f != NULL && fgets(line, sizeof(line), f) != NULL) {
+        if (strncmp(line, "animation ", 10) == 0) anim++;
+        if (strncmp(line, "speed ", 6) == 0) speed++;
+    }
+    if (f != NULL) fclose(f);
+    CHECK(anim == 1);
+    CHECK(speed == KBC_LED_EFFECT_COUNT);
+
+    memset(&r, 0, sizeof(r));
+    CHECK(kbdd_load_config_file(&r, path) == 0);
+    CHECK(r.config_mode == KBDD_CONFIG_ANIMATION && r.config_anim == KBC_ANIM_CYCLE);
+    CHECK(r.config_anim_period == 4000 && r.config_anim_rgb[2] == 30);
+
+    unlink(path);
+    snprintf(path, sizeof(path), "%s/kbdd", dir);
+    rmdir(path);
+    rmdir(dir);
+    unsetenv("XDG_CONFIG_HOME");
+}
+
 int main(void)
 {
     test_missing_file_defaults();
@@ -188,6 +230,7 @@ int main(void)
     test_valid_animation_config();
     test_invalid_cases();
     test_boundary_cases();
+    test_save_writes_animation_once();
 
     if (failures != 0) {
         fprintf(stderr, "%d test(s) failed\n", failures);

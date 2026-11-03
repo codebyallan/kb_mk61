@@ -43,7 +43,8 @@ typedef enum {
     OP_SAVE_PROFILE,
     OP_RESTORE_PROFILE,
     OP_ENABLE_NOTIF,
-    OP_SEND_FRAME
+    OP_SEND_FRAME,
+    OP_RESTORE_CONFIG
 } kbdd_op_type_t;
 
 typedef struct kbdd_op_node {
@@ -316,6 +317,35 @@ static void op_child_exec(const kbdd_op_node_t *op, int out_fd)
             result.rc = KBDD_DEV_EINVAL;
         }
         break;
+    case OP_RESTORE_CONFIG: {
+        int allow_pw = (op->flags & 0x01u) != 0;
+        int allow_led = (op->flags & 0x02u) != 0;
+        uint8_t cfg_mode = op->mode;
+        uint8_t brightness = op->payload != NULL && op->payload_len >= 1 ? op->payload[0] : 0;
+        uint8_t effect = op->payload != NULL && op->payload_len >= 2 ? op->payload[1] : 0;
+        uint8_t speed = op->payload != NULL && op->payload_len >= 3 ? op->payload[2] : 0;
+
+        result.rc = KBDD_DEV_OK;
+        if (allow_pw) {
+            result.rc = kbdd_dev_set_field(&io, KBC_FIELD_BRIGHTNESS, brightness, NULL);
+            if (result.rc == KBDD_DEV_OK && cfg_mode == KBDD_CONFIG_EFFECT) {
+                result.rc = kbdd_dev_set_field(&io, KBC_FIELD_MODE, effect, NULL);
+                if (result.rc == KBDD_DEV_OK) {
+                    result.rc = kbdd_dev_set_field(&io, KBC_FIELD_SPEED, speed, NULL);
+                }
+            }
+        }
+        if (result.rc == KBDD_DEV_OK && cfg_mode != KBDD_CONFIG_EFFECT && allow_led) {
+            if (op->data != NULL && op->data_len == KBC_LED_BUFFER_SIZE && op->stride > 0) {
+                uint8_t frame[KBC_LED_BUFFER_SIZE];
+                memcpy(frame, op->data, sizeof(frame));
+                result.rc = kbdd_dev_send_frame(&io, frame, op->stride);
+            } else {
+                result.rc = KBDD_DEV_EINVAL;
+            }
+        }
+        break;
+    }
     default:
         result.rc = KBDD_DEV_EINVAL;
         break;
@@ -706,6 +736,51 @@ static void op_complete(kbdd_ctx_t *kctx, kbdd_op_node_t *op,
         }
         break;
     }
+
+    case OP_RESTORE_CONFIG: {
+        long long now = now_ms();
+        if (r->rc == KBDD_DEV_OK) {
+            kctx->restore_pending = 0;
+            kctx->restore_attempts = 0;
+            fprintf(stderr, "kbdd: restored saved LED configuration\n");
+
+            if (op->epoch == g_led_epoch) {
+                uint8_t cfg_mode = op->mode;
+                int allow_led = (op->flags & 0x02u) != 0;
+                if (cfg_mode == KBDD_CONFIG_EFFECT) {
+                    kctx->led_hold = 0;
+                    kctx->led_active = 0;
+                } else if (allow_led && op->data != NULL) {
+                    kctx->led_brightness = kctx->config_brightness;
+                    kctx->led_stride = op->stride;
+                    kctx->led_active = 1;
+                    kctx->led_hold = 1;
+                    kctx->led_next_ms = now + 40;
+                    if (cfg_mode == KBDD_CONFIG_ANIMATION) {
+                        kctx->led_anim = kctx->config_anim;
+                        kctx->led_anim_period = kctx->config_anim_period;
+                        memcpy(kctx->led_anim_rgb, kctx->config_anim_rgb,
+                               sizeof(kctx->led_anim_rgb));
+                        kctx->led_anim_count = op->count;
+                        kctx->led_anim_start_ms = now;
+                    } else {
+                        kctx->led_anim = 0;
+                    }
+                }
+            }
+        } else {
+            kctx->restore_attempts++;
+            if (kctx->restore_attempts >= 10) {
+                kctx->restore_pending = 0;
+                fprintf(stderr,
+                        "kbdd: could not restore saved LED configuration after %u attempts\n",
+                        kctx->restore_attempts);
+            } else {
+                kctx->restore_next_ms = now + 500;
+            }
+        }
+        break;
+    }
     }
 
     op_free(op);
@@ -721,7 +796,11 @@ static void op_start_next(void)
         /* A newer LED command superseded this queued frame: do not touch the
          * keyboard with stale colours. Frames already in flight cannot be
          * recalled; op_complete ignores their state via the same epoch. */
-        if (op->type == OP_SEND_FRAME && op->epoch != g_led_epoch) {
+        if ((op->type == OP_SEND_FRAME || op->type == OP_RESTORE_CONFIG) &&
+            op->epoch != g_led_epoch) {
+            if (op->type == OP_RESTORE_CONFIG && g_ctx != NULL) {
+                g_ctx->restore_pending = 0;
+            }
             op_free(op);
             continue;
         }
@@ -1025,6 +1104,83 @@ int kbdd_op_queue_frame_from_base(const kbdd_ipc_message_t *req,
     op_set_payload(op, req != NULL ? req->payload : NULL,
                    req != NULL ? req->payload_len : 0);
     op_set_data(op, frame, KBC_LED_BUFFER_SIZE);
+    op_enqueue(op);
+    if (g_child_pid < 0) {
+        op_start_next();
+    }
+    return 0;
+}
+
+int kbdd_op_queue_restore_config(kbdd_ctx_t *k, const kbdd_hid_device_t *dev)
+{
+    if (k == NULL || dev == NULL || !kbdd_op_has_room()) {
+        return -1;
+    }
+    if (k->config_mode == KBDD_CONFIG_NONE) {
+        k->restore_pending = 0;
+        return 0;
+    }
+    size_t matrix = dev->model != NULL ? dev->model->matrix_size : 70;
+    size_t stride = k->config_stride != 0 ? k->config_stride : matrix;
+    size_t count = matrix < stride ? matrix : stride;
+    uint8_t flags = (k->allow_profile_write ? 0x01u : 0u) | (k->allow_led ? 0x02u : 0u);
+
+    uint8_t payload[4];
+    payload[0] = k->config_brightness;
+    payload[1] = k->config_effect;
+    payload[2] = k->config_effect < KBC_LED_EFFECT_COUNT ? k->config_speed[k->config_effect] : 0;
+    payload[3] = k->config_anim;
+
+    uint8_t frame[KBC_LED_BUFFER_SIZE];
+    int has_frame = 0;
+
+    if (k->config_mode != KBDD_CONFIG_EFFECT && k->allow_led) {
+        if (kbc_led_frame_page_count(stride) == 0) {
+            return -1;
+        }
+        memset(k->led_base_frame, 0, sizeof(k->led_base_frame));
+        if (k->config_mode == KBDD_CONFIG_SOLID) {
+            kbc_led_frame_fill(k->led_base_frame, stride, count,
+                               k->config_solid[0], k->config_solid[1],
+                               k->config_solid[2]);
+        } else if (k->config_mode == KBDD_CONFIG_ANIMATION) {
+            if (kbc_led_anim_render((kbc_led_anim)k->config_anim, 0,
+                                    k->config_anim_period,
+                                    k->config_anim_rgb[0],
+                                    k->config_anim_rgb[1],
+                                    k->config_anim_rgb[2],
+                                    k->led_base_frame, stride, count) != KBC_OK) {
+                return -1;
+            }
+        } else {
+            for (size_t i = 0; i < count; i++) {
+                kbc_led_frame_set(k->led_base_frame, stride, i,
+                                  k->config_positions[i][0],
+                                  k->config_positions[i][1],
+                                  k->config_positions[i][2]);
+            }
+        }
+        memcpy(frame, k->led_base_frame, sizeof(frame));
+        if (kbc_led_frame_apply_brightness(frame, stride, k->config_brightness) != KBC_OK) {
+            return -1;
+        }
+        memcpy(k->led_frame, frame, sizeof(k->led_frame));
+        has_frame = 1;
+    }
+
+    kbdd_op_node_t *op = op_new(OP_RESTORE_CONFIG, NULL);
+    if (op == NULL) {
+        return -1;
+    }
+    op_attach_dev(op, dev);
+    op->mode = k->config_mode;
+    op->flags = flags;
+    op->stride = stride;
+    op->count = count;
+    op_set_payload(op, payload, sizeof(payload));
+    if (has_frame) {
+        op_set_data(op, frame, sizeof(frame));
+    }
     op_enqueue(op);
     if (g_child_pid < 0) {
         op_start_next();

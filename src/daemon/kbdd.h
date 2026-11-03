@@ -222,6 +222,8 @@ int kbdd_handle_save(kbdd_ctx_t *k, const kbdd_ipc_message_t *req,
                      kbdd_ipc_message_t *resp);
 int kbdd_handle_field(kbdd_ctx_t *k, const kbdd_ipc_message_t *req,
                       kbdd_ipc_message_t *resp);
+int kbdd_restore_config(kbdd_ctx_t *k);
+void kbdd_restore_tick(kbdd_ctx_t *k);
 
 /* daemon */
 int kbdd_run(int argc, char **argv);
@@ -239,6 +241,7 @@ int kbdd_op_queue_restore(const kbdd_ipc_message_t *req, const kbdd_hid_device_t
 int kbdd_op_queue_enable_notif(const kbdd_ipc_message_t *req, const kbdd_hid_device_t *dev);
 int kbdd_op_queue_frame_from_base(const kbdd_ipc_message_t *req, const kbdd_hid_device_t *dev,
                                   const uint8_t *frame, size_t stride, size_t count, uint8_t flags);
+int kbdd_op_queue_restore_config(kbdd_ctx_t *k, const kbdd_hid_device_t *dev);
 void kbdd_op_cancel_led(void);
 int kbdd_op_pending(void);
 int kbdd_op_has_room(void);

@@ -54,8 +54,8 @@ static int kbdd_acquire_lock(void)
 }
 
 
-static int kbdd_restore_config(kbdd_ctx_t *k);
 static long long kbdd_now_ms(void);
+static const kbdd_hid_device_t *kbdd_control_dev(const kbdd_ctx_t *k);
 static void kbdd_yield_input_reports(void *kctx_ptr);
 
 static void kbdd_enable_device_notifications(kbdd_hid_device_t *devices, size_t count)
@@ -972,7 +972,7 @@ int kbdd_handle_field(kbdd_ctx_t *k, const kbdd_ipc_message_t *req,
     return kbdd_reply_text(resp, buf);
 }
 
-static int kbdd_restore_config(kbdd_ctx_t *k)
+int kbdd_restore_config(kbdd_ctx_t *k)
 {
     const kbdd_hid_device_t *dev;
     kbdd_dev_io_t io;
@@ -1064,18 +1064,32 @@ static int kbdd_restore_config(kbdd_ctx_t *k)
     return 0;
 }
 
-static void kbdd_restore_tick(kbdd_ctx_t *k)
+void kbdd_restore_tick(kbdd_ctx_t *k)
 {
-    int rc;
-
     if (k == NULL || !k->restore_pending ||
         kbdd_now_ms() < k->restore_next_ms) {
         return;
     }
-    if (!kbdd_ipc_sync_mode && kbdd_op_pending()) {
-        return; /* retry once the worker is idle */
+    if (k->config_mode == KBDD_CONFIG_NONE) {
+        k->restore_pending = 0;
+        return;
     }
-    rc = kbdd_restore_config(k);
+    const kbdd_hid_device_t *dev = kbdd_control_dev(k);
+    if (dev == NULL) {
+        return;
+    }
+
+    if (!kbdd_ipc_sync_mode) {
+        if (kbdd_op_pending()) {
+            return; /* retry once the worker is idle */
+        }
+        if (kbdd_op_queue_restore_config(k, dev) == 0) {
+            k->restore_next_ms = kbdd_now_ms() + 10000;
+        }
+        return;
+    }
+
+    int rc = kbdd_restore_config(k);
     if (rc == 0) {
         k->restore_pending = 0;
         fprintf(stderr, "kbdd: restored saved LED configuration\n");

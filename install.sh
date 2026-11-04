@@ -8,7 +8,22 @@
 set -euo pipefail
 cd "$(dirname "$0")"
 
-command -v gcc >/dev/null && command -v make >/dev/null || sudo dnf install -y gcc make
+if ! { command -v gcc >/dev/null && command -v make >/dev/null; }; then
+  echo "==> installing build tools (gcc, make)"
+  if   command -v dnf >/dev/null;     then sudo dnf install -y gcc make
+  elif command -v apt-get >/dev/null; then sudo apt-get update && sudo apt-get install -y gcc make
+  elif command -v pacman >/dev/null;  then sudo pacman -S --needed --noconfirm gcc make
+  elif command -v zypper >/dev/null;  then sudo zypper --non-interactive install gcc make
+  else echo "ERROR: unsupported package manager; install gcc and make manually and re-run." >&2; exit 1
+  fi
+fi
+
+# Library dir per distro: Debian/Ubuntu multiarch, Fedora/RHEL/SUSE lib64, else lib.
+MULTIARCH=$(gcc -print-multiarch 2>/dev/null || true)
+if   [ -n "$MULTIARCH" ];                          then LIBDIR="/usr/lib/$MULTIARCH"
+elif [ -d /usr/lib64 ] && [ ! -L /usr/lib64 ];     then LIBDIR=/usr/lib64
+else LIBDIR=/usr/lib
+fi
 
 echo "==> removing old installations (all prefixes)"
 systemctl --user stop kbdd 2>/dev/null || true
@@ -16,7 +31,7 @@ systemctl --user disable kbdd 2>/dev/null || true
 sudo rm -f /usr/local/bin/kbdd /usr/local/bin/kbctl /usr/local/include/kbcore.h \
   /usr/local/lib/libkbcore.* /usr/local/lib64/libkbcore.* \
   /usr/local/lib/systemd/user/kbdd.service /usr/local/lib/udev/rules.d/60-kbdd.rules \
-  /usr/bin/kbdd /usr/bin/kbctl /usr/lib64/libkbcore.* /usr/include/kbcore.h \
+  /usr/bin/kbdd /usr/bin/kbctl /usr/lib/libkbcore.* /usr/lib64/libkbcore.* "/usr/lib/$MULTIARCH"/libkbcore.* /usr/include/kbcore.h \
   /usr/lib/systemd/user/kbdd.service /usr/lib/udev/rules.d/60-kbdd.rules
 rm -f ~/.local/bin/kbctl ~/.local/bin/kbdd ~/.config/systemd/user/kbdd.service
 rm -rf ~/.config/systemd/user/kbdd.service.d
@@ -26,8 +41,9 @@ make clean >/dev/null
 make
 make test
 
-echo "==> installing to /usr"
-sudo make install PREFIX=/usr LIBDIR=/usr/lib64
+echo "==> installing to /usr (libdir: $LIBDIR)"
+sudo make install PREFIX=/usr LIBDIR="$LIBDIR"
+sudo ldconfig 2>/dev/null || true
 sudo udevadm control --reload-rules
 sudo udevadm trigger --subsystem-match=hidraw
 

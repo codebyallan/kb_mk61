@@ -134,8 +134,8 @@ asan: check-arch
 		$(MAKE) --no-print-directory asan-run; \
 	else \
 		rm -f $(BUILD_DIR)/.san-probe.c $(BUILD_DIR)/.san-probe; \
-		echo "WARNING: ASan/UBSan runtime unavailable; running normal unit tests." >&2; \
-		$(MAKE) --no-print-directory test; \
+		echo "ERROR: ASan/UBSan runtime unavailable; install it (e.g. libasan/libubsan) to run 'make asan'." >&2; \
+		exit 1; \
 	fi
 
 asan-run: check-arch $(ASAN_DIR)/fuzz-replay $(ASAN_DIR)/test-core $(ASAN_DIR)/test-device $(ASAN_DIR)/test-handlers $(ASAN_DIR)/test-cli $(ASAN_DIR)/test-config $(ASAN_DIR)/test-ipc

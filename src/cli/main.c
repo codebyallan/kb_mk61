@@ -689,6 +689,7 @@ static int effect_from_arg(const char *a)
     for (m = 0; m < KBC_LED_EFFECT_COUNT; m++) {
         if (strcasecmp(a, kbc_led_effect_name((uint8_t)m)) == 0) return m;
     }
+    if (strcasecmp(a, "custom") == 0) return KBC_LED_EFFECT_CUSTOM;
     return -1;
 }
 

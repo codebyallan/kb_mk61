@@ -205,6 +205,8 @@ struct kb {
     int fail_slot_at;          /* 1-based slot report that fails (0 = none) */
     size_t fail_block_first;   /* first N block (0x02) writes fail (0 = none) */
     int fail_opts;             /* 0x0B writes fail */
+    int fail_keymap;           /* 0x03 writes fail */
+    int fail_macro;            /* 0x05 writes fail */
     size_t order[8];           /* sequence of opcodes received */
     size_t norder;
     int drop_writes;           /* ignore the first N block (0x02) writes */
@@ -217,6 +219,12 @@ static ssize_t kb_set(void *ctx, const uint8_t *buf, size_t len)
     k->last_op = buf[1];
     if (buf[1] != 0x81 && buf[1] != 0x82 && k->norder < 8) k->order[k->norder++] = buf[1];
     if (buf[1] == KBC_OP_PROFILE_EXTRA && k->fail_opts) {
+        return -1;
+    }
+    if (buf[1] == KBC_OP_KEY_MATRIX && k->fail_keymap) {
+        return -1;
+    }
+    if (buf[1] == KBC_OP_MACRO && k->fail_macro) {
         return -1;
     }
     if (buf[1] >= 0x08 && buf[1] <= 0x0A) {
@@ -636,6 +644,39 @@ static void test_set_colors(void)
     CHECK(strstr(kbdd_dev_last_diag(), "restored (confirmed)") != NULL);
 }
 
+static void test_set_macro(void)
+{
+    struct kb k; kbdd_dev_io_t io; uint8_t prof = 0;
+    uint8_t map[3][KBC_KEY_POSITIONS];
+    uint8_t macro[KBC_MACRO_SIZE];
+
+    memset(map, 0, sizeof(map));
+    map[0][0] = 0xB2;
+    memset(macro, 0, sizeof(macro));
+    macro[1] = 1; /* 1 repetition */
+
+    kb_init(&k, &io);
+    CHECK(kbdd_dev_set_macro(&io, map, 0, macro, &prof) == KBDD_DEV_OK);
+    CHECK(prof == 3);
+    CHECK(k.norder >= 2 && k.order[0] == KBC_OP_KEY_MATRIX &&
+          k.order[1] == KBC_OP_MACRO);
+
+    /* Macro write fails: marker is rolled back to the factory code. */
+    kb_init(&k, &io); k.fail_macro = 1;
+    memset(map, 0, sizeof(map)); map[0][0] = 0xB2;
+    CHECK(kbdd_dev_set_macro(&io, map, 0, macro, NULL) == KBDD_DEV_EIO);
+    CHECK(k.norder >= 4 && k.order[0] == KBC_OP_KEY_MATRIX &&
+          k.order[1] == KBC_OP_MACRO && k.order[k.norder - 1] == KBC_OP_KEY_MATRIX);
+    CHECK(strstr(kbdd_dev_last_diag(), "rolled back") != NULL);
+
+    /* Keymap write fails: no macro is attempted. */
+    kb_init(&k, &io); k.fail_keymap = 1;
+    memset(map, 0, sizeof(map)); map[0][0] = 0xB2;
+    CHECK(kbdd_dev_set_macro(&io, map, 0, macro, NULL) == KBDD_DEV_EIO);
+    CHECK(k.norder == 2 && k.order[0] == KBC_OP_KEY_MATRIX &&
+          k.order[1] == KBC_OP_KEY_MATRIX);
+}
+
 static void test_set_opts(void)
 {
     struct kb k; kbdd_dev_io_t io; uint8_t prof = 0;
@@ -663,6 +704,7 @@ int main(void)
     test_set_effect_rejects();
     test_set_effect_custom();
     test_set_opts();
+    test_set_macro();
     test_set_effect_rollback();
     test_restore_profile();
     test_query_active();

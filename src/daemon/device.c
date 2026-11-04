@@ -682,5 +682,40 @@ static int keymap_write(const kbdd_dev_io_t *io, const uint8_t map[3][KBC_KEY_PO
         }
         io->sleep_ms(io->ctx, 200u);
     }
+
+    /* Macro data write failed: best-effort rollback of the 0xB2 marker we just
+     * wrote, restoring the factory code for that key so the matrix does not
+     * reference a macro that was never stored.  The matrix is write-only, so
+     * the rollback itself cannot be verified by read-back. */
+    {
+        uint8_t rollback[3][KBC_KEY_POSITIONS];
+        uint8_t rdata[KBC_FEATURE_DATA_SIZE];
+        uint8_t rrep[KBC_FEATURE_REPORT_SIZE];
+        size_t layer = key / KBC_KEY_POSITIONS;
+        size_t pos = key % KBC_KEY_POSITIONS;
+        uint8_t factory[KBC_KEY_POSITIONS];
+
+        memcpy(rollback, map, sizeof(rollback));
+        if (kbc_keymap_default(layer, factory) == 0) {
+            rollback[layer][pos] = factory[pos];
+        } else {
+            rollback[layer][pos] = 0;
+        }
+        memset(rdata, 0, sizeof(rdata));
+        memcpy(rdata, rollback, 3 * KBC_KEY_POSITIONS);
+        if (kbc_build_feature_report(KBC_OP_KEY_MATRIX, act[2], 0, params, rdata, sizeof(rdata),
+                                     rrep, sizeof(rrep)) == KBC_OK) {
+            for (tries = 0; tries < 2; tries++) {
+                if (io->set_feature(io->ctx, rrep, sizeof(rrep)) >= 0) {
+                    io->sleep_ms(io->ctx, 300u);
+                    break;
+                }
+                io->sleep_ms(io->ctx, 200u);
+            }
+        }
+        (void)snprintf(g_diag, sizeof(g_diag),
+                       "profile %u: macro write failed; keymap marker rolled back to factory code",
+                       (unsigned)act[2]);
+    }
     return KBDD_DEV_EIO;
 }

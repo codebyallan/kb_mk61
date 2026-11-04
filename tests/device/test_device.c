@@ -204,6 +204,7 @@ struct kb {
     uint8_t slot[3][264];
     int fail_slot_at;          /* 1-based slot report that fails (0 = none) */
     size_t fail_block_first;   /* first N block (0x02) writes fail (0 = none) */
+    int fail_opts;             /* 0x0B writes fail */
     size_t order[8];           /* sequence of opcodes received */
     size_t norder;
     int drop_writes;           /* ignore the first N block (0x02) writes */
@@ -215,6 +216,9 @@ static ssize_t kb_set(void *ctx, const uint8_t *buf, size_t len)
     if (len != 264) return -1;
     k->last_op = buf[1];
     if (buf[1] != 0x81 && buf[1] != 0x82 && k->norder < 8) k->order[k->norder++] = buf[1];
+    if (buf[1] == KBC_OP_PROFILE_EXTRA && k->fail_opts) {
+        return -1;
+    }
     if (buf[1] >= 0x08 && buf[1] <= 0x0A) {
         if (k->fail_slot_at && (int)k->nslot + 1 == k->fail_slot_at) return -1;
         memcpy(k->slot[buf[1] - 0x08], buf, len);
@@ -632,6 +636,20 @@ static void test_set_colors(void)
     CHECK(strstr(kbdd_dev_last_diag(), "restored (confirmed)") != NULL);
 }
 
+static void test_set_opts(void)
+{
+    struct kb k; kbdd_dev_io_t io; uint8_t prof = 0;
+
+    kb_init(&k, &io);
+    CHECK(kbdd_dev_set_opts(&io, 1, 0, &prof) == KBDD_DEV_OK);
+    CHECK(prof == 3 && k.norder == 1 && k.order[0] == KBC_OP_PROFILE_EXTRA);
+
+    kb_init(&k, &io); k.fail_opts = 1;
+    CHECK(kbdd_dev_set_opts(&io, 0, 1, NULL) == KBDD_DEV_EIO);
+    CHECK(k.norder == 2 && k.order[0] == KBC_OP_PROFILE_EXTRA &&
+          k.order[1] == KBC_OP_PROFILE_EXTRA);
+}
+
 int main(void)
 {
     test_set_colors();
@@ -644,6 +662,7 @@ int main(void)
     test_set_effect_ok();
     test_set_effect_rejects();
     test_set_effect_custom();
+    test_set_opts();
     test_set_effect_rollback();
     test_restore_profile();
     test_query_active();

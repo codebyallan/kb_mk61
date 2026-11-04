@@ -273,10 +273,17 @@ int kbdd_dev_set_opts(const kbdd_dev_io_t *io, uint8_t direction, uint8_t win_lo
     rep[KBC_FEATURE_DATA_OFFSET + 3] = direction ? 1 : 0;
     rep[KBC_FEATURE_DATA_OFFSET + 4] = 0;
     rep[KBC_FEATURE_DATA_OFFSET + 5] = win_lock ? 1 : 0;
-    if (io->set_feature(io->ctx, rep, sizeof(rep)) < 0) return KBDD_DEV_EIO;
-    io->sleep_ms(io->ctx, 45u);
-    if (profile_out != NULL) *profile_out = act[2];
-    return KBDD_DEV_OK;
+    /* Write-only in the protocol: retry on transport failure, matching the
+     * other write-only helpers (set_keymap, custom slots). */
+    for (int tries = 0; tries < 2; tries++) {
+        if (io->set_feature(io->ctx, rep, sizeof(rep)) >= 0) {
+            io->sleep_ms(io->ctx, 45u);
+            if (profile_out != NULL) *profile_out = act[2];
+            return KBDD_DEV_OK;
+        }
+        io->sleep_ms(io->ctx, 200u);
+    }
+    return KBDD_DEV_EIO;
 }
 
 int kbdd_dev_set_colors(const kbdd_dev_io_t *io, const kbdd_color_edit_t *ce, uint8_t *profile_out)

@@ -205,6 +205,7 @@ struct kb {
     int fail_slot_at;          /* 1-based slot report that fails (0 = none) */
     size_t fail_block_first;   /* first N block (0x02) writes fail (0 = none) */
     int fail_opts;             /* 0x0B writes fail */
+    int fail_opts_first;       /* only the first 0x0B write fails (retry test) */
     int fail_keymap;           /* 0x03 writes fail */
     int fail_macro;            /* 0x05 writes fail */
     size_t order[8];           /* sequence of opcodes received */
@@ -218,8 +219,14 @@ static ssize_t kb_set(void *ctx, const uint8_t *buf, size_t len)
     if (len != 264) return -1;
     k->last_op = buf[1];
     if (buf[1] != 0x81 && buf[1] != 0x82 && k->norder < 8) k->order[k->norder++] = buf[1];
-    if (buf[1] == KBC_OP_PROFILE_EXTRA && k->fail_opts) {
-        return -1;
+    if (buf[1] == KBC_OP_PROFILE_EXTRA) {
+        if (k->fail_opts) {
+            return -1;
+        }
+        if (k->fail_opts_first > 0) {
+            k->fail_opts_first--;
+            return -1;
+        }
     }
     if (buf[1] == KBC_OP_KEY_MATRIX && k->fail_keymap) {
         return -1;
@@ -677,6 +684,36 @@ static void test_set_macro(void)
           k.order[1] == KBC_OP_KEY_MATRIX);
 }
 
+static void test_set_keymap(void)
+{
+    struct kb k; kbdd_dev_io_t io; uint8_t prof = 0;
+    uint8_t map[3][KBC_KEY_POSITIONS];
+
+    memset(map, 0, sizeof(map));
+    map[0][0] = 0x04; /* 'a' */
+    map[1][1] = 0x05;
+
+    kb_init(&k, &io);
+    CHECK(kbdd_dev_set_keymap(&io, map, &prof) == KBDD_DEV_OK);
+    CHECK(prof == 3);
+    CHECK(k.norder == 1 && k.order[0] == KBC_OP_KEY_MATRIX);
+
+    /* 0xB2 without macro data is rejected client-side at the device API. */
+    memset(map, 0, sizeof(map));
+    map[0][0] = 0xB2;
+    kb_init(&k, &io);
+    CHECK(kbdd_dev_set_keymap(&io, map, NULL) == KBDD_DEV_EINVAL);
+    CHECK(k.norder == 0);
+
+    /* Transport failure is retried and reported. */
+    memset(map, 0, sizeof(map));
+    map[0][0] = 0x04;
+    kb_init(&k, &io); k.fail_keymap = 1;
+    CHECK(kbdd_dev_set_keymap(&io, map, NULL) == KBDD_DEV_EIO);
+    CHECK(k.norder == 2 && k.order[0] == KBC_OP_KEY_MATRIX &&
+          k.order[1] == KBC_OP_KEY_MATRIX);
+}
+
 static void test_set_opts(void)
 {
     struct kb k; kbdd_dev_io_t io; uint8_t prof = 0;
@@ -688,6 +725,13 @@ static void test_set_opts(void)
     kb_init(&k, &io); k.fail_opts = 1;
     CHECK(kbdd_dev_set_opts(&io, 0, 1, NULL) == KBDD_DEV_EIO);
     CHECK(k.norder == 2 && k.order[0] == KBC_OP_PROFILE_EXTRA &&
+          k.order[1] == KBC_OP_PROFILE_EXTRA);
+
+    /* First write fails, second succeeds: retry must recover. */
+    kb_init(&k, &io); k.fail_opts_first = 1;
+    CHECK(kbdd_dev_set_opts(&io, 1, 1, &prof) == KBDD_DEV_OK);
+    CHECK(prof == 3 && k.norder == 2 &&
+          k.order[0] == KBC_OP_PROFILE_EXTRA &&
           k.order[1] == KBC_OP_PROFILE_EXTRA);
 }
 
@@ -704,6 +748,7 @@ int main(void)
     test_set_effect_rejects();
     test_set_effect_custom();
     test_set_opts();
+    test_set_keymap();
     test_set_macro();
     test_set_effect_rollback();
     test_restore_profile();

@@ -85,6 +85,10 @@ typedef struct kbdd_ctx {
     uint8_t config_anim;
     uint32_t config_anim_period;
     uint8_t config_anim_rgb[3];
+    /* 0x0B profile options (write-only, not verifiable by read-back).
+     * Persisted so they survive a daemon restart. */
+    uint8_t config_opts_direction;  /* transposed arrows: 0 or 1 */
+    uint8_t config_opts_win_lock;   /* Win lock: 0 or 1 */
     char config_extra[KBDD_CONFIG_EXTRA_MAX];
     size_t config_extra_len;
     int restore_pending;

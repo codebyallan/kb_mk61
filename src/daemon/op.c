@@ -1001,6 +1001,10 @@ static void op_complete(kbdd_ctx_t *kctx, kbdd_op_node_t *op,
             if (n >= 0 && (size_t)n < sizeof(buf)) {
                 op_reply(kctx, op, buf, (uint32_t)n + 1);
             }
+            /* Persist write-only opts so they survive a daemon restart. */
+            kctx->config_opts_direction = op->payload[0];
+            kctx->config_opts_win_lock = op->payload[1];
+            (void)kbdd_save_config(kctx);
         } else {
             op_send_error(kctx, op, r);
         }

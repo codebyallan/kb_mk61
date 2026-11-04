@@ -111,6 +111,8 @@ void kbdd_config_defaults(kbdd_ctx_t *k)
     for (i = 0; i < KBC_LED_EFFECT_COUNT; i++) {
         k->config_speed[i] = 50;
     }
+    k->config_opts_direction = 0;
+    k->config_opts_win_lock = 0;
 }
 
 int kbdd_load_config_file(kbdd_ctx_t *k, const char *path)
@@ -161,6 +163,18 @@ int kbdd_load_config_file(kbdd_ctx_t *k, const char *path)
                 return -1;
             }
             k->config_brightness = (uint8_t)value;
+        } else if (strcmp(key, "direction") == 0) {
+            if (fscanf(f, "%u", &value) != 1 || value > 1) {
+                fclose(f);
+                return -1;
+            }
+            k->config_opts_direction = (uint8_t)value;
+        } else if (strcmp(key, "win_lock") == 0) {
+            if (fscanf(f, "%u", &value) != 1 || value > 1) {
+                fclose(f);
+                return -1;
+            }
+            k->config_opts_win_lock = (uint8_t)value;
         } else if (strcmp(key, "speed") == 0) {
             if (fscanf(f, "%u", &value) != 1 || value >= KBC_LED_EFFECT_COUNT) {
                 fclose(f);
@@ -264,9 +278,11 @@ int kbdd_save_config(const kbdd_ctx_t *k)
         unlink(tmp);
         return -1;
     }
-    if (fprintf(f, "mode %u\neffect %u\nbrightness %u\n",
+    if (fprintf(f, "mode %u\neffect %u\nbrightness %u\ndirection %u\nwin_lock %u\n",
                 (unsigned)k->config_mode, (unsigned)k->config_effect,
-                (unsigned)k->config_brightness) < 0) {
+                (unsigned)k->config_brightness,
+                (unsigned)k->config_opts_direction,
+                (unsigned)k->config_opts_win_lock) < 0) {
         fclose(f);
         unlink(tmp);
         return -1;

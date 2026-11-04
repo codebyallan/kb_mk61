@@ -209,6 +209,99 @@ static void test_boundary_cases(void)
           k.config_positions[74][2] == 255);
 }
 
+/* 0x0B opts: only 0 or 1 are accepted. */
+static void test_valid_opts_config(void)
+{
+    kbdd_ctx_t k;
+
+    CHECK(load_temp("direction 1\nwin_lock 0\n", &k) == 0);
+    CHECK(k.config_opts_direction == 1);
+    CHECK(k.config_opts_win_lock == 0);
+
+    CHECK(load_temp("direction 0\nwin_lock 1\n", &k) == 0);
+    CHECK(k.config_opts_direction == 0);
+    CHECK(k.config_opts_win_lock == 1);
+
+    /* defaults when absent */
+    CHECK(load_temp("brightness 7\n", &k) == 0);
+    CHECK(k.config_opts_direction == 0);
+    CHECK(k.config_opts_win_lock == 0);
+}
+
+static void test_invalid_opts_config(void)
+{
+    static const char * const cases[] = {
+        "direction 2\n",         /* > 1 */
+        "win_lock 3\n",          /* > 1 */
+        "direction\n",           /* missing value */
+        "win_lock\n",            /* missing value */
+        "direction abc\n",       /* not a number */
+        "win_lock -1\n",         /* negative */
+    };
+
+    for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
+        kbdd_ctx_t k;
+        memset(&k, 0, sizeof(k));
+        int rc = load_temp(cases[i], &k);
+        if (rc != -1) {
+            fprintf(stderr, "invalid opts case %u unexpectedly succeeded\n",
+                    (unsigned)i);
+            failures++;
+        }
+        /* defaults must be preserved on failure */
+        CHECK(k.config_opts_direction == 0);
+        CHECK(k.config_opts_win_lock == 0);
+    }
+}
+
+/* Save/load round-trip for 0x0B opts. */
+static void test_save_load_opts_roundtrip(void)
+{
+    char dir[] = "/tmp/kbdd-config-opts-XXXXXX";
+    char path[512];
+    kbdd_ctx_t k, r;
+
+    CHECK(mkdtemp(dir) != NULL);
+    CHECK(setenv("XDG_CONFIG_HOME", dir, 1) == 0);
+
+    memset(&k, 0, sizeof(k));
+    kbdd_config_defaults(&k);
+    k.config_mode = KBDD_CONFIG_SOLID;
+    k.config_solid[0] = 1; k.config_solid[1] = 2; k.config_solid[2] = 3;
+    k.config_opts_direction = 1;
+    k.config_opts_win_lock = 1;
+    CHECK(kbdd_save_config(&k) == 0);
+
+    snprintf(path, sizeof(path), "%s/kbdd/config", dir);
+    memset(&r, 0, sizeof(r));
+    CHECK(kbdd_load_config_file(&r, path) == 0);
+    CHECK(r.config_opts_direction == 1);
+    CHECK(r.config_opts_win_lock == 1);
+    CHECK(r.config_mode == KBDD_CONFIG_SOLID);
+    CHECK(r.config_solid[0] == 1 && r.config_solid[1] == 2 && r.config_solid[2] == 3);
+
+    /* Verify the on-disk lines exist. */
+    {
+        FILE *f = fopen(path, "r");
+        char line[64];
+        int saw_direction = 0, saw_win_lock = 0;
+        CHECK(f != NULL);
+        while (f != NULL && fgets(line, sizeof(line), f) != NULL) {
+            if (strcmp(line, "direction 1\n") == 0) saw_direction = 1;
+            if (strcmp(line, "win_lock 1\n") == 0) saw_win_lock = 1;
+        }
+        if (f != NULL) fclose(f);
+        CHECK(saw_direction == 1);
+        CHECK(saw_win_lock == 1);
+    }
+
+    unlink(path);
+    snprintf(path, sizeof(path), "%s/kbdd", dir);
+    rmdir(path);
+    rmdir(dir);
+    unsetenv("XDG_CONFIG_HOME");
+}
+
 /* save_config must write the animation line once, not once per speed entry. */
 static void test_save_writes_animation_once(void)
 {
@@ -368,6 +461,9 @@ int main(void)
     test_valid_custom_config();
     test_invalid_cases();
     test_boundary_cases();
+    test_valid_opts_config();
+    test_invalid_opts_config();
+    test_save_load_opts_roundtrip();
     test_save_writes_animation_once();
     test_unknown_keys_tolerated_and_preserved();
     test_invalid_config_is_kept();

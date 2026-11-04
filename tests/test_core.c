@@ -1017,7 +1017,7 @@ static void test_profile_block_write(void)
         CHECK(out[i] == blk[i]);              /* everything else untouched */
     }
     CHECK(kbc_profile_block_set_mode(blk, 264, 2, 12, out, 264) == KBC_OK);
-    CHECK(kbc_profile_block_set_mode(blk, 264, 2, 11, out, 264) == KBC_ERR_RANGE);
+    CHECK(kbc_profile_block_set_mode(blk, 264, 2, 11, out, 264) == KBC_OK && out[11] == 11);  /* game mode (WASD) */
     CHECK(kbc_profile_block_set_mode(blk, 264, 2, 13, out, 264) == KBC_ERR_RANGE);
     CHECK(kbc_profile_block_set_mode(blk, 264, 2, 15, out, 264) == KBC_ERR_RANGE);
     CHECK(kbc_profile_block_set_mode(blk, 264, 3, 1, out, 264) == KBC_ERR_PROTOCOL);  /* wrong profile */

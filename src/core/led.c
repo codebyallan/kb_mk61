@@ -225,7 +225,7 @@ kbc_status kbc_profile_block_set_field(const uint8_t *block, size_t block_len,
 
     switch (field) {
     case KBC_FIELD_MODE:
-        if (value > KBC_LED_EFFECT_LIGHTING || value == 11) return KBC_ERR_RANGE;
+        if (value > KBC_LED_EFFECT_LIGHTING) return KBC_ERR_RANGE;
         off = KBC_PBLK_OFF_MODE;
         break;
     case KBC_FIELD_BRIGHTNESS:

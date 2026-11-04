@@ -274,7 +274,8 @@ kbctl led save
   Requires `KBDD_ENABLE_LED=1`.
 - `led release` stops periodic LED frame streaming.
 - `led effects` lists the built-in effects supported by the keyboard.
-- `led effect <name|index>` changes the active profile effect.
+- `led effect <name|index>` changes the active profile effect (including `game_mode`,
+  index 11: WASD-only lighting, no colors).
 - `led brightness <0-10>` changes brightness; `0` is off and `10` is maximum.
 - `led speed <2-102>` changes the raw effect speed; lower values are faster. It is
   a single profile byte (block offset 19) shared by every effect, so it behaves the

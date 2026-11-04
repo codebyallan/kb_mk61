@@ -279,13 +279,15 @@ static void test_set_effect_ok(void)
     CHECK(k.writes[0][1] == 0x02 && k.writes[0][2] == 3 && k.writes[0][11] == 1);
     for (i = 3; i < 264; i++) if (i != 11) CHECK(k.block[i] == orig[i]);
     CHECK(k.block[11] == 1);
+    /* game mode (WASD, effect 11) is selectable like any built-in effect */
+    kb_init(&k, &io);
+    CHECK(kbdd_dev_set_effect(&io, 11, &prof) == KBDD_DEV_OK && k.block[11] == 11);
 }
 
 static void test_set_effect_rejects(void)
 {
     struct kb k; kbdd_dev_io_t io;
     kb_init(&k, &io);
-    CHECK(kbdd_dev_set_effect(&io, 11, NULL) == KBDD_DEV_EINVAL);
     CHECK(kbdd_dev_set_effect(&io, 13, NULL) == KBDD_DEV_EINVAL);
     CHECK(kbdd_dev_set_effect(&io, 14, NULL) == KBDD_DEV_EINVAL);
     CHECK(kbdd_dev_set_effect(&io, 99, NULL) == KBDD_DEV_EINVAL);

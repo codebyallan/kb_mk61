@@ -70,7 +70,8 @@ typedef enum {
     OP_SEND_FRAME,
     OP_RESTORE_CONFIG,
     OP_SET_KEYMAP,
-    OP_SET_MACRO
+    OP_SET_MACRO,
+    OP_SET_OPTS
 } kbdd_op_type_t;
 
 typedef struct kbdd_op_node {
@@ -364,6 +365,14 @@ static void worker_exec(const kbdd_worker_req_t *req, kbdd_op_result_t *result)
         if (req->payload_len == 3u * KBC_KEY_POSITIONS) {
             result->rc = kbdd_dev_set_keymap(&io, (const uint8_t (*)[KBC_KEY_POSITIONS])req->payload,
                                              &result->profile);
+        } else {
+            result->rc = KBDD_DEV_EINVAL;
+        }
+        break;
+    case OP_SET_OPTS:
+        if (req->payload_len == KBDD_OPTS_PAYLOAD_SIZE) {
+            result->rc = kbdd_dev_set_opts(&io, req->payload[0], req->payload[1],
+                                           &result->profile);
         } else {
             result->rc = KBDD_DEV_EINVAL;
         }
@@ -982,6 +991,21 @@ static void op_complete(kbdd_ctx_t *kctx, kbdd_op_node_t *op,
         }
         break;
 
+    case OP_SET_OPTS:
+        if (r->rc == KBDD_DEV_OK) {
+            char buf[128];
+            int n = snprintf(buf, sizeof(buf),
+                             "ok: direction=%u winlock=%u written to profile %u (write-only, not verifiable by read-back)",
+                             (unsigned)op->payload[0], (unsigned)op->payload[1],
+                             (unsigned)r->profile);
+            if (n >= 0 && (size_t)n < sizeof(buf)) {
+                op_reply(kctx, op, buf, (uint32_t)n + 1);
+            }
+        } else {
+            op_send_error(kctx, op, r);
+        }
+        break;
+
     case OP_SET_MACRO:
         if (r->rc == KBDD_DEV_OK) {
             char buf[96];
@@ -1394,6 +1418,12 @@ int kbdd_op_queue_field(const kbdd_ipc_message_t *req,
         op_start_next();
     }
     return 0;
+}
+
+int kbdd_op_queue_opts(const kbdd_ipc_message_t *req,
+                       const kbdd_hid_device_t *dev)
+{
+    return op_submit(OP_SET_OPTS, req, dev, 0, 0, 0);
 }
 
 int kbdd_op_queue_colors(const kbdd_ipc_message_t *req,

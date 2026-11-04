@@ -59,6 +59,7 @@ static void usage(FILE *f)
     fputs("  led report-rate <0-254>       Set report-rate index (stored as index + 1 in byte 8)\n", f);
     fputs("    opts: --once (send one frame, no streaming)  --stride N (frame layout, default = matrix size)\n", f);
     fputs("          sweep: --delay MS  --color RRGGBB  --from N\n", f);
+    fputs("  opts <dir 0|1> <winlock 0|1>  Set 0x0B options (transposed arrows, Win lock)\n", f);
     fputs("  help                          Show this help\n", f);
     fputs("  version                       Show version\n", f);
     fputs("\nUse 'kbctl help <command>' for detailed help.\n", f);
@@ -1650,6 +1651,26 @@ int main(int argc, char **argv)
             return 1;
         }
         int perr = print_reply(resp, rlen);
+        free(resp);
+        return perr;
+    }
+    if (strcmp(cmd, "opts") == 0) {
+        unsigned long d, w;
+        uint8_t payload[2];
+        uint8_t *resp = NULL;
+        uint32_t rlen = 0;
+        int perr;
+        if (argc != 4 || kbctl_parse_uint(argv[2], 1, &d) != 0 ||
+            kbctl_parse_uint(argv[3], 1, &w) != 0) {
+            fprintf(stderr, "kbctl: opts <direction 0|1> <winlock 0|1>\n");
+            return 2;
+        }
+        payload[0] = (uint8_t)d; payload[1] = (uint8_t)w;
+        if (ipc_request(KBDD_IPC_OP_SET_OPTS, payload, 2, &resp, &rlen) != 0) {
+            free(resp);
+            return 1;
+        }
+        perr = print_reply(resp, rlen);
         free(resp);
         return perr;
     }

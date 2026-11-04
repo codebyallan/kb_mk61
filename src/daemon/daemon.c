@@ -619,6 +619,31 @@ int kbdd_handle_field(kbdd_ctx_t *k, const kbdd_ipc_message_t *req,
                : kbdd_queue_busy(resp);
 }
 
+int kbdd_handle_opts(kbdd_ctx_t *k, const kbdd_ipc_message_t *req,
+                     kbdd_ipc_message_t *resp)
+{
+    if (!k->allow_profile_write) {
+        return kbdd_reply_text(resp,
+            "error: profile writes are disabled. Start kbdd with KBDD_ENABLE_PROFILE_WRITE=1");
+    }
+    if (req->payload == NULL || req->payload_len != KBDD_OPTS_PAYLOAD_SIZE ||
+        req->payload[0] > 1 || req->payload[1] > 1) {
+        return kbdd_reply_text(resp, "error: payload must be [direction 0/1, win_lock 0/1]");
+    }
+    if (kbdd_control_dev(k) == NULL) {
+        return kbdd_reply_text(resp, "error: no keyboard control interface available");
+    }
+    if (!kbdd_op_has_room()) {
+        return kbdd_queue_busy(resp);
+    }
+    k->led_hold = 0;
+    k->led_active = 0;
+    kbdd_op_cancel_led();
+    return kbdd_op_queue_opts(req, kbdd_control_dev(k)) == 0
+               ? KBDD_HANDLER_DEFER
+               : kbdd_queue_busy(resp);
+}
+
 void kbdd_restore_tick(kbdd_ctx_t *k)
 {
     if (k == NULL || !k->restore_pending ||
@@ -859,6 +884,8 @@ int kbdd_ipc_handle(const kbdd_ipc_message_t *req, kbdd_ipc_message_t *resp,
             return kbdd_handle_macro(kctx, req, resp);
         case KBDD_IPC_OP_SET_FIELD:
             return kbdd_handle_field(kctx, req, resp);
+        case KBDD_IPC_OP_SET_OPTS:
+            return kbdd_handle_opts(kctx, req, resp);
         default: {
             const char *msg = "error: unsupported command";
             size_t n = strlen(msg);

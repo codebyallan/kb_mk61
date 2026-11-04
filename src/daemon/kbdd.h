@@ -158,6 +158,7 @@ int kbdd_dev_set_colors(const kbdd_dev_io_t *io, const kbdd_color_edit_t *ce, ui
 const char *kbdd_dev_last_diag(void);
 void kbdd_dev_clear_diag(void);
 int kbdd_dev_set_field(const kbdd_dev_io_t *io, int field, uint8_t value, uint8_t *profile_out);
+int kbdd_dev_set_opts(const kbdd_dev_io_t *io, uint8_t direction, uint8_t win_lock, uint8_t *profile_out);
 int kbdd_dev_restore_profile(const kbdd_dev_io_t *io, uint8_t profile,
                              const uint8_t block[264]);
 
@@ -257,6 +258,8 @@ int kbdd_handle_macro(kbdd_ctx_t *k, const kbdd_ipc_message_t *req,
                       kbdd_ipc_message_t *resp);
 int kbdd_handle_field(kbdd_ctx_t *k, const kbdd_ipc_message_t *req,
                       kbdd_ipc_message_t *resp);
+int kbdd_handle_opts(kbdd_ctx_t *k, const kbdd_ipc_message_t *req,
+                     kbdd_ipc_message_t *resp);
 void kbdd_restore_tick(kbdd_ctx_t *k);
 
 /* daemon */
@@ -267,6 +270,7 @@ int kbdd_op_queue_read_active(const kbdd_ipc_message_t *req, const kbdd_hid_devi
 int kbdd_op_queue_read_block(const kbdd_ipc_message_t *req, const kbdd_hid_device_t *dev);
 int kbdd_op_queue_switch(const kbdd_ipc_message_t *req, const kbdd_hid_device_t *dev);
 int kbdd_op_queue_effect(const kbdd_ipc_message_t *req, const kbdd_hid_device_t *dev);
+int kbdd_op_queue_opts(const kbdd_ipc_message_t *req, const kbdd_hid_device_t *dev);
 int kbdd_op_queue_field(const kbdd_ipc_message_t *req, const kbdd_hid_device_t *dev,
                         size_t stride, uint8_t flags, const uint8_t *frame);
 int kbdd_op_queue_colors(const kbdd_ipc_message_t *req, const kbdd_hid_device_t *dev);

@@ -35,6 +35,8 @@
 #define KBDD_KEYMAP_PAYLOAD_SIZE 210u
 #define KBDD_IPC_OP_SET_MACRO 24u   /* payload [210 keymap (macro key = 0xB2), key index 0..139 (70 = Fn layer), 256 macro bytes] */
 #define KBDD_MACRO_PAYLOAD_SIZE 467u
+#define KBDD_IPC_OP_SET_OPTS 25u    /* payload [direction 0/1, win_lock 0/1]: 0x0B opts of the active profile (write-only) */
+#define KBDD_OPTS_PAYLOAD_SIZE 2u
 #define KBDD_IPC_OP_RESTORE_PROFILE 20u /* payload [profile 1..4, raw 264-byte read block] */
 
 /* LED_SET payload: [flags, stride, mode, pos, r, g, b] */

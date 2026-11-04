@@ -254,6 +254,31 @@ int kbdd_dev_set_field(const kbdd_dev_io_t *io, int field, uint8_t value, uint8_
     return edit_profile(io, field, value, NULL, profile_out);
 }
 
+/* 0x0B: direction / 6KRO(0) / win lock. Write-only: the keyboard has no read-back for it. */
+int kbdd_dev_set_opts(const kbdd_dev_io_t *io, uint8_t direction, uint8_t win_lock,
+                      uint8_t *profile_out)
+{
+    uint8_t act[264], rep[KBC_FEATURE_REPORT_SIZE];
+    int rc;
+
+    if (io == NULL) return KBDD_DEV_EINVAL;
+    rc = kbdd_dev_query(io, KBC_OP_READ_ACTIVE_PROFILE, 0, act);
+    if (rc != KBDD_DEV_OK) return rc;
+    if (act[1] != KBC_OP_READ_ACTIVE_PROFILE || act[2] < 1 || act[2] > 4) return KBDD_DEV_EPROTO;
+
+    memset(rep, 0, sizeof(rep));
+    rep[0] = KBC_FEATURE_REPORT_ID;
+    rep[1] = KBC_OP_PROFILE_EXTRA;
+    rep[2] = act[2];
+    rep[KBC_FEATURE_DATA_OFFSET + 3] = direction ? 1 : 0;
+    rep[KBC_FEATURE_DATA_OFFSET + 4] = 0;
+    rep[KBC_FEATURE_DATA_OFFSET + 5] = win_lock ? 1 : 0;
+    if (io->set_feature(io->ctx, rep, sizeof(rep)) < 0) return KBDD_DEV_EIO;
+    io->sleep_ms(io->ctx, 45u);
+    if (profile_out != NULL) *profile_out = act[2];
+    return KBDD_DEV_OK;
+}
+
 int kbdd_dev_set_colors(const kbdd_dev_io_t *io, const kbdd_color_edit_t *ce, uint8_t *profile_out)
 {
     if (ce == NULL || ce->count < 1 || ce->count > 14) return KBDD_DEV_EINVAL;

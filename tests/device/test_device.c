@@ -192,6 +192,7 @@ struct kb {
     int ignore_write;
     int fail_after_arm;
     int fail_clean_writes;
+    int fail_clean_restore;   /* save_profile: restoration write (4th 0x02) fails */
     int ignore_restore_write;
     int ignore_select;
     size_t short_reply;        /* if set, replies are truncated to this many bytes */
@@ -254,6 +255,10 @@ static ssize_t kb_set(void *ctx, const uint8_t *buf, size_t len)
             return -1;
         }
         if (k->fail_clean_writes && (k->nwrites == 2 || k->nwrites == 3)) {
+            return -1;
+        }
+        if (k->fail_clean_restore && k->nwrites == 4) {
+            k->fail_clean_restore = 0;
             return -1;
         }
         if (!k->ignore_write && !(k->ignore_restore_write && k->nwrites == 4)) {
@@ -473,15 +478,23 @@ static void test_save_profile(void)
     CHECK(kbdd_dev_save_profile(&io, NULL) == KBDD_DEV_EIO);
     CHECK(k.nwrites == 4 && k.block[134] == 1);                   /* restoration was attempted */
 
-    /* clean write fails twice, restoration succeeds and block is verified */
+    /* clean write fails twice, restoration succeeds and block is verified:
+     * device restored to original state, save reports I/O error */
     kb_init(&k, &io); k.block[134] = 255; k.fail_clean_writes = 1;
-    CHECK(kbdd_dev_save_profile(&io, NULL) == KBDD_DEV_EVERIFY);
+    CHECK(kbdd_dev_save_profile(&io, NULL) == KBDD_DEV_EIO);
     CHECK(k.nwrites == 4 && k.block[134] == 255);
 
     /* clean write fails twice, restoration write succeeds but block not restored */
     kb_init(&k, &io); k.block[134] = 255; k.fail_clean_writes = 1; k.ignore_restore_write = 1;
     CHECK(kbdd_dev_save_profile(&io, NULL) == KBDD_DEV_EIO);
     CHECK(k.nwrites == 4 && k.block[134] == 1);
+
+    /* clean write fails twice, restoration write also fails: EIO, no read-back,
+     * device state may be inconsistent (armed but not cleaned) */
+    kb_init(&k, &io); k.block[134] = 255; k.fail_clean_writes = 1;
+    k.fail_clean_restore = 1;
+    CHECK(kbdd_dev_save_profile(&io, NULL) == KBDD_DEV_EIO);
+    CHECK(k.nwrites == 4);
 
     kb_init(&k, &io); k.block[134] = 255; k.active = 9;            /* bogus 0x81 */
     CHECK(kbdd_dev_save_profile(&io, NULL) == KBDD_DEV_EPROTO && k.nwrites == 0);

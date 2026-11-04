@@ -413,16 +413,24 @@ int kbdd_dev_save_profile(const kbdd_dev_io_t *io, uint8_t *profile_out)
     if (clean_rc < 0) {
         /*
          * The arm write may already have changed device state. Make one
-         * explicit restoration attempt and verify it before reporting failure.
+         * explicit restoration attempt to the original block and verify it
+         * before reporting failure. Never leave the keyboard armed without a
+         * confirmed clean state.
          */
-        if (io->set_feature(io->ctx, clean, sizeof(clean)) < 0) return KBDD_DEV_EIO;
-        io->sleep_ms(io->ctx, 200u);
-        rc = kbdd_dev_query(io, KBC_OP_READ_PROFILE_BLOCK, prof, chk);
-        if (rc != KBDD_DEV_OK ||
-            memcmp(chk + 3, cur + 3, sizeof(chk) - 3) != 0) {
-            return rc != KBDD_DEV_OK ? rc : KBDD_DEV_EIO;
+        uint8_t undo[KBC_FEATURE_REPORT_SIZE];
+        if (kbc_profile_block_to_write(cur, sizeof(cur), prof, undo,
+                                       sizeof(undo)) == KBC_OK) {
+            if (io->set_feature(io->ctx, undo, sizeof(undo)) < 0) {
+                return KBDD_DEV_EIO;
+            }
+            io->sleep_ms(io->ctx, 200u);
+            rc = kbdd_dev_query(io, KBC_OP_READ_PROFILE_BLOCK, prof, chk);
+            if (rc != KBDD_DEV_OK ||
+                memcmp(chk + 3, cur + 3, sizeof(chk) - 3) != 0) {
+                return rc != KBDD_DEV_OK ? rc : KBDD_DEV_EIO;
+            }
         }
-        return KBDD_DEV_EVERIFY;
+        return KBDD_DEV_EIO;
     }
     io->sleep_ms(io->ctx, 200u);
     rc = kbdd_dev_query(io, KBC_OP_READ_PROFILE_BLOCK, prof, chk);

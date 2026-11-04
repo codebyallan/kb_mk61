@@ -931,9 +931,158 @@ static void test_led_only_has_no_flash_access(void)
     CHECK(kbdd_ipc_handle(&req, &resp, &g_ctx) == 0);
     CHECK(resp.payload != NULL && strstr((char *)resp.payload, "disabled") != NULL);
 
+    {
+        uint8_t cu[210] = {0};
+        make_msg(&req, KBDD_IPC_OP_SAVE_CUSTOM, cu, sizeof(cu));
+        setup_resp(&resp);
+        CHECK(kbdd_ipc_handle(&req, &resp, &g_ctx) == 0);
+        CHECK(resp.payload != NULL && strstr((char *)resp.payload, "disabled") != NULL);
+    }
+
     CHECK(g_mock->nsent == 0);       /* nothing reached the device */
     CHECK(g_ctx.save_next_ms == 0);  /* a refused save must not arm the cooldown */
     free_resp(&resp);
+}
+
+static void test_save_custom_payload(void)
+{
+    kbdd_ipc_message_t req, resp;
+    uint8_t cu[210] = {0};
+
+    memset(&resp, 0, sizeof(resp));
+    setup_ctx(0, 1);
+    mock_init();
+    make_msg(&req, KBDD_IPC_OP_SAVE_CUSTOM, cu, 209);          /* wrong size: rejected, no cooldown */
+    setup_resp(&resp);
+    CHECK(kbdd_handle_save_custom(&g_ctx, &req, &resp) == 0);
+    CHECK(resp.payload != NULL && strstr((char *)resp.payload, "70 x") != NULL);
+    CHECK(g_ctx.save_next_ms == 0 && g_mock->nsent == 0);
+    free_resp(&resp);
+
+    /* valid: queued, shares the save cooldown and runs to completion.  The mock
+     * starts in the clean commit state so the save is actually performed. */
+    mock_init();
+    g_mock->reply[11] = 1;                                     /* current effect */
+    g_mock->reply[134] = 255;                                  /* clean, no custom data */
+    make_msg(&req, KBDD_IPC_OP_SAVE_CUSTOM, cu, sizeof(cu));
+    setup_resp(&resp);
+    CHECK(kbdd_handle_save_custom(&g_ctx, &req, &resp) == KBDD_HANDLER_DEFER);
+    CHECK(g_ctx.save_next_ms != 0);
+    CHECK(g_ctx.led_active == 0 && g_ctx.led_hold == 0 && g_ctx.led_anim == 0);
+    wait_for_op(&g_ctx);
+    CHECK(!kbdd_op_pending());
+    CHECK(g_ctx.config_mode == KBDD_CONFIG_CUSTOM);
+    CHECK(g_mock->nsent >= 6);                                 /* 2 reads + 3 slots + block */
+    CHECK(g_ctx.save_next_ms != 0);
+    free_resp(&resp);
+
+    setup_resp(&resp);
+    CHECK(kbdd_handle_save_custom(&g_ctx, &req, &resp) == 0);
+    CHECK(resp.payload != NULL && strstr((char *)resp.payload, "rate-limited") != NULL);
+    free_resp(&resp);
+    kbdd_op_shutdown();
+}
+
+static void test_clear_custom_payload(void)
+{
+    kbdd_ipc_message_t req, resp;
+    uint8_t cu[210] = {0};
+
+    memset(&resp, 0, sizeof(resp));
+    setup_ctx(0, 1);                                           /* clear: no payload allowed */
+    mock_init();
+    make_msg(&req, KBDD_IPC_OP_CLEAR_CUSTOM, cu, 1);
+    setup_resp(&resp);
+    CHECK(kbdd_handle_clear_custom(&g_ctx, &req, &resp) == 0);
+    CHECK(resp.payload != NULL && strstr((char *)resp.payload, "no payload") != NULL);
+    CHECK(g_ctx.save_next_ms == 0 && g_mock->nsent == 0);
+    free_resp(&resp);
+
+    /* custom data present: leaving custom mode switches the saved config back
+     * to the resulting effect (15 -> wave). */
+    mock_init();
+    g_mock->reply[11] = KBC_LED_EFFECT_CUSTOM;
+    g_mock->reply[134] = 1;
+    g_ctx.led_active = 1;
+    g_ctx.led_hold = 1;
+    g_ctx.led_anim = 1;
+    make_msg(&req, KBDD_IPC_OP_CLEAR_CUSTOM, NULL, 0);
+    setup_resp(&resp);
+    CHECK(kbdd_handle_clear_custom(&g_ctx, &req, &resp) == KBDD_HANDLER_DEFER);
+    CHECK(g_ctx.save_next_ms != 0);
+    CHECK(g_ctx.led_active == 0 && g_ctx.led_hold == 0 && g_ctx.led_anim == 0);
+    wait_for_op(&g_ctx);
+    CHECK(!kbdd_op_pending());
+    CHECK(g_ctx.config_mode == KBDD_CONFIG_EFFECT);
+    CHECK(g_ctx.config_effect == 0);
+    CHECK(g_mock->nsent >= 4);                                 /* 2 reads + 2 block writes */
+    free_resp(&resp);
+
+    setup_resp(&resp);
+    CHECK(kbdd_handle_clear_custom(&g_ctx, &req, &resp) == 0);
+    CHECK(resp.payload != NULL && strstr((char *)resp.payload, "rate-limited") != NULL);
+    free_resp(&resp);
+    kbdd_op_shutdown();
+}
+
+/* A custom save must win over a frame that is already in flight: the stale
+ * completion has to be discarded instead of re-arming the stream. */
+static void test_custom_cancels_led(void)
+{
+    kbdd_ipc_message_t req, resp;
+    uint8_t cu[210] = {0};
+    uint8_t frame[KBC_LED_BUFFER_SIZE];
+
+    mock_init();
+    g_mock->reply[11] = 1;
+    g_mock->reply[134] = 255;
+    setup_ctx(1, 1);
+    g_ctx.led_active = 1;
+    g_ctx.led_hold = 1;
+    g_ctx.led_stride = 70;
+
+    CHECK(kbc_led_frame_fill(frame, 70, 70, 4, 5, 6) == KBC_OK);
+    CHECK(kbdd_op_queue_frame_from_base(NULL, &g_dev, frame, 70, 70,
+                                        KBDD_LED_FLAG_HOLD) == 0);
+    CHECK(kbdd_op_pending());
+
+    make_msg(&req, KBDD_IPC_OP_SAVE_CUSTOM, cu, sizeof(cu));
+    setup_resp(&resp);
+    CHECK(kbdd_handle_save_custom(&g_ctx, &req, &resp) == KBDD_HANDLER_DEFER);
+    CHECK(g_ctx.led_active == 0 && g_ctx.led_hold == 0);
+
+    wait_for_op(&g_ctx);
+    CHECK(!kbdd_op_pending());
+    /* Neither the stale frame completion nor the save may restart streaming. */
+    CHECK(g_ctx.led_active == 0);
+    CHECK(g_ctx.led_hold == 0);
+    CHECK(g_ctx.led_anim == 0);
+    CHECK(g_ctx.config_mode == KBDD_CONFIG_CUSTOM);
+    free_resp(&resp);
+    kbdd_op_shutdown();
+}
+
+/* Saved custom layouts are keyboard-owned: reconnecting must not overwrite
+ * effect 15 with the previous streaming configuration. */
+static void test_restore_ignores_custom(void)
+{
+    mock_init();
+    setup_ctx(1, 1);
+    g_ctx.config_mode = KBDD_CONFIG_CUSTOM;
+    g_ctx.config_effect = KBC_LED_EFFECT_CUSTOM;
+    g_ctx.restore_pending = 1;
+    g_ctx.restore_next_ms = 0;
+
+    kbdd_restore_tick(&g_ctx);
+    CHECK(g_ctx.restore_pending == 0);
+    CHECK(!kbdd_op_pending());
+    CHECK(g_mock->nsent == 0);
+
+    g_ctx.restore_pending = 1;
+    CHECK(kbdd_op_queue_restore_config(&g_ctx, &g_dev) == 0);
+    CHECK(g_ctx.restore_pending == 0);
+    CHECK(!kbdd_op_pending());
+    kbdd_op_shutdown();
 }
 
 static void test_save_cooldown(void)
@@ -1011,6 +1160,30 @@ static void test_async_effect(void)
     wait_for_op(&g_ctx);
     CHECK(!kbdd_op_pending());
     CHECK(g_mock->nsent >= 1);
+    kbdd_op_shutdown();
+    free_resp(&resp);
+}
+
+/* Selecting effect 15 must not store an invalid effect value in the config;
+ * the mode alone records that the keyboard owns the display. */
+static void test_async_effect_custom(void)
+{
+    kbdd_ipc_message_t req, resp;
+    uint8_t effect = KBC_LED_EFFECT_CUSTOM;
+    memset(&resp, 0, sizeof(resp));
+    setup_ctx(1, 1);
+    mock_init();
+    g_mock->reply[11] = 5;
+    g_mock->reply[134] = 1;
+    g_mock->reply[135] = 2;
+
+    make_msg(&req, KBDD_IPC_OP_SET_EFFECT, &effect, 1);
+    setup_resp(&resp);
+    CHECK(kbdd_handle_effect(&g_ctx, &req, &resp) == KBDD_HANDLER_DEFER);
+    wait_for_op(&g_ctx);
+    CHECK(!kbdd_op_pending());
+    CHECK(g_mock->reply[11] == 15 && g_mock->reply[134] == 1);
+    CHECK(g_ctx.config_mode == KBDD_CONFIG_CUSTOM);
     kbdd_op_shutdown();
     free_resp(&resp);
 }
@@ -1110,6 +1283,9 @@ int main(void)
     test_env_gates();
     test_led_only_has_no_flash_access();
     test_save_cooldown();
+    test_save_custom_payload();
+    test_clear_custom_payload();
+    test_custom_cancels_led();
     test_payload_validation();
     test_no_device();
     test_led_release();
@@ -1127,8 +1303,10 @@ int main(void)
     test_async_led_deferred_reply();
     test_async_profile();
     test_async_effect();
+    test_async_effect_custom();
     test_async_field();
     test_async_restore_config();
+    test_restore_ignores_custom();
     test_async_read_active();
 
     if (failures != 0) {

@@ -339,6 +339,58 @@ KBCORE_API kbc_status kbc_profile_block_set_field(const uint8_t *block, size_t b
  * and 15 = custom need extra commands and are rejected). */
 KBCORE_API kbc_status kbc_profile_block_set_mode(const uint8_t *block, size_t block_len, uint8_t profile, uint8_t mode, uint8_t *out, size_t out_len);
 
+/* Per-key custom LED data stored in the keyboard (effect 15, flash-backed).
+ * One slot = three reports: 0x08 colours (planar R/G/B x 70), 0x09 frames (one frame
+ * holding every key) and 0x0A effects (static).  The slot only becomes active, and is
+ * committed to flash, by the 0x02 block write built by kbc_profile_block_custom_report.
+ *
+ * Only slot 0 can be activated/committed: the keyboard commits a block when byte 134
+ * changes to 1 or 255, and slot 0 is the only slot whose count is 1.  Slots 1..4 are
+ * still accepted by kbc_custom_slot_reports for raw writes, but
+ * kbc_profile_block_custom_report returns KBC_ERR_UNSUPPORTED for them. */
+#define KBC_CUSTOM_KEYS          70   /* = KBC_KEY_POSITIONS */
+#define KBC_CUSTOM_SLOTS         5
+#define KBC_LED_EFFECT_CUSTOM    15
+#define KBC_CUSTOM_EFFECT_STATIC 2
+/* out[0]=0x08, out[1]=0x09, out[2]=0x0A reports for `slot` (0..4) of `hw_profile` (1..4). */
+KBCORE_API kbc_status kbc_custom_slot_reports(uint8_t hw_profile, uint8_t slot,
+                                              const uint8_t rgb[KBC_CUSTOM_KEYS][3],
+                                              uint8_t out[3][KBC_FEATURE_REPORT_SIZE]);
+/* 0x02 report: `block` unchanged except effect = 15, slot count = 1 (byte 134),
+ * current slot = 0 (byte 135) and the spectrum flags cleared.  A change of byte 134
+ * to 1 makes the keyboard commit the block to flash.  Only slot 0 is supported;
+ * KBC_ERR_UNSUPPORTED is returned for other slots and for unknown block states
+ * (effect 14 or a count outside 1..5/255).
+ *
+ * If the block is already at count 1 (a previous custom save), writing this report
+ * does not change byte 134 and therefore does not commit.  Use
+ * kbc_profile_block_custom_arm_report() first; the 1 -> 255 -> 1 sequence commits
+ * twice and ends in the same custom state. */
+KBCORE_API kbc_status kbc_profile_block_custom_report(const uint8_t *block, size_t block_len,
+                                                      uint8_t profile, uint8_t slot,
+                                                      uint8_t *out, size_t out_len);
+
+/* Same as kbc_profile_block_custom_report(..., slot 0) but with byte 134 set to 255.
+ * Used as the intermediate step when the block is already at count 1: changing 1 -> 255
+ * commits the old slot data, then the final report changes 255 -> 1 and commits the new
+ * slot data. */
+KBCORE_API kbc_status kbc_profile_block_custom_arm_report(const uint8_t *block, size_t block_len,
+                                                          uint8_t profile, uint8_t *out, size_t out_len);
+
+/* 0x02 report that re-selects the stored custom layout without touching the slot data:
+ * effect = 15, current slot = 0 and the spectrum flags cleared.  Byte 134 (count) is
+ * left unchanged, so this does not commit to flash; the layout must already be stored
+ * (count 1..KBC_CUSTOM_SLOTS).  KBC_ERR_UNSUPPORTED when there is no custom data or
+ * the block is in the unknown effect-14 state. */
+KBCORE_API kbc_status kbc_profile_block_custom_select_report(const uint8_t *block, size_t block_len,
+                                                             uint8_t profile, uint8_t *out, size_t out_len);
+
+/* 0x02 report that leaves custom mode: byte 134 back to 255 (commits to flash) and, if the
+ * effect is 15, effect 0 (wave). Everything else unchanged. KBC_ERR_UNSUPPORTED when the
+ * block holds no custom data (byte 134 not in 1..KBC_CUSTOM_SLOTS) or is effect 14. */
+KBCORE_API kbc_status kbc_profile_block_custom_clear_report(const uint8_t *block, size_t block_len,
+                                                            uint8_t profile, uint8_t *out, size_t out_len);
+
 /* Built-in LED effects (hardware mode index 0..12; 14 = observed device
  * mode preserved by profile writes; 15 = custom). */
 #define KBC_LED_EFFECT_COUNT   13

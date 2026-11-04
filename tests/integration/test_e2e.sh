@@ -67,12 +67,29 @@ check_rc 2 "needs a colour"           -- led solid zz
 check_rc 2 "led brightness"           -- led brightness 11
 check_rc 2 "Usage:"                   -- status extra
 
-# 6. Gated writes are refused by the daemon (rc 1) and never reach a device.
+# 6. 'led custom' argument validation is client-side too (rc 2).
+check_rc 2 "led custom [--base"      -- led custom
+check_rc 2 "led custom [--base"      -- led custom esc
+check_rc 2 "unknown key"             -- led custom nope=ff0000
+check_rc 2 "led custom [--base"      -- led custom ,=ff0000
+check_rc 2 "led custom [--base"      -- led custom --base ff0000 --base 00ff00 esc=ff0000
+check_rc 2 "led custom [--base"      -- led custom esc=ff0000 --base ff0000
+check_rc 2 "led custom [--base"      -- led custom clear extra
+
+# 7. Gated writes are refused by the daemon (rc 1) and never reach a device.
 check_rc 1 "LED control is disabled"        -- led solid ff0000
 check_rc 1 "profile switching is disabled"  -- profile 1
 check_rc 1 "cannot read"                    -- restore-profile 1 /nonexistent/file
+check_rc 1 "profile writes are disabled"    -- led custom esc=ff0000
+check_rc 1 "profile writes are disabled"    -- led custom clear
 
-# 7. Daemon survived all of the above and shuts down cleanly on SIGTERM.
+# 'led effect 13/14' are reserved and rejected client-side; 15 re-selects the
+# stored custom layout and needs a device, so it only reaches the daemon here.
+check_rc 2 "led effect <name|index>"       -- led effect 13
+check_rc 2 "led effect <name|index>"       -- led effect 14
+check_rc 1 "profile writes are disabled"   -- led effect 15
+
+# 8. Daemon survived all of the above and shuts down cleanly on SIGTERM.
 kill -0 "$pid" 2>/dev/null || fail "kbdd died during the test"
 kill -TERM "$pid" 2>/dev/null
 wait "$pid"; rc=$?

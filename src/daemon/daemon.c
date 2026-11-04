@@ -121,7 +121,8 @@ static int kbdd_refresh_devices(kbdd_ctx_t *k)
     }
     fprintf(stderr, "kbdd: device set changed, now tracking %zu interface(s)\n",
             found_count);
-    if (found_count != 0 && k->config_mode != KBDD_CONFIG_NONE) {
+    if (found_count != 0 && k->config_mode != KBDD_CONFIG_NONE &&
+        k->config_mode != KBDD_CONFIG_CUSTOM) {
         k->restore_pending = 1;
         k->restore_attempts = 0;
         k->restore_next_ms = kbdd_now_ms() + 300;
@@ -206,6 +207,7 @@ const char *kbdd_dev_err(int rc)
     case KBDD_DEV_EPROTO: return "error: unexpected response from the device (layout check failed, nothing written)";
     case KBDD_DEV_ENOSAVE: return "error: this profile cannot be saved safely (custom LED data present, or effect 14/15)";
     case KBDD_DEV_EVERIFY: return "error: write not confirmed by read-back; original block restored";
+    case KBDD_DEV_ENOCUSTOM: return "error: no custom LED layout is stored in this profile (run 'kbctl led custom ...' first)";
     default:              return "error: unknown";
     }
 }
@@ -477,6 +479,64 @@ int kbdd_handle_save(kbdd_ctx_t *k, const kbdd_ipc_message_t *req,
     return KBDD_HANDLER_DEFER;
 }
 
+static int kbdd_handle_custom(kbdd_ctx_t *k, const kbdd_ipc_message_t *req,
+                              kbdd_ipc_message_t *resp, int clear)
+{
+    const kbdd_hid_device_t *dev;
+    long long wait_ms;
+    uint8_t was_hold, was_active, was_anim;
+
+    if (!k->allow_profile_write) {
+        return kbdd_reply_text(resp,
+            "error: profile writes are disabled. Start kbdd with KBDD_ENABLE_PROFILE_WRITE=1");
+    }
+    if (clear ? req->payload_len != 0 : (req->payload == NULL || req->payload_len != 3u * KBC_CUSTOM_KEYS)) {
+        return kbdd_reply_text(resp, clear ? "error: clear takes no payload"
+                                           : "error: payload must be 70 x [r,g,b]");
+    }
+    dev = kbdd_control_dev(k);
+    if (dev == NULL) {
+        return kbdd_reply_text(resp, "error: no keyboard control interface available");
+    }
+    if (!kbdd_op_has_room()) {
+        return kbdd_queue_busy(resp);
+    }
+    wait_ms = kbdd_save_cooldown_take(k);          /* same flash-wear guard as SAVE_BLOCK */
+    if (wait_ms != 0) {
+        return kbdd_save_rate_limited(resp, wait_ms);
+    }
+    was_hold = (uint8_t)(k->led_hold ? 1 : 0);
+    was_active = (uint8_t)(k->led_active ? 1 : 0);
+    was_anim = (uint8_t)(k->led_anim ? 1 : 0);
+    k->led_hold = 0;
+    k->led_active = 0;
+    k->led_anim = 0;
+    /* Invalidate frames queued before this save.  Without the epoch bump a
+     * stale completion would re-arm streaming after we just stopped it. */
+    kbdd_op_cancel_led();
+    if ((clear ? kbdd_op_queue_clear_custom(req, dev, 0)
+               : kbdd_op_queue_save_custom(req, dev, 0)) != 0) {
+        k->led_hold = was_hold;
+        k->led_active = was_active;
+        k->led_anim = was_anim;
+        k->save_next_ms = 0;
+        return kbdd_queue_busy(resp);
+    }
+    return KBDD_HANDLER_DEFER;
+}
+
+int kbdd_handle_save_custom(kbdd_ctx_t *k, const kbdd_ipc_message_t *req,
+                            kbdd_ipc_message_t *resp)
+{
+    return kbdd_handle_custom(k, req, resp, 0);
+}
+
+int kbdd_handle_clear_custom(kbdd_ctx_t *k, const kbdd_ipc_message_t *req,
+                             kbdd_ipc_message_t *resp)
+{
+    return kbdd_handle_custom(k, req, resp, 1);
+}
+
 int kbdd_handle_field(kbdd_ctx_t *k, const kbdd_ipc_message_t *req,
                              kbdd_ipc_message_t *resp)
 {
@@ -521,7 +581,8 @@ void kbdd_restore_tick(kbdd_ctx_t *k)
         kbdd_now_ms() < k->restore_next_ms) {
         return;
     }
-    if (k->config_mode == KBDD_CONFIG_NONE) {
+    if (k->config_mode == KBDD_CONFIG_NONE ||
+        k->config_mode == KBDD_CONFIG_CUSTOM) {
         k->restore_pending = 0;
         return;
     }
@@ -744,6 +805,10 @@ int kbdd_ipc_handle(const kbdd_ipc_message_t *req, kbdd_ipc_message_t *resp,
             return kbdd_handle_colors(kctx, req, resp);
         case KBDD_IPC_OP_SAVE_BLOCK:
             return kbdd_handle_save(kctx, req, resp);
+        case KBDD_IPC_OP_SAVE_CUSTOM:
+            return kbdd_handle_save_custom(kctx, req, resp);
+        case KBDD_IPC_OP_CLEAR_CUSTOM:
+            return kbdd_handle_clear_custom(kctx, req, resp);
         case KBDD_IPC_OP_SET_FIELD:
             return kbdd_handle_field(kctx, req, resp);
         default: {
@@ -851,7 +916,7 @@ int kbdd_run(int argc, char **argv)
         kctx.allow_led = (want_led != NULL && strcmp(want_led, "1") == 0);
         kctx.allow_profile_write = (want_pw != NULL && strcmp(want_pw, "1") == 0);
     }
-    if (kctx.count != 0) {
+    if (kctx.count != 0 && kctx.config_mode != KBDD_CONFIG_CUSTOM) {
         kctx.restore_pending = 1;
         kctx.restore_next_ms = kbdd_now_ms() + 300;
     }

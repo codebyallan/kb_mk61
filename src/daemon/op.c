@@ -38,8 +38,11 @@
 #define KBDD_OP_TIMEOUT_MS 10000
 /* Largest request payload any handler accepts is 265 bytes (profile restore). */
 #define KBDD_WORKER_PAYLOAD_MAX 512
-/* Flash commits get this long to finish at shutdown instead of being killed. */
-#define KBDD_SHUTDOWN_GRACE_MS 3000
+/* Flash commits get this long to finish at shutdown instead of being killed.
+ * Worst case: custom save = 150 ms reads + 3 slot writes (1.2 s) + two
+ * read-back-confirmed block writes (~1.8 s) = ~3.2 s; custom clear = 150 ms +
+ * two such steps = ~3.8 s. */
+#define KBDD_SHUTDOWN_GRACE_MS 6000
 /* An idle worker exits as soon as its socket closes; this only bounds a hang. */
 #define KBDD_SHUTDOWN_IDLE_MS 500
 
@@ -61,6 +64,8 @@ typedef enum {
     OP_SET_COLORS,
     OP_SAVE_PROFILE,
     OP_RESTORE_PROFILE,
+    OP_SAVE_CUSTOM,
+    OP_CLEAR_CUSTOM,
     OP_ENABLE_NOTIF,
     OP_SEND_FRAME,
     OP_RESTORE_CONFIG
@@ -89,6 +94,7 @@ typedef struct kbdd_op_node {
 typedef struct {
     int rc;
     uint8_t profile;
+    uint8_t effect;
     int changed;
     uint8_t out[KBC_FEATURE_REPORT_SIZE];
     char diag[256];
@@ -342,6 +348,18 @@ static void worker_exec(const kbdd_worker_req_t *req, kbdd_op_result_t *result)
         } else {
             result->rc = KBDD_DEV_EINVAL;
         }
+        break;
+    case OP_SAVE_CUSTOM:
+        if (req->payload_len == 3u * KBC_CUSTOM_KEYS) {
+            result->rc = kbdd_dev_save_custom(&io, (const uint8_t (*)[3])req->payload,
+                                              &result->profile);
+            result->effect = KBC_LED_EFFECT_CUSTOM;
+        } else {
+            result->rc = KBDD_DEV_EINVAL;
+        }
+        break;
+    case OP_CLEAR_CUSTOM:
+        result->rc = kbdd_dev_clear_custom(&io, &result->profile, &result->effect);
         break;
     case OP_ENABLE_NOTIF:
         result->rc = kbdd_dev_enable_notifications(&io);
@@ -813,8 +831,13 @@ static void op_complete(kbdd_ctx_t *kctx, kbdd_op_node_t *op,
             if (n >= 0) {
                 op_reply(kctx, op, buf, (uint32_t)n + 1);
             }
-            kctx->config_mode = KBDD_CONFIG_EFFECT;
-            kctx->config_effect = op->payload[0];
+            if (op->payload[0] == KBC_LED_EFFECT_CUSTOM) {
+                /* Effect 15 is keyboard-owned and not a storable effect value. */
+                kctx->config_mode = KBDD_CONFIG_CUSTOM;
+            } else {
+                kctx->config_mode = KBDD_CONFIG_EFFECT;
+                kctx->config_effect = op->payload[0];
+            }
             (void)kbdd_save_config(kctx);
         } else {
             op_send_error(kctx, op, r);
@@ -909,6 +932,53 @@ static void op_complete(kbdd_ctx_t *kctx, kbdd_op_node_t *op,
         if (r->rc == KBDD_DEV_OK) {
             op_reply_text(kctx, op,
                 "ok: profile restored and verified by read-back (RAM only; use 'led save' for the active profile)");
+        } else {
+            op_send_error(kctx, op, r);
+        }
+        break;
+
+    case OP_SAVE_CUSTOM:
+        if (r->rc == KBDD_DEV_OK) {
+            char buf[192];
+            int n = snprintf(buf, sizeof(buf),
+                             "ok: per-key colours stored in profile %u (effect 15, committed to flash; replug to confirm)",
+                             (unsigned)r->profile);
+            if (n >= 0 && (size_t)n < sizeof(buf)) {
+                op_reply(kctx, op, buf, (uint32_t)n + 1);
+            }
+            if (op->epoch == g_led_epoch) {
+                /* The keyboard itself owns the display now; do not let a later
+                 * restore overwrite effect 15 with the previous stream config. */
+                kctx->led_hold = 0;
+                kctx->led_active = 0;
+                kctx->led_anim = 0;
+                /* Effect 15 is not a valid stored effect (KBC_LED_EFFECT_COUNT
+                 * is 13); the mode alone means "keyboard owns the display". */
+                kctx->config_mode = KBDD_CONFIG_CUSTOM;
+                (void)kbdd_save_config(kctx);
+            }
+        } else {
+            op_send_error(kctx, op, r);
+        }
+        break;
+
+    case OP_CLEAR_CUSTOM:
+        if (r->rc == KBDD_DEV_OK) {
+            char buf[192];
+            int n = snprintf(buf, sizeof(buf),
+                             "ok: profile %u left custom mode (count 255, committed to flash); current effect %u",
+                             (unsigned)r->profile, (unsigned)r->effect);
+            if (n >= 0 && (size_t)n < sizeof(buf)) {
+                op_reply(kctx, op, buf, (uint32_t)n + 1);
+            }
+            if (op->epoch == g_led_epoch) {
+                kctx->led_hold = 0;
+                kctx->led_active = 0;
+                kctx->led_anim = 0;
+                kctx->config_mode = KBDD_CONFIG_EFFECT;
+                kctx->config_effect = r->effect;
+                (void)kbdd_save_config(kctx);
+            }
         } else {
             op_send_error(kctx, op, r);
         }
@@ -1290,6 +1360,18 @@ int kbdd_op_queue_save(const kbdd_ipc_message_t *req,
     return op_submit(OP_SAVE_PROFILE, req, dev, 0, flags, 0);
 }
 
+int kbdd_op_queue_save_custom(const kbdd_ipc_message_t *req,
+                              const kbdd_hid_device_t *dev, uint8_t flags)
+{
+    return op_submit(OP_SAVE_CUSTOM, req, dev, 0, flags, 0);
+}
+
+int kbdd_op_queue_clear_custom(const kbdd_ipc_message_t *req,
+                               const kbdd_hid_device_t *dev, uint8_t flags)
+{
+    return op_submit(OP_CLEAR_CUSTOM, req, dev, 0, flags, 0);
+}
+
 int kbdd_op_queue_restore(const kbdd_ipc_message_t *req,
                           const kbdd_hid_device_t *dev)
 {
@@ -1333,7 +1415,8 @@ int kbdd_op_queue_restore_config(kbdd_ctx_t *k, const kbdd_hid_device_t *dev)
     if (k == NULL || dev == NULL || !kbdd_op_has_room()) {
         return -1;
     }
-    if (k->config_mode == KBDD_CONFIG_NONE) {
+    if (k->config_mode == KBDD_CONFIG_NONE ||
+        k->config_mode == KBDD_CONFIG_CUSTOM) {
         k->restore_pending = 0;
         return 0;
     }
@@ -1427,6 +1510,8 @@ void kbdd_op_shutdown(void)
             /* Let a flash commit reach its read-back verification instead of
              * killing the worker mid-write and leaving the keyboard unverified. */
             grace_ms = (g_current->type == OP_SAVE_PROFILE ||
+                        g_current->type == OP_SAVE_CUSTOM ||
+                        g_current->type == OP_CLEAR_CUSTOM ||
                         g_current->type == OP_RESTORE_PROFILE)
                            ? KBDD_SHUTDOWN_GRACE_MS : 0;
         }

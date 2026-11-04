@@ -1,6 +1,16 @@
 #!/usr/bin/env bash
-# Remove kbdd + kbctl, including installation, service, and local state.
+# Remove kbdd + kbctl, service and config. Usage: ./uninstall.sh [--purge]
+# Profile backups (~/.local/state/kbctl) are kept unless --purge is given.
 set -u
+
+PURGE=0
+for a in "$@"; do
+  case "$a" in
+    --purge) PURGE=1 ;;
+    *) echo "Usage: $0 [--purge]   (--purge also deletes ~/.local/state/kbctl profile backups)" >&2; exit 2 ;;
+  esac
+done
+MULTIARCH=$(gcc -print-multiarch 2>/dev/null || true)
 
 systemctl --user stop kbdd 2>/dev/null || true
 systemctl --user disable kbdd 2>/dev/null || true
@@ -11,8 +21,12 @@ rm -f \
   "$HOME/.config/systemd/user/kbdd.service"
 rm -rf \
   "$HOME/.config/kbdd" \
-  "$HOME/.config/systemd/user/kbdd.service.d" \
-  "$HOME/.local/state/kbctl"
+  "$HOME/.config/systemd/user/kbdd.service.d"
+if [ "$PURGE" = 1 ]; then
+  rm -rf "$HOME/.local/state/kbctl"
+else
+  echo "Kept profile backups in ~/.local/state/kbctl (use --purge to delete)."
+fi
 
 sudo rm -f \
   /usr/bin/kbdd \
@@ -27,6 +41,7 @@ sudo rm -f \
   /usr/local/lib/libkbcore.so* \
   /usr/local/lib64/libkbcore.a \
   /usr/local/lib64/libkbcore.so* \
+  ${MULTIARCH:+"/usr/lib/$MULTIARCH"/libkbcore.a "/usr/lib/$MULTIARCH"/libkbcore.so*} \
   /usr/include/kbcore.h \
   /usr/local/include/kbcore.h \
   /usr/lib/udev/rules.d/60-kbdd.rules \

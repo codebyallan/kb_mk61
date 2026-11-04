@@ -41,9 +41,10 @@ static void usage(FILE *f)
     fputs("  led clear [opts]              Clear all customized colors\n", f);
     fputs("  led sweep [opts]              Light positions one by one to map keys\n", f);
     fputs("  led anim <breath|cycle|rainbow> [opts]  Animate colors from the computer (25 fps)\n", f);
-    fputs("  led key <keys> <RRGGBB>       Color keys by name: w,a,s,d | wasd | esc,numbers (see: led keys)\n", f);
+    fputs("  led key <keys> <RRGGBB>       Color keys by name: w,a,s,d | wasd | esc,numbers (see: keys)\n", f);
     fputs("  remap [--layer 0|1|2] <key>=<code>... | reset   Remap keys (normal/Fn/custom layer) of the active profile\n", f);
-    fputs("  led keys                      List key names and matrix positions (offline)\n", f);
+    fputs("  macro [--layer 0|1] [--repeat N] <key> <step>...   Bind a macro (0xB2 + 0x05) to a key\n", f);
+    fputs("  keys                          List key names and matrix positions (offline; 'led keys' also works)\n", f);
     fputs("  led custom [--base RRGGBB] <keys>=<RRGGBB>...  Store per-key colors in the keyboard (flash)\n", f);
     fputs("  led custom clear              Leave custom mode and commit to flash (effect 15 -> wave)\n", f);
     fputs("  led release                   Stop streaming frames\n", f);
@@ -90,11 +91,19 @@ static void usage_command(FILE *f, const char *command)
               "is supplied, save the raw block there.\n", f);
     } else if (strcmp(command, "diff-block") == 0) {
         fputs("Usage: kbctl diff-block <a.bin> <b.bin>\n\nCompare two saved 264-byte profile blocks and print changed offsets.\n", f);
+    } else if (strcmp(command, "macro") == 0) {
+        fputs("Usage: kbctl macro [--layer 0|1|normal|fn] [--repeat N] <key> <step> [...]\n"
+              "       kbctl macro [--layer L] <key> clear\n\n"
+              "Bind a macro to <key> of the active profile: the key matrix gets the 0xB2 marker and the\n"
+              "macro data is written separately (0x05). <step> is +code[:ms] (key down), -code[:ms] (key up)\n"
+              "or code[:ms] (down + up); code is a HID name or 0xNN, ms 20..255 (default 20), up to 80 steps,\n"
+              "N 0..1000 repetitions (default 1). Example: kbctl macro f1 lctrl+ ... : kbctl macro f1 +lctrl c -lctrl\n"
+              "'clear' restores the factory code of that key. Needs KBDD_ENABLE_PROFILE_WRITE=1.\n", f);
     } else if (strcmp(command, "remap") == 0) {
         fputs("Usage: kbctl remap [--layer 0|1|2|normal|fn|custom] <key>=<code> [...]\n"
               "       kbctl remap reset\n\n"
               "Write the 3 x 70 key matrix (0x03) of the active profile. <key> is a name from\n"
-              "'kbctl led keys'; <code> is a HID name (a, f5, lctrl, play, mouse1...) or 0xNN.\n"
+              "'kbctl keys'; <code> is a HID name (a, f5, lctrl, play, mouse1...) or 0xNN.\n"
               "Keys not listed keep their previous remap (last matrix written by kbctl for the\n"
               "profile, kept in $XDG_STATE_HOME/kbctl); 'reset' restores the factory map.\n"
               "Needs KBDD_ENABLE_PROFILE_WRITE=1.\n", f);
@@ -167,7 +176,7 @@ static void usage_led(FILE *f, const char *subcommand)
     } else if (strcmp(subcommand, "key") == 0) {
         fputs("Usage: kbctl led key <k1[,k2,...]> <RRGGBB> [--stride N]\n\n"
               "Set the color of keys by name or group (wasd, numbers, letters, mods, all). Other keys keep\n"
-              "their colors. Names are case-insensitive; 'kbctl led keys' lists them. Needs KBDD_ENABLE_LED=1.\n", f);
+              "their colors. Names are case-insensitive; 'kbctl keys' lists them. Needs KBDD_ENABLE_LED=1.\n", f);
     } else if (strcmp(subcommand, "color") == 0) {
         fputs("Usage: kbctl led color <effect> <RRGGBB> [RRGGBB ...] [--save]\n\n"
               "Set the colors stored in the keyboard for a built-in effect (breath, starlight, encounter,\n"
@@ -838,7 +847,7 @@ static int cmd_led_custom(int argc, char **argv)
             int p = kbc_key_position(tok);
             if (m == 0 && p >= 0) { tmp[0] = p; m = 1; }
             if (m == 0) {
-                fprintf(stderr, "kbctl: unknown key '%s' (see: kbctl led keys)\n", tok);
+                fprintf(stderr, "kbctl: unknown key '%s' (see: kbctl keys)\n", tok);
                 return 2;
             }
             for (j = 0; j < m; j++) {
@@ -887,6 +896,120 @@ static int active_profile(unsigned *prof)
     return ok ? 0 : -1;
 }
 
+/* A saved 0xB2 (macro) cannot be rewritten by remap: fall back to the factory code. */
+static void macro_markers_to_default(uint8_t *payload)
+{
+    uint8_t def[KBC_KEY_POSITIONS];
+    size_t l, j;
+
+    for (l = 0; l < 3; l++) {
+        (void)kbc_keymap_default(l, def);
+        for (j = 0; j < KBC_KEY_POSITIONS; j++) {
+            if (payload[l * KBC_KEY_POSITIONS + j] == 0xB2) payload[l * KBC_KEY_POSITIONS + j] = def[j];
+        }
+    }
+}
+
+/* macro [--layer 0|1] [--repeat N] <key> <step>... | <key> clear */
+static int cmd_macro(int argc, char **argv)
+{
+    uint8_t payload[KBDD_MACRO_PAYLOAD_SIZE];
+    uint8_t *map = payload, *mac = payload + 3 * KBC_KEY_POSITIONS + 1;
+    uint8_t def[KBC_KEY_POSITIONS];
+    size_t layer = 0, nsteps = 0, l;
+    unsigned prof = 0, reps = 1;
+    char spath[512];
+    int i, pos = -1, clear = 0, rc, have_path;
+    FILE *f;
+
+    if (active_profile(&prof) != 0) return 1;
+    have_path = keymap_state_path(prof, spath, sizeof(spath)) == 0;
+    memset(payload, 0, sizeof(payload));
+    for (l = 0; l < 3; l++) (void)kbc_keymap_default(l, map + l * KBC_KEY_POSITIONS);
+    if (have_path && (f = fopen(spath, "rb")) != NULL) {
+        uint8_t saved[3 * KBC_KEY_POSITIONS];
+        if (fread(saved, 1, sizeof(saved), f) == sizeof(saved)) memcpy(map, saved, sizeof(saved));
+        fclose(f);
+    }
+    /* options first, then the key, then steps */
+    for (i = 2; i < argc && pos < 0; i++) {
+        if (strcmp(argv[i], "--layer") == 0) {
+            const char *v = i + 1 < argc ? argv[++i] : "";
+            if (strcmp(v, "0") == 0 || strcmp(v, "normal") == 0) layer = 0;
+            else if (strcmp(v, "1") == 0 || strcmp(v, "fn") == 0) layer = 1;
+            else goto usage;
+        } else if (strcmp(argv[i], "--repeat") == 0) {
+            char *end;
+            long v = i + 1 < argc ? strtol(argv[++i], &end, 10) : -1;
+            if (v < 0 || v > KBC_MACRO_MAX_REPETITIONS || *end != '\0') goto usage;
+            reps = (unsigned)v;
+        } else {
+            pos = kbc_key_position(argv[i]);
+            if (pos < 0) {
+                fprintf(stderr, "kbctl: unknown key '%s' (see: kbctl keys)\n", argv[i]);
+                return 2;
+            }
+        }
+    }
+    if (pos < 0 || i >= argc) goto usage;
+    if (i == argc - 1 && strcmp(argv[i], "clear") == 0) clear = 1;
+
+    if (clear) {
+        (void)kbc_keymap_default(layer, def);
+        map[layer * KBC_KEY_POSITIONS + (size_t)pos] = def[pos];
+        rc = profile_write(KBDD_IPC_OP_SET_KEYMAP, map, 3 * KBC_KEY_POSITIONS);
+    } else {
+        kbc_macro *m = kbc_macro_create();
+        if (m == NULL) return 1;
+        if (kbc_macro_set_repetitions(m, (uint16_t)reps) != KBC_OK) { kbc_macro_destroy(m); goto usage; }
+        for (; i < argc; i++) {
+            char spec[64], *colon;
+            const char *name = spec;
+            int code, mode = 2;          /* 0 up, 1 down, 2 press */
+            long ms = KBC_MACRO_MIN_DELAY;
+
+            if (strlen(argv[i]) >= sizeof(spec)) { kbc_macro_destroy(m); goto usage; }
+            snprintf(spec, sizeof(spec), "%s", argv[i]);
+            if (spec[0] == '+') { mode = 1; name++; }
+            else if (spec[0] == '-' && spec[1] != '\0') { mode = 0; name++; }
+            colon = strrchr(spec, ':');
+            if (colon != NULL) {
+                char *end;
+                *colon = '\0';
+                ms = strtol(colon + 1, &end, 10);
+                if (*end != '\0' || ms < KBC_MACRO_MIN_DELAY || ms > 255) { kbc_macro_destroy(m); goto usage; }
+            }
+            code = kbc_hid_code(name);
+            if (code < 0 || code > 0xFF) {
+                fprintf(stderr, "kbctl: unknown or unsupported code '%s'\n", name);
+                kbc_macro_destroy(m);
+                return 2;
+            }
+            if (mode != 0 && kbc_macro_add_step(m, (uint8_t)ms, 1, (uint8_t)code) != KBC_OK) goto bad_step;
+            if (mode != 1 && kbc_macro_add_step(m, (uint8_t)ms, 0, (uint8_t)code) != KBC_OK) goto bad_step;
+            nsteps++;
+            continue;
+bad_step:
+            fprintf(stderr, "kbctl: invalid step '%s' or more than %d steps\n", argv[i], KBC_MACRO_MAX_STEPS);
+            kbc_macro_destroy(m);
+            return 2;
+        }
+        if (nsteps == 0 || kbc_macro_encode(m, mac, KBC_MACRO_SIZE) != KBC_OK) { kbc_macro_destroy(m); goto usage; }
+        kbc_macro_destroy(m);
+        map[layer * KBC_KEY_POSITIONS + (size_t)pos] = 0xB2;
+        payload[3 * KBC_KEY_POSITIONS] = (uint8_t)(layer * KBC_KEY_POSITIONS + (size_t)pos);
+        rc = profile_write(KBDD_IPC_OP_SET_MACRO, payload, sizeof(payload));
+    }
+    if (rc == 0 && have_path && (f = fopen(spath, "wb")) != NULL) {
+        (void)fwrite(map, 1, 3 * KBC_KEY_POSITIONS, f);
+        fclose(f);
+    }
+    return rc;
+usage:
+    fprintf(stderr, "kbctl: macro [--layer 0|1] [--repeat N] <key> <step>... | macro <key> clear  (see: kbctl help macro)\n");
+    return 2;
+}
+
 /* remap [--layer L] <key>=<code> ... | reset : 3 x 70 key matrix of the active profile.
  * Starts from the last matrix written by kbctl for this profile (factory map if none). */
 static int cmd_remap(int argc, char **argv)
@@ -910,6 +1033,7 @@ static int cmd_remap(int argc, char **argv)
         uint8_t saved[sizeof(payload)];
         if (fread(saved, 1, sizeof(saved), f) == sizeof(saved)) memcpy(payload, saved, sizeof(saved));
         fclose(f);
+        macro_markers_to_default(payload);
     }
     for (i = 2; i < argc; i++) {
         char spec[128], *eq;
@@ -930,7 +1054,7 @@ static int cmd_remap(int argc, char **argv)
         pos = kbc_key_position(spec);
         code = kbc_hid_code(eq + 1);
         if (pos < 0) {
-            fprintf(stderr, "kbctl: unknown key '%s' (see: kbctl led keys)\n", spec);
+            fprintf(stderr, "kbctl: unknown key '%s' (see: kbctl keys)\n", spec);
             return 2;
         }
         if (code < 0) {
@@ -1016,6 +1140,16 @@ static int cmd_led_field(int argc, char **argv, uint8_t field, unsigned long lo,
     payload[1] = (uint8_t)v;
     rc = profile_write(KBDD_IPC_OP_SET_FIELD, payload, 2);
     return (rc == 0 && save) ? save_to_flash() : rc;
+}
+
+static int cmd_keys(void)
+{
+    size_t i;
+    for (i = 0; i < KBC_KEY_POSITIONS; i++) {
+        if (kbc_key_name(i) != NULL) printf("%2zu  %s\n", i, kbc_key_name(i));
+    }
+    puts("\nFn layer: F1..F12 are Fn+1..Fn+= (use --layer fn <key>).");
+    return 0;
 }
 
 static int cmd_led(int argc, char **argv)
@@ -1151,20 +1285,14 @@ static int cmd_led(int argc, char **argv)
         return perr;
     }
     if (strcmp(sub, "custom") == 0) return cmd_led_custom(argc, argv);
-    if (strcmp(sub, "keys") == 0) {
-        size_t i;
-        for (i = 0; i < KBC_KEY_POSITIONS; i++) {
-            if (kbc_key_name(i) != NULL) printf("%2zu  %s\n", i, kbc_key_name(i));
-        }
-        return 0;
-    }
+    if (strcmp(sub, "keys") == 0) return cmd_keys();
     if (strcmp(sub, "key") == 0) {
         int pos[KBC_KEY_POSITIONS];
         size_t n = 0, i, j;
         uint8_t r, g, b;
         char spec[256], *tok, *save = NULL;
         if (argc < 5 || kbctl_parse_rgb(argv[4], &r, &g, &b) != 0 || strlen(argv[3]) >= sizeof(spec)) {
-            fprintf(stderr, "kbctl: led key <k1[,k2,...]> <RRGGBB>  (see: kbctl led keys)\n");
+            fprintf(stderr, "kbctl: led key <k1[,k2,...]> <RRGGBB>  (see: kbctl keys)\n");
             return 2;
         }
         if (led_parse_opts(argc, argv, 5, &o) != 0) { usage(stderr); return 2; }
@@ -1175,7 +1303,7 @@ static int cmd_led(int argc, char **argv)
             int p = kbc_key_position(tok);
             if (m == 0 && p >= 0) { tmp[0] = p; m = 1; }
             if (m == 0) {
-                fprintf(stderr, "kbctl: unknown key '%s' (see: kbctl led keys)\n", tok);
+                fprintf(stderr, "kbctl: unknown key '%s' (see: kbctl keys)\n", tok);
                 return 2;
             }
             for (j = 0; j < m; j++) {
@@ -1527,7 +1655,9 @@ int main(int argc, char **argv)
     }
     if (strcmp(cmd, "dump-block") == 0) return cmd_dump_block(argc, argv);
     if (strcmp(cmd, "diff-block") == 0) return cmd_diff_block(argc, argv);
+    if (strcmp(cmd, "keys") == 0) return cmd_keys();
     if (strcmp(cmd, "remap") == 0) return cmd_remap(argc, argv);
+    if (strcmp(cmd, "macro") == 0) return cmd_macro(argc, argv);
     if (strcmp(cmd, "led") == 0) return cmd_led(argc, argv);
 
     fprintf(stderr, "kbctl: unknown command '%s'\n", cmd);

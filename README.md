@@ -34,6 +34,7 @@ change the keyboard's stored state are opt-in through environment variables
 - Profile inspection, active-profile queries, and active-profile switching
   (`kbctl profile <1-4>`, confirmed by a read-back).
 - Key remapping (`kbctl remap`): 3 layers x 70 positions of raw HID codes (normal, Fn, custom).
+- Key macros (`kbctl macro`): `0xB2` marker in the key matrix plus separate macro data (`0x05`).
 - LED color, position, sweep, brightness, speed, and built-in effect commands.
   The `led brightness` value also scales host-driven solid colors, which are
   sent as direct RGB frames instead of using the keyboard's built-in effect.
@@ -188,7 +189,7 @@ kbctl profile <1-4>
 
 - `kbctl` waits up to 3 s for `kbdd` to create its socket (useful right after
   `systemctl --user restart kbdd`). Set `KBCTL_CONNECT_TIMEOUT_MS` to change the
-  wait (`0` = single attempt, maximum 60000). Offline commands (`led keys`,
+  wait (`0` = single attempt, maximum 60000). Offline commands (`keys`,
   `led effects`, `diff-block`, `help`) never connect.
 - Receive timeout: `kbctl` waits up to 30 s for a daemon response. Set
   `KBCTL_RECV_TIMEOUT_MS` to change it (`0` = wait indefinitely, maximum 300000).
@@ -225,7 +226,7 @@ kbctl remap reset
 - Writes the 3 x 70 key matrix (opcode `0x03`) of the active profile: layer 0 =
   normal, 1 = Fn, 2 = custom assignments. Requires `KBDD_ENABLE_PROFILE_WRITE=1`;
   the current profile block is backed up first.
-- `<key>` is a name from `kbctl led keys`. `<code>` is a HID name (`a`, `f5`,
+- `<key>` is a name from `kbctl keys`. `<code>` is a HID name (`a`, `f5`,
   `lctrl`, `left`, `play`, `volup`, `mouse1`, `profile1`, ...) or a raw `0xNN`.
 - The matrix is write-only in the protocol: the write is acknowledged but cannot be
   verified by read-back. `kbctl` keeps a local copy of the last matrix it wrote for each
@@ -234,12 +235,62 @@ kbctl remap reset
   mention keep their previous remap. `remap reset` restores the factory map and
   deletes the copy. A remap made by another tool is unknown to `kbctl` and is
   overwritten by the next call.
-- `0xB2` (macro marker) is rejected because it needs macro data.
+- `0xB2` (macro marker) is rejected by `remap`; use `kbctl macro` instead. A `0xB2` left in
+  the local copy is replaced by the factory code on the next `remap`.
 
 ```sh
 kbctl remap caps=lctrl
 kbctl remap --layer fn h=left j=down k=up l=right
 ```
+
+### Key macros
+
+```sh
+kbctl macro [--layer 0|1|normal|fn] [--repeat N] <key> <step> [...]
+kbctl macro [--layer 0|1|normal|fn] <key> clear
+```
+
+- Binds a macro to `<key>` of the active profile. The key matrix (`0x03`) gets the
+  `0xB2` marker and the macro data is written separately (`0x05`, key index 0..69
+  normal, 70..139 Fn). Requires `KBDD_ENABLE_PROFILE_WRITE=1`; the profile block is
+  backed up first.
+- `<step>`: `+code[:ms]` key down, `-code[:ms]` key up, `code[:ms]` down + up.
+  `code` is a HID name or `0xNN` (keyboard codes and modifiers only, no mouse).
+  `ms` is 20..255 (default 20). Up to 80 steps; `--repeat` 0..1000 (default 1).
+- Write-only like `remap`: acknowledged but not verifiable by read-back. The matrix
+  copy kept by `kbctl` (see Key remap) includes the `0xB2` marker.
+- `clear` restores the factory code of that key (the stale macro data is ignored by
+  the keyboard once the marker is gone). `remap reset` also removes every macro key.
+
+Use cases and how to undo each:
+
+```sh
+# 1. Ctrl+C on Fn+2 (F2 position; F1..F12 are Fn+1..Fn+=, see `kbctl keys`)
+kbctl macro --layer fn 2 +lctrl c -lctrl
+#    undo:
+kbctl macro --layer fn 2 clear
+
+# 2. Type a word on Fn+1 (hello)
+kbctl macro --layer fn 1 h e l l o
+#    undo:
+kbctl macro --layer fn 1 clear
+
+# 3. Auto-repeat: press Enter 10 times
+kbctl macro --repeat 10 backspace enter:50
+#    undo:
+kbctl macro backspace clear
+
+# 4. Alt+Tab with a longer delay
+kbctl macro grave +lalt:100 tab -lalt:100
+#    undo:
+kbctl macro grave clear
+
+# 5. Undo everything at once (all remaps and macros of the active profile)
+kbctl remap reset
+```
+
+If something goes wrong, restore the backup printed as `backup: <path>` with
+`kbctl restore-profile <profile> <file>`.
 
 ### LED commands
 
@@ -253,7 +304,7 @@ kbctl led pos 12 00FF00
 kbctl led pos 24 FF0000
 kbctl led key w,a,s,d FF0000
 kbctl led key esc,numbers 00AAFF
-kbctl led keys
+kbctl keys
 kbctl led off
 kbctl led sweep --delay 100 --color 0000FF
 kbctl led anim breath --color FF0000 --period 3000
@@ -281,7 +332,7 @@ kbctl led save
   case-insensitive and have aliases (`escape`, `-`, `win`...); ambiguous names
   (`shift`, `ctrl`, `alt`) are rejected, use `lshift`/`rshift` etc. It is a
   convenience over `led pos`, so the same persistence rules apply.
-- `led keys` lists the 61 key names with their matrix positions (offline).
+- `keys` (alias `led keys`) lists the 61 key names with their matrix positions (offline).
   The matrix index is `column * 5 + row`; gaps (8, 19, 24, 34, 39, 44, 49, 62,
   63) have no key, because wide keys occupy more than one column.
 - `led sweep` lights positions sequentially to map physical keys (it now prints

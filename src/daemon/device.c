@@ -583,8 +583,27 @@ failed:
     return rc == KBDD_DEV_EIO ? KBDD_DEV_EIO : KBDD_DEV_EVERIFY;
 }
 
+static int keymap_write(const kbdd_dev_io_t *io, const uint8_t map[3][KBC_KEY_POSITIONS],
+                        int allow_marker, const uint8_t *macro, uint8_t key, uint8_t *profile_out);
+
 int kbdd_dev_set_keymap(const kbdd_dev_io_t *io, const uint8_t map[3][KBC_KEY_POSITIONS],
                         uint8_t *profile_out)
+{
+    return keymap_write(io, map, 0, NULL, 0, profile_out);
+}
+
+int kbdd_dev_set_macro(const kbdd_dev_io_t *io, const uint8_t map[3][KBC_KEY_POSITIONS],
+                       uint8_t key, const uint8_t macro[KBC_MACRO_SIZE], uint8_t *profile_out)
+{
+    if (map == NULL || macro == NULL || key >= 2 * KBC_KEY_POSITIONS ||
+        map[key / KBC_KEY_POSITIONS][key % KBC_KEY_POSITIONS] != 0xB2) {
+        return KBDD_DEV_EINVAL;
+    }
+    return keymap_write(io, map, 1, macro, key, profile_out);
+}
+
+static int keymap_write(const kbdd_dev_io_t *io, const uint8_t map[3][KBC_KEY_POSITIONS],
+                        int allow_marker, const uint8_t *macro, uint8_t key, uint8_t *profile_out)
 {
     uint8_t act[264], rep[KBC_FEATURE_REPORT_SIZE], data[KBC_FEATURE_DATA_SIZE];
     const uint8_t params[4] = {0, 0, 0, 0};
@@ -595,7 +614,7 @@ int kbdd_dev_set_keymap(const kbdd_dev_io_t *io, const uint8_t map[3][KBC_KEY_PO
     if (io == NULL || map == NULL) return KBDD_DEV_EINVAL;
     for (i = 0; i < 3; i++) {
         for (j = 0; j < KBC_KEY_POSITIONS; j++) {
-            if (map[i][j] == 0xB2) return KBDD_DEV_EINVAL;   /* macro marker needs macro data */
+            if (map[i][j] == 0xB2 && !allow_marker) return KBDD_DEV_EINVAL;   /* macro marker needs macro data */
         }
     }
     rc = kbdd_dev_query(io, KBC_OP_READ_ACTIVE_PROFILE, 0, act);
@@ -609,6 +628,21 @@ int kbdd_dev_set_keymap(const kbdd_dev_io_t *io, const uint8_t map[3][KBC_KEY_PO
         return KBDD_DEV_EINVAL;
     }
     if (profile_out != NULL) *profile_out = act[2];
+    for (tries = 0; tries < 2; tries++) {
+        if (io->set_feature(io->ctx, rep, sizeof(rep)) >= 0) {
+            io->sleep_ms(io->ctx, 300u);
+            break;
+        }
+        io->sleep_ms(io->ctx, 200u);
+    }
+    if (tries == 2) return KBDD_DEV_EIO;
+    if (macro == NULL) return KBDD_DEV_OK;
+
+    /* 0x05: byte 2 = profile, byte 3 = key (0..69 normal, 70..139 Fn), data = macro. */
+    if (kbc_build_feature_report(KBC_OP_MACRO, act[2], key, params, macro, KBC_MACRO_SIZE,
+                                 rep, sizeof(rep)) != KBC_OK) {
+        return KBDD_DEV_EINVAL;
+    }
     for (tries = 0; tries < 2; tries++) {
         if (io->set_feature(io->ctx, rep, sizeof(rep)) >= 0) {
             io->sleep_ms(io->ctx, 300u);

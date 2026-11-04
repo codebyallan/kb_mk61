@@ -191,6 +191,10 @@ int kbdd_dev_save_custom(const kbdd_dev_io_t *io, const uint8_t rgb[70][3], uint
 int kbdd_dev_set_keymap(const kbdd_dev_io_t *io, const uint8_t map[3][KBC_KEY_POSITIONS],
                         uint8_t *profile_out);
 
+/* Writes the key matrix with 0xB2 at `key` (0..139, 70+ = Fn layer), then the macro (0x05). */
+int kbdd_dev_set_macro(const kbdd_dev_io_t *io, const uint8_t map[3][KBC_KEY_POSITIONS],
+                       uint8_t key, const uint8_t macro[KBC_MACRO_SIZE], uint8_t *profile_out);
+
 /* uinput module */
 typedef struct kbdd_uinput kbdd_uinput_t;
 kbdd_uinput_t *kbdd_uinput_open(const char *path);
@@ -249,6 +253,8 @@ int kbdd_handle_save(kbdd_ctx_t *k, const kbdd_ipc_message_t *req,
                      kbdd_ipc_message_t *resp);
 int kbdd_handle_keymap(kbdd_ctx_t *k, const kbdd_ipc_message_t *req,
                        kbdd_ipc_message_t *resp);
+int kbdd_handle_macro(kbdd_ctx_t *k, const kbdd_ipc_message_t *req,
+                      kbdd_ipc_message_t *resp);
 int kbdd_handle_field(kbdd_ctx_t *k, const kbdd_ipc_message_t *req,
                       kbdd_ipc_message_t *resp);
 void kbdd_restore_tick(kbdd_ctx_t *k);
@@ -266,6 +272,7 @@ int kbdd_op_queue_field(const kbdd_ipc_message_t *req, const kbdd_hid_device_t *
 int kbdd_op_queue_colors(const kbdd_ipc_message_t *req, const kbdd_hid_device_t *dev);
 int kbdd_op_queue_save(const kbdd_ipc_message_t *req, const kbdd_hid_device_t *dev, uint8_t flags);
 int kbdd_op_queue_clear_custom(const kbdd_ipc_message_t *req, const kbdd_hid_device_t *dev, uint8_t flags);
+int kbdd_op_queue_macro(const kbdd_ipc_message_t *req, const kbdd_hid_device_t *dev, uint8_t flags);
 int kbdd_op_queue_keymap(const kbdd_ipc_message_t *req, const kbdd_hid_device_t *dev, uint8_t flags);
 int kbdd_op_queue_save_custom(const kbdd_ipc_message_t *req, const kbdd_hid_device_t *dev, uint8_t flags);
 int kbdd_op_queue_restore(const kbdd_ipc_message_t *req, const kbdd_hid_device_t *dev);

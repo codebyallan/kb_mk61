@@ -119,10 +119,8 @@ kbc_status kbc_macro_encode(const kbc_macro *m, uint8_t *buf, size_t buf_len)
     buf[1] = (uint8_t)(m->repetitions & 0xFF);
     for (i = 0; i < m->step_count; i++) {
         size_t off = 2 + i * 3;
-        uint8_t delay_byte = m->steps[i].delay;
-        if (m->steps[i].key_down) delay_byte |= 0x80;
-        buf[off] = delay_byte;
-        buf[off + 1] = m->steps[i].delay; /* low byte (same value, min 20) */
+        buf[off] = m->steps[i].key_down ? 0x80 : 0x00; /* delay high byte (<256 ms) | key-down flag */
+        buf[off + 1] = m->steps[i].delay;              /* delay low byte (min 20) */
         buf[off + 2] = m->steps[i].keycode;
     }
     return KBC_OK;

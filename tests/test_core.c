@@ -602,7 +602,7 @@ static void test_macro_roundtrip(void)
     }
     CHECK(kbc_macro_encode(m, buf, sizeof buf) == KBC_OK);
     CHECK(buf[0] == 0 && buf[1] == 3);
-    CHECK(buf[2] == (0x80 | 20));
+    CHECK(buf[2] == 0x80);
     CHECK(buf[3] == 20);
     CHECK(buf[4] == 0x04);
     CHECK(kbc_macro_decode(n, buf, sizeof buf) == KBC_OK);

@@ -21,9 +21,10 @@ The project is intentionally split into layers:
 - **`kbctl`** — command-line client for querying the daemon and using the
   available keyboard controls.
 
-The implementation targets Linux and is currently experimental. Hardware
-writes are deliberately restricted until they have been validated on the
-target keyboard.
+The implementation targets Linux. All features documented here have been
+tested on real hardware (Gamakay MK61 / SK61L, `1EA7:9018`). Writes that
+change the keyboard's stored state are opt-in through environment variables
+(see [Usage](#usage)) to protect against accidental changes.
 
 ## Features
 
@@ -345,7 +346,6 @@ kbctl led save
   slot in RAM without re-uploading or writing flash. To leave custom mode, run
   `kbctl led custom clear` (count back to 255, effect 15 becomes 0, other effects are preserved;
   same backup/verify/rollback/cooldown) or `kbctl restore-profile` with the backup (block only).
-  Not yet validated on hardware.
 
 Frame commands accept `--once` to send one frame without periodic refresh and
 `--stride N` to override the frame layout (default: the detected matrix size).
@@ -370,8 +370,8 @@ kbctl help
 
 Profile writes require the additional `KBDD_ENABLE_PROFILE_WRITE=1`
 environment setting. Virtual keyboard input requires
-`KBDD_ENABLE_UINPUT=1`. These safeguards are intentional while hardware
-support is being validated.
+`KBDD_ENABLE_UINPUT=1`. These opt-in safeguards are intentional: they prevent
+accidental flash writes and keystroke injection.
 
 Enabling uinput grants the daemon the ability to inject keystrokes into the
 host, so it is disabled by default and should only be turned on on trusted,
@@ -395,10 +395,15 @@ assets/               Project images used by the documentation
 ## Project status and limitations
 
 This is not an official Gamakay project. Device behavior was reconstructed
-from the original Windows executable and validated incrementally. The
-supported device model, report layout, and write paths may evolve as more
-hardware testing is completed. Review the source and test results before
-enabling write operations on a production keyboard.
+from the original Windows executable and validated on real hardware (Gamakay
+MK61 / SK61L). Other models in the device table share the same protocol but
+have not been tested.
+
+- Profile-block writes are verified by read-back and rolled back on failure;
+  per-key custom colors and the key matrix (`remap`) are write-only in the
+  protocol and cannot be verified or backed up the same way.
+- Flash-writing commands are rate-limited to protect the keyboard's flash.
+- Back up a profile with `kbctl dump-block` before large changes.
 
 ## License
 

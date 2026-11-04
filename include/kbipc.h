@@ -31,6 +31,8 @@
 #define KBDD_IPC_OP_EVENT 17u       /* unsolicited daemon event: NUL-terminated text */
 #define KBDD_IPC_OP_SAVE_CUSTOM 21u /* payload [r,g,b * 70]: per-key colours stored in the keyboard (effect 15, flash) */
 #define KBDD_IPC_OP_CLEAR_CUSTOM 22u /* no payload: leave custom mode (count 255, effect 0), commit to flash */
+#define KBDD_IPC_OP_SET_KEYMAP 23u  /* payload [3 layers x 70 raw HID codes]: key remap of the active profile (0x03) */
+#define KBDD_KEYMAP_PAYLOAD_SIZE 210u
 #define KBDD_IPC_OP_RESTORE_PROFILE 20u /* payload [profile 1..4, raw 264-byte read block] */
 
 /* LED_SET payload: [flags, stride, mode, pos, r, g, b] */

@@ -525,6 +525,28 @@ static int kbdd_handle_custom(kbdd_ctx_t *k, const kbdd_ipc_message_t *req,
     return KBDD_HANDLER_DEFER;
 }
 
+int kbdd_handle_keymap(kbdd_ctx_t *k, const kbdd_ipc_message_t *req,
+                       kbdd_ipc_message_t *resp)
+{
+    const kbdd_hid_device_t *dev;
+
+    if (!k->allow_profile_write) {
+        return kbdd_reply_text(resp,
+            "error: profile writes are disabled. Start kbdd with KBDD_ENABLE_PROFILE_WRITE=1");
+    }
+    if (req->payload == NULL || req->payload_len != KBDD_KEYMAP_PAYLOAD_SIZE) {
+        return kbdd_reply_text(resp, "error: payload must be 3 x 70 HID codes");
+    }
+    dev = kbdd_control_dev(k);
+    if (dev == NULL) {
+        return kbdd_reply_text(resp, "error: no keyboard control interface available");
+    }
+    if (!kbdd_op_has_room() || kbdd_op_queue_keymap(req, dev, 0) != 0) {
+        return kbdd_queue_busy(resp);
+    }
+    return KBDD_HANDLER_DEFER;
+}
+
 int kbdd_handle_save_custom(kbdd_ctx_t *k, const kbdd_ipc_message_t *req,
                             kbdd_ipc_message_t *resp)
 {
@@ -809,6 +831,8 @@ int kbdd_ipc_handle(const kbdd_ipc_message_t *req, kbdd_ipc_message_t *resp,
             return kbdd_handle_save_custom(kctx, req, resp);
         case KBDD_IPC_OP_CLEAR_CUSTOM:
             return kbdd_handle_clear_custom(kctx, req, resp);
+        case KBDD_IPC_OP_SET_KEYMAP:
+            return kbdd_handle_keymap(kctx, req, resp);
         case KBDD_IPC_OP_SET_FIELD:
             return kbdd_handle_field(kctx, req, resp);
         default: {

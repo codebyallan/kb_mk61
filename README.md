@@ -32,6 +32,7 @@ target keyboard.
 - Keyboard discovery through `hidraw`.
 - Profile inspection, active-profile queries, and active-profile switching
   (`kbctl profile <1-4>`, confirmed by a read-back).
+- Key remapping (`kbctl remap`): 3 layers x 70 positions of raw HID codes (normal, Fn, custom).
 - LED color, position, sweep, brightness, speed, and built-in effect commands.
   The `led brightness` value also scales host-driven solid colors, which are
   sent as direct RGB frames instead of using the keyboard's built-in effect.
@@ -212,6 +213,32 @@ kbctl profile <1-4>
   is stopped on a switch, because those frames belong to the previous
   profile's lighting. The factory-reset value `0xFF` of opcode `0x01` is
   rejected by the library and can never be sent.
+
+### Key remap
+
+```sh
+kbctl remap [--layer 0|1|2|normal|fn|custom] <key>=<code> [...]
+kbctl remap reset
+```
+
+- Writes the 3 x 70 key matrix (opcode `0x03`) of the active profile: layer 0 =
+  normal, 1 = Fn, 2 = custom assignments. Requires `KBDD_ENABLE_PROFILE_WRITE=1`;
+  the current profile block is backed up first.
+- `<key>` is a name from `kbctl led keys`. `<code>` is a HID name (`a`, `f5`,
+  `lctrl`, `left`, `play`, `volup`, `mouse1`, `profile1`, ...) or a raw `0xNN`.
+- The matrix is write-only in the protocol: the write is acknowledged but cannot be
+  verified by read-back. `kbctl` keeps a local copy of the last matrix it wrote for each
+  profile (`$XDG_STATE_HOME/kbctl/keymap-profile<N>.bin`, default
+  `~/.local/state/kbctl`). Each call starts from that copy, so keys you do not
+  mention keep their previous remap. `remap reset` restores the factory map and
+  deletes the copy. A remap made by another tool is unknown to `kbctl` and is
+  overwritten by the next call.
+- `0xB2` (macro marker) is rejected because it needs macro data.
+
+```sh
+kbctl remap caps=lctrl
+kbctl remap --layer fn h=left j=down k=up l=right
+```
 
 ### LED commands
 

@@ -186,6 +186,11 @@ int kbdd_dev_clear_custom(const kbdd_dev_io_t *io, uint8_t *profile_out,
  * be read back, so a silently dropped slot write is only detectable visually. */
 int kbdd_dev_save_custom(const kbdd_dev_io_t *io, const uint8_t rgb[70][3], uint8_t *profile_out);
 
+/* Writes the 3 x 70 key matrix (0x03) of the ACTIVE profile. Write-only in the protocol,
+ * so it is acknowledged but cannot be verified by read-back. */
+int kbdd_dev_set_keymap(const kbdd_dev_io_t *io, const uint8_t map[3][KBC_KEY_POSITIONS],
+                        uint8_t *profile_out);
+
 /* uinput module */
 typedef struct kbdd_uinput kbdd_uinput_t;
 kbdd_uinput_t *kbdd_uinput_open(const char *path);
@@ -242,6 +247,8 @@ int kbdd_handle_clear_custom(kbdd_ctx_t *k, const kbdd_ipc_message_t *req,
                              kbdd_ipc_message_t *resp);
 int kbdd_handle_save(kbdd_ctx_t *k, const kbdd_ipc_message_t *req,
                      kbdd_ipc_message_t *resp);
+int kbdd_handle_keymap(kbdd_ctx_t *k, const kbdd_ipc_message_t *req,
+                       kbdd_ipc_message_t *resp);
 int kbdd_handle_field(kbdd_ctx_t *k, const kbdd_ipc_message_t *req,
                       kbdd_ipc_message_t *resp);
 void kbdd_restore_tick(kbdd_ctx_t *k);
@@ -259,6 +266,7 @@ int kbdd_op_queue_field(const kbdd_ipc_message_t *req, const kbdd_hid_device_t *
 int kbdd_op_queue_colors(const kbdd_ipc_message_t *req, const kbdd_hid_device_t *dev);
 int kbdd_op_queue_save(const kbdd_ipc_message_t *req, const kbdd_hid_device_t *dev, uint8_t flags);
 int kbdd_op_queue_clear_custom(const kbdd_ipc_message_t *req, const kbdd_hid_device_t *dev, uint8_t flags);
+int kbdd_op_queue_keymap(const kbdd_ipc_message_t *req, const kbdd_hid_device_t *dev, uint8_t flags);
 int kbdd_op_queue_save_custom(const kbdd_ipc_message_t *req, const kbdd_hid_device_t *dev, uint8_t flags);
 int kbdd_op_queue_restore(const kbdd_ipc_message_t *req, const kbdd_hid_device_t *dev);
 int kbdd_op_queue_enable_notif(const kbdd_ipc_message_t *req, const kbdd_hid_device_t *dev);

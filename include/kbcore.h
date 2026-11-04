@@ -413,6 +413,14 @@ KBCORE_API const char *kbc_key_name(size_t pos);          /* NULL: no key at tha
 /* Groups: wasd, numbers, letters, mods, all. Returns how many positions were written. */
 KBCORE_API size_t kbc_key_group(const char *group, int *out, size_t max);
 
+/* Key remap (0x03): 3 layers x 70 positions of raw HID codes (0 normal, 1 Fn, 2 custom).
+ * kbc_keymap_default fills one layer with the factory map (0 on success, -1 on bad layer).
+ * kbc_hid_code parses a name ("a", "f5", "lctrl", "play", ...) or "0xNN"; -1 if unknown
+ * (0xB2, the macro marker, is refused: it needs macro data). */
+#define KBC_KEYMAP_LAYERS 3
+KBCORE_API int kbc_keymap_default(size_t layer, uint8_t out[KBC_KEY_POSITIONS]);
+KBCORE_API int kbc_hid_code(const char *name);
+
 /* Host-computed animations (streamed as 0x07 frames at 25 fps by kbdd).
  * Pure functions: no I/O. Colour planes use the same stride layout as frames. */
 typedef enum { KBC_ANIM_BREATH = 1, KBC_ANIM_CYCLE = 2, KBC_ANIM_RAINBOW = 3 } kbc_led_anim;

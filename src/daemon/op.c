@@ -68,7 +68,8 @@ typedef enum {
     OP_CLEAR_CUSTOM,
     OP_ENABLE_NOTIF,
     OP_SEND_FRAME,
-    OP_RESTORE_CONFIG
+    OP_RESTORE_CONFIG,
+    OP_SET_KEYMAP
 } kbdd_op_type_t;
 
 typedef struct kbdd_op_node {
@@ -354,6 +355,14 @@ static void worker_exec(const kbdd_worker_req_t *req, kbdd_op_result_t *result)
             result->rc = kbdd_dev_save_custom(&io, (const uint8_t (*)[3])req->payload,
                                               &result->profile);
             result->effect = KBC_LED_EFFECT_CUSTOM;
+        } else {
+            result->rc = KBDD_DEV_EINVAL;
+        }
+        break;
+    case OP_SET_KEYMAP:
+        if (req->payload_len == 3u * KBC_KEY_POSITIONS) {
+            result->rc = kbdd_dev_set_keymap(&io, (const uint8_t (*)[KBC_KEY_POSITIONS])req->payload,
+                                             &result->profile);
         } else {
             result->rc = KBDD_DEV_EINVAL;
         }
@@ -962,6 +971,20 @@ static void op_complete(kbdd_ctx_t *kctx, kbdd_op_node_t *op,
         }
         break;
 
+    case OP_SET_KEYMAP:
+        if (r->rc == KBDD_DEV_OK) {
+            char buf[128];
+            int n = snprintf(buf, sizeof(buf),
+                             "ok: key remap written to profile %u (write-only, not verifiable by read-back)",
+                             (unsigned)r->profile);
+            if (n >= 0 && (size_t)n < sizeof(buf)) {
+                op_reply(kctx, op, buf, (uint32_t)n + 1);
+            }
+        } else {
+            op_send_error(kctx, op, r);
+        }
+        break;
+
     case OP_CLEAR_CUSTOM:
         if (r->rc == KBDD_DEV_OK) {
             char buf[192];
@@ -1366,6 +1389,12 @@ int kbdd_op_queue_save_custom(const kbdd_ipc_message_t *req,
     return op_submit(OP_SAVE_CUSTOM, req, dev, 0, flags, 0);
 }
 
+int kbdd_op_queue_keymap(const kbdd_ipc_message_t *req,
+                         const kbdd_hid_device_t *dev, uint8_t flags)
+{
+    return op_submit(OP_SET_KEYMAP, req, dev, 0, flags, 0);
+}
+
 int kbdd_op_queue_clear_custom(const kbdd_ipc_message_t *req,
                                const kbdd_hid_device_t *dev, uint8_t flags)
 {
@@ -1511,6 +1540,7 @@ void kbdd_op_shutdown(void)
              * killing the worker mid-write and leaving the keyboard unverified. */
             grace_ms = (g_current->type == OP_SAVE_PROFILE ||
                         g_current->type == OP_SAVE_CUSTOM ||
+                        g_current->type == OP_SET_KEYMAP ||
                         g_current->type == OP_CLEAR_CUSTOM ||
                         g_current->type == OP_RESTORE_PROFILE)
                            ? KBDD_SHUTDOWN_GRACE_MS : 0;

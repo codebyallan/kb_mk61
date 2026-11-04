@@ -42,6 +42,7 @@ static void usage(FILE *f)
     fputs("  led sweep [opts]              Light positions one by one to map keys\n", f);
     fputs("  led anim <breath|cycle|rainbow> [opts]  Animate colors from the computer (25 fps)\n", f);
     fputs("  led key <keys> <RRGGBB>       Color keys by name: w,a,s,d | wasd | esc,numbers (see: led keys)\n", f);
+    fputs("  remap [--layer 0|1|2] <key>=<code>... | reset   Remap keys (normal/Fn/custom layer) of the active profile\n", f);
     fputs("  led keys                      List key names and matrix positions (offline)\n", f);
     fputs("  led custom [--base RRGGBB] <keys>=<RRGGBB>...  Store per-key colors in the keyboard (flash)\n", f);
     fputs("  led custom clear              Leave custom mode and commit to flash (effect 15 -> wave)\n", f);
@@ -89,6 +90,14 @@ static void usage_command(FILE *f, const char *command)
               "is supplied, save the raw block there.\n", f);
     } else if (strcmp(command, "diff-block") == 0) {
         fputs("Usage: kbctl diff-block <a.bin> <b.bin>\n\nCompare two saved 264-byte profile blocks and print changed offsets.\n", f);
+    } else if (strcmp(command, "remap") == 0) {
+        fputs("Usage: kbctl remap [--layer 0|1|2|normal|fn|custom] <key>=<code> [...]\n"
+              "       kbctl remap reset\n\n"
+              "Write the 3 x 70 key matrix (0x03) of the active profile. <key> is a name from\n"
+              "'kbctl led keys'; <code> is a HID name (a, f5, lctrl, play, mouse1...) or 0xNN.\n"
+              "Keys not listed keep their previous remap (last matrix written by kbctl for the\n"
+              "profile, kept in $XDG_STATE_HOME/kbctl); 'reset' restores the factory map.\n"
+              "Needs KBDD_ENABLE_PROFILE_WRITE=1.\n", f);
     } else if (strcmp(command, "led") == 0) {
         fputs("Usage: kbctl led <subcommand> [arguments]\n\nUse 'kbctl help led <subcommand>' for a specific LED command.\n", f);
     } else if (strcmp(command, "version") == 0) {
@@ -847,6 +856,102 @@ usage:
     return 2;
 }
 
+/* Local copy of the last key matrix written per profile (the keyboard cannot read it back). */
+static int keymap_state_path(unsigned prof, char *out, size_t outsz)
+{
+    const char *base = getenv("XDG_STATE_HOME");
+    const char *home = getenv("HOME");
+    char dir[400];
+
+    if (base != NULL && base[0] == '/') snprintf(dir, sizeof(dir), "%s/kbctl", base);
+    else if (home != NULL) snprintf(dir, sizeof(dir), "%s/.local/state/kbctl", home);
+    else return -1;
+    if (mkdir_p(dir) != 0) return -1;
+    snprintf(out, outsz, "%s/keymap-profile%u.bin", dir, prof);
+    return 0;
+}
+
+static int active_profile(unsigned *prof)
+{
+    uint8_t *resp = NULL;
+    uint32_t rlen = 0;
+    int ok;
+
+    if (ipc_request(KBDD_IPC_OP_READ_ACTIVE, NULL, 0, &resp, &rlen) != 0) {
+        free(resp);
+        return -1;
+    }
+    ok = resp != NULL && rlen >= 17 && sscanf((const char *)resp, "active profile: %u", prof) == 1;
+    if (!ok) (void)print_reply(resp, rlen);
+    free(resp);
+    return ok ? 0 : -1;
+}
+
+/* remap [--layer L] <key>=<code> ... | reset : 3 x 70 key matrix of the active profile.
+ * Starts from the last matrix written by kbctl for this profile (factory map if none). */
+static int cmd_remap(int argc, char **argv)
+{
+    uint8_t payload[3 * KBC_KEY_POSITIONS];
+    size_t l, layer = 0;
+    unsigned prof = 0;
+    char spath[512];
+    int i, n = 0, rc, have_path;
+    FILE *f;
+
+    if (active_profile(&prof) != 0) return 1;
+    have_path = keymap_state_path(prof, spath, sizeof(spath)) == 0;
+    for (l = 0; l < 3; l++) (void)kbc_keymap_default(l, payload + l * KBC_KEY_POSITIONS);
+    if (argc == 3 && strcmp(argv[2], "reset") == 0) {
+        rc = profile_write(KBDD_IPC_OP_SET_KEYMAP, payload, sizeof(payload));
+        if (rc == 0 && have_path) (void)remove(spath);
+        return rc;
+    }
+    if (have_path && (f = fopen(spath, "rb")) != NULL) {
+        uint8_t saved[sizeof(payload)];
+        if (fread(saved, 1, sizeof(saved), f) == sizeof(saved)) memcpy(payload, saved, sizeof(saved));
+        fclose(f);
+    }
+    for (i = 2; i < argc; i++) {
+        char spec[128], *eq;
+        int pos, code;
+        if (strcmp(argv[i], "--layer") == 0) {
+            const char *v = i + 1 < argc ? argv[++i] : "";
+            if (strcmp(v, "0") == 0 || strcmp(v, "normal") == 0) layer = 0;
+            else if (strcmp(v, "1") == 0 || strcmp(v, "fn") == 0) layer = 1;
+            else if (strcmp(v, "2") == 0 || strcmp(v, "custom") == 0) layer = 2;
+            else goto usage;
+            continue;
+        }
+        if (strlen(argv[i]) >= sizeof(spec)) goto usage;
+        snprintf(spec, sizeof(spec), "%s", argv[i]);
+        eq = strrchr(spec, '=');
+        if (eq == NULL || eq == spec) goto usage;
+        *eq = '\0';
+        pos = kbc_key_position(spec);
+        code = kbc_hid_code(eq + 1);
+        if (pos < 0) {
+            fprintf(stderr, "kbctl: unknown key '%s' (see: kbctl led keys)\n", spec);
+            return 2;
+        }
+        if (code < 0) {
+            fprintf(stderr, "kbctl: unknown or unsupported code '%s'\n", eq + 1);
+            return 2;
+        }
+        payload[layer * KBC_KEY_POSITIONS + (size_t)pos] = (uint8_t)code;
+        n++;
+    }
+    if (n == 0) goto usage;
+    rc = profile_write(KBDD_IPC_OP_SET_KEYMAP, payload, sizeof(payload));
+    if (rc == 0 && have_path && (f = fopen(spath, "wb")) != NULL) {
+        (void)fwrite(payload, 1, sizeof(payload), f);
+        fclose(f);
+    }
+    return rc;
+usage:
+    fprintf(stderr, "kbctl: remap [--layer 0|1|2] <key>=<code> [...] | remap reset\n");
+    return 2;
+}
+
 static int cmd_led_color(int argc, char **argv)
 {
     uint8_t payload[2 + 3 * 14];
@@ -1422,6 +1527,7 @@ int main(int argc, char **argv)
     }
     if (strcmp(cmd, "dump-block") == 0) return cmd_dump_block(argc, argv);
     if (strcmp(cmd, "diff-block") == 0) return cmd_diff_block(argc, argv);
+    if (strcmp(cmd, "remap") == 0) return cmd_remap(argc, argv);
     if (strcmp(cmd, "led") == 0) return cmd_led(argc, argv);
 
     fprintf(stderr, "kbctl: unknown command '%s'\n", cmd);

@@ -99,6 +99,7 @@ typedef struct kbdd_ctx {
 #define KBDD_CONFIG_SOLID 2u
 #define KBDD_CONFIG_POSITIONS 3u
 #define KBDD_CONFIG_ANIMATION 4u
+#define KBDD_CONFIG_CUSTOM 5u   /* keyboard-owned effect 15; never overridden on restore */
 
 const char *kbdd_dev_err(int rc);
 
@@ -132,6 +133,7 @@ typedef struct kbdd_dev_io {
 #define KBDD_DEV_EPROTO (-3)
 #define KBDD_DEV_ENOSAVE (-5)  /* profile cannot be saved safely (custom LED data, effect 14/15) */
 #define KBDD_DEV_EVERIFY (-4)  /* write not confirmed by read-back (rolled back) */
+#define KBDD_DEV_ENOCUSTOM (-6) /* effect 15 requested but no custom layout is stored */
 
 void kbdd_dev_io_init_hidraw(kbdd_dev_io_t *io, const kbdd_hid_device_t *dev);
 int kbdd_dev_query(const kbdd_dev_io_t *io, uint8_t opcode, uint8_t profile,
@@ -167,6 +169,22 @@ int kbdd_dev_switch_profile(const kbdd_dev_io_t *io, uint8_t profile, int *chang
 /* Commits the current RAM block of the ACTIVE profile to flash: 0x02 with byte 134 = 1,
  * then = 255 (the keyboard saves on each change). Requires a clean block. */
 int kbdd_dev_save_profile(const kbdd_dev_io_t *io, uint8_t *profile_out);
+
+/* Leaves custom mode of the ACTIVE profile (count back to 255; effect 15 -> 0),
+ * committed by the keyboard and verified by read-back (EVERIFY = original block
+ * restored). *effect_out receives the resulting effect. EPROTO when the profile
+ * holds no custom data or is in the unknown effect-14 state. */
+int kbdd_dev_clear_custom(const kbdd_dev_io_t *io, uint8_t *profile_out,
+                          uint8_t *effect_out);
+
+/* Stores per-key colours (70 x RGB) in custom slot 0 of the ACTIVE profile and makes
+ * effect 15 the profile effect; the keyboard commits it to flash. Writes 0x08/0x09/0x0A,
+ * then the block, then verifies by read-back; on failure the original block is restored
+ * (EVERIFY). If the block is already at custom count 1, an intermediate count-255 write
+ * forces a real commit (and makes dropped writes visible). Refuses unknown block states
+ * (EPROTO). Slot data is write-only: the three slot reports are acknowledged but cannot
+ * be read back, so a silently dropped slot write is only detectable visually. */
+int kbdd_dev_save_custom(const kbdd_dev_io_t *io, const uint8_t rgb[70][3], uint8_t *profile_out);
 
 /* uinput module */
 typedef struct kbdd_uinput kbdd_uinput_t;
@@ -218,6 +236,10 @@ int kbdd_handle_anim(kbdd_ctx_t *k, const kbdd_ipc_message_t *req,
                      kbdd_ipc_message_t *resp);
 int kbdd_handle_colors(kbdd_ctx_t *k, const kbdd_ipc_message_t *req,
                        kbdd_ipc_message_t *resp);
+int kbdd_handle_save_custom(kbdd_ctx_t *k, const kbdd_ipc_message_t *req,
+                            kbdd_ipc_message_t *resp);
+int kbdd_handle_clear_custom(kbdd_ctx_t *k, const kbdd_ipc_message_t *req,
+                             kbdd_ipc_message_t *resp);
 int kbdd_handle_save(kbdd_ctx_t *k, const kbdd_ipc_message_t *req,
                      kbdd_ipc_message_t *resp);
 int kbdd_handle_field(kbdd_ctx_t *k, const kbdd_ipc_message_t *req,
@@ -236,6 +258,8 @@ int kbdd_op_queue_field(const kbdd_ipc_message_t *req, const kbdd_hid_device_t *
                         size_t stride, uint8_t flags, const uint8_t *frame);
 int kbdd_op_queue_colors(const kbdd_ipc_message_t *req, const kbdd_hid_device_t *dev);
 int kbdd_op_queue_save(const kbdd_ipc_message_t *req, const kbdd_hid_device_t *dev, uint8_t flags);
+int kbdd_op_queue_clear_custom(const kbdd_ipc_message_t *req, const kbdd_hid_device_t *dev, uint8_t flags);
+int kbdd_op_queue_save_custom(const kbdd_ipc_message_t *req, const kbdd_hid_device_t *dev, uint8_t flags);
 int kbdd_op_queue_restore(const kbdd_ipc_message_t *req, const kbdd_hid_device_t *dev);
 int kbdd_op_queue_enable_notif(const kbdd_ipc_message_t *req, const kbdd_hid_device_t *dev);
 int kbdd_op_queue_frame_from_base(const kbdd_ipc_message_t *req, const kbdd_hid_device_t *dev,

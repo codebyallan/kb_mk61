@@ -128,7 +128,7 @@ int kbdd_load_config_file(kbdd_ctx_t *k, const char *path)
     if (f == NULL) return errno == ENOENT ? 0 : -1;
     while (fscanf(f, "%31s", key) == 1) {
         if (strcmp(key, "mode") == 0) {
-            if (fscanf(f, "%u", &value) != 1 || value > KBDD_CONFIG_ANIMATION) {
+            if (fscanf(f, "%u", &value) != 1 || value > KBDD_CONFIG_CUSTOM) {
                 fclose(f);
                 kbdd_config_defaults(k);
                 return -1;

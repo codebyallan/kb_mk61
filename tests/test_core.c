@@ -1308,6 +1308,98 @@ static void test_commit_report(void)
     CHECK(kbc_profile_block_commit_report(blk, 264, 1, 1, out, 264) == KBC_OK);
 }
 
+static void test_custom_slot(void)
+{
+    uint8_t rgb[KBC_CUSTOM_KEYS][3], rep[3][KBC_FEATURE_REPORT_SIZE];
+    uint8_t blk[264], out[264];
+    size_t i, changed;
+
+    for (i = 0; i < KBC_CUSTOM_KEYS; i++) { rgb[i][0] = (uint8_t)(i + 1); rgb[i][1] = (uint8_t)(100 + i); rgb[i][2] = (uint8_t)(200 + i % 50); }
+    CHECK(kbc_custom_slot_reports(2, 1, rgb, rep) == KBC_OK);
+    CHECK(rep[0][0] == 7 && rep[0][1] == 0x08 && rep[0][2] == 2 && rep[0][3] == 1);
+    CHECK(rep[1][1] == 0x09 && rep[2][1] == 0x0A);
+    CHECK(rep[0][8] == 1 && rep[0][8 + 69] == 70 && rep[0][8 + 70] == 100 && rep[0][8 + 140 + 69] == 200 + 69 % 50);
+    CHECK(rep[0][8 + 210] == 0);                                  /* padding */
+    CHECK(rep[1][8] == 1);                                        /* one frame */
+    for (i = 0; i < KBC_CUSTOM_KEYS; i++) {
+        CHECK((rep[1][8 + 1 + i / 8] >> (i % 8)) & 1);            /* every key in frame 0 */
+        CHECK(rep[2][8 + i] == KBC_CUSTOM_EFFECT_STATIC && rep[2][8 + 70 + i] == 0 && rep[2][8 + 140 + i] == 0);
+    }
+    CHECK((rep[1][8 + 1 + 8] & 0xC0) == 0);                       /* no bits past key 69 */
+    CHECK(rep[1][8 + 182] == 0 && rep[1][8 + 183] == 0);          /* frame time 0 */
+
+    CHECK(kbc_custom_slot_reports(0, 0, rgb, rep) == KBC_ERR_RANGE);
+    CHECK(kbc_custom_slot_reports(5, 0, rgb, rep) == KBC_ERR_RANGE);
+    CHECK(kbc_custom_slot_reports(1, KBC_CUSTOM_SLOTS, rgb, rep) == KBC_ERR_RANGE);
+    CHECK(kbc_custom_slot_reports(1, 0, NULL, rep) == KBC_ERR_INVALID_ARGUMENT);
+
+    memset(blk, 0, sizeof blk);
+    for (i = 8; i < 264; i++) blk[i] = (uint8_t)(i * 3);
+    blk[0] = 7; blk[1] = 0x82; blk[2] = 1;
+    for (i = 3; i < 8; i++) blk[i] = 0;
+    blk[11] = 1; blk[134] = 255; blk[135] = 9;
+    for (i = 32; i < 41; i++) blk[i] = 1;
+    CHECK(kbc_profile_block_custom_report(blk, 264, 1, 0, out, 264) == KBC_OK);
+    CHECK(out[1] == 0x02 && out[2] == 1 && out[11] == 15 && out[134] == 1 && out[135] == 0);
+    for (i = 32; i < 41; i++) CHECK(out[i] == 0);
+    changed = 0;
+    for (i = 3; i < 264; i++) if (out[i] != blk[i]) changed++;
+    CHECK(changed == 2 + 1 + 9);                                  /* mode, count (+current), 9 flags */
+    blk[134] = 4;                                                 /* multi-slot state: normalise to 1 */
+    CHECK(kbc_profile_block_custom_report(blk, 264, 1, 0, out, 264) == KBC_OK && out[134] == 1 && out[135] == 0);
+    CHECK(kbc_profile_block_custom_arm_report(blk, 264, 1, out, 264) == KBC_OK &&
+          out[11] == 15 && out[134] == 255 && out[135] == 0);
+    /* slots 1..4 cannot be activated: only count 1 commits together with 255. */
+    CHECK(kbc_profile_block_custom_report(blk, 264, 1, 1, out, 264) == KBC_ERR_UNSUPPORTED);
+    CHECK(kbc_profile_block_custom_report(blk, 264, 1, 4, out, 264) == KBC_ERR_UNSUPPORTED);
+    blk[134] = 9;
+    CHECK(kbc_profile_block_custom_report(blk, 264, 1, 0, out, 264) == KBC_ERR_UNSUPPORTED);
+    blk[134] = 255; blk[11] = 14;
+    CHECK(kbc_profile_block_custom_report(blk, 264, 1, 0, out, 264) == KBC_ERR_UNSUPPORTED);
+    CHECK(kbc_profile_block_custom_arm_report(blk, 264, 1, out, 264) == KBC_ERR_UNSUPPORTED);
+    blk[11] = 1;
+    CHECK(kbc_profile_block_custom_report(blk, 264, 1, 5, out, 264) == KBC_ERR_RANGE);
+    CHECK(kbc_profile_block_custom_report(blk, 264, 2, 0, out, 264) == KBC_ERR_PROTOCOL);
+}
+
+static void test_custom_clear(void)
+{
+    uint8_t blk[264], out[264];
+    size_t i, changed = 0;
+
+    memset(blk, 0, sizeof blk);
+    for (i = 8; i < 264; i++) blk[i] = (uint8_t)(i * 3);
+    blk[0] = 7; blk[1] = 0x82; blk[2] = 1;
+    for (i = 3; i < 8; i++) blk[i] = 0;
+    blk[11] = 15; blk[134] = 1;
+    CHECK(kbc_profile_block_custom_clear_report(blk, 264, 1, out, 264) == KBC_OK);
+    CHECK(out[1] == 0x02 && out[11] == 0 && out[134] == 255);
+    for (i = 3; i < 264; i++) if (out[i] != blk[i]) changed++;
+    CHECK(changed == 2);
+    blk[11] = 5;                                           /* non-custom effect is kept */
+    CHECK(kbc_profile_block_custom_clear_report(blk, 264, 1, out, 264) == KBC_OK && out[11] == 5 && out[134] == 255);
+    blk[11] = 14;                                          /* unknown observed state: refuse */
+    CHECK(kbc_profile_block_custom_clear_report(blk, 264, 1, out, 264) == KBC_ERR_UNSUPPORTED);
+    blk[11] = 15;
+    blk[134] = 255;                                        /* nothing to clear */
+    CHECK(kbc_profile_block_custom_clear_report(blk, 264, 1, out, 264) == KBC_ERR_UNSUPPORTED);
+    blk[134] = 9;
+    CHECK(kbc_profile_block_custom_clear_report(blk, 264, 1, out, 264) == KBC_ERR_UNSUPPORTED);
+    CHECK(kbc_profile_block_custom_clear_report(blk, 264, 2, out, 264) == KBC_ERR_PROTOCOL);
+
+    /* Re-select without re-uploading: count is preserved (so no commit) and the
+     * current slot goes back to 0. */
+    blk[11] = 5; blk[134] = 3; blk[135] = 4;
+    CHECK(kbc_profile_block_custom_select_report(blk, 264, 1, out, 264) == KBC_OK);
+    CHECK(out[11] == 15 && out[134] == 3 && out[135] == 0);
+    blk[11] = 14;
+    CHECK(kbc_profile_block_custom_select_report(blk, 264, 1, out, 264) == KBC_ERR_UNSUPPORTED);
+    blk[11] = 5; blk[134] = 255;                         /* no custom layout stored */
+    CHECK(kbc_profile_block_custom_select_report(blk, 264, 1, out, 264) == KBC_ERR_UNSUPPORTED);
+    blk[134] = 1;
+    CHECK(kbc_profile_block_custom_select_report(blk, 264, 2, out, 264) == KBC_ERR_PROTOCOL);
+}
+
 static void test_effect_colors(void)
 {
     uint8_t blk[264], out[264];
@@ -1402,6 +1494,8 @@ int main(void)
     test_read_active_profile_decode();
     test_effect_colors();
     test_commit_report();
+    test_custom_slot();
+    test_custom_clear();
     test_keymap();
     test_fixtures();
     test_input_report_default_marker();

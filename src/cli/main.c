@@ -43,12 +43,14 @@ static void usage(FILE *f)
     fputs("  led anim <breath|cycle|rainbow> [opts]  Animate colors from the computer (25 fps)\n", f);
     fputs("  led key <keys> <RRGGBB>       Color keys by name: w,a,s,d | wasd | esc,numbers (see: led keys)\n", f);
     fputs("  led keys                      List key names and matrix positions (offline)\n", f);
+    fputs("  led custom [--base RRGGBB] <keys>=<RRGGBB>...  Store per-key colors in the keyboard (flash)\n", f);
+    fputs("  led custom clear              Leave custom mode and commit to flash (effect 15 -> wave)\n", f);
     fputs("  led release                   Stop streaming frames\n", f);
     fputs("  led effects                   List the keyboard built-in effects (offline)\n", f);
     fputs("  led color <effect> <RRGGBB>.. Set the colors of a built-in effect in the active profile\n", f);
     fputs("  led save                      Commit the active profile (effect/brightness/speed) to flash\n", f);
     fputs("    --save on 'led effect|brightness|speed' saves right after the change\n", f);
-    fputs("  led effect <name|index>       Set the active profile effect (needs KBDD_ENABLE_PROFILE_WRITE=1)\n", f);
+    fputs("  led effect <name|index>       Set the active profile effect; 15 = stored custom layout\n", f);
     fputs("  led brightness <0-10>         Set brightness (also scales solid colors; 0 = off)\n", f);
     fputs("  led speed <2-102>             Set the effect speed (raw, lower = faster; shared by all effects)\n", f);
     fputs("  led direction <0-3>           Set animation direction\n", f);
@@ -127,7 +129,7 @@ static void usage_led(FILE *f, const char *subcommand)
               "  effects                     List built-in keyboard effects\n"
               "  color <effect> <RRGGBB>..  Set built-in effect colors\n"
               "  save                        Commit the active profile to flash\n"
-              "  effect <name|index> [--save] Set the active profile effect\n"
+              "  effect <name|index> [--save] Set the active profile effect (15 = custom)\n"
               "  brightness <0-10> [--save] Set brightness\n"
               "  speed <2-102> [--save]     Set effect speed\n\n"
               "  direction <0-3> [--save]  Set animation direction\n"
@@ -175,7 +177,9 @@ static void usage_led(FILE *f, const char *subcommand)
         usage_led_color_slots(f);
     } else if (strcmp(subcommand, "effect") == 0) {
         fputs("Usage: kbctl led effect <name|index> [--save]\n\n"
-              "Set the active profile effect. Append --save to commit it to flash.\n"
+              "Set the active profile effect. Index 15 ('custom') re-selects the per-key layout\n"
+              "already stored by 'led custom' without writing flash; --save is then a no-op.\n"
+              "Append --save for built-in effects to commit them to flash.\n"
               "Requires KBDD_ENABLE_PROFILE_WRITE=1.\n", f);
     } else if (strcmp(subcommand, "brightness") == 0) {
         fputs("Usage: kbctl led brightness <0-10> [--save]\n\n"
@@ -193,6 +197,16 @@ static void usage_led(FILE *f, const char *subcommand)
         fputs("Usage: kbctl led report-rate <0-254> [--save]\n\n"
               "Set the report-rate index; the stored value is index + 1 in profile byte 0 (report byte 8).\n"
               "Requires KBDD_ENABLE_PROFILE_WRITE=1.\n", f);
+    } else if (strcmp(subcommand, "custom") == 0) {
+        fputs("Usage: kbctl led custom [--base RRGGBB] <keys>=<RRGGBB> [<keys>=<RRGGBB> ...]\n"
+              "       kbctl led custom clear\n\n"
+              "Store per-key colors in the keyboard (custom slot 0, effect 15) and commit them to flash,\n"
+              "so they survive replug with no software running. Keys not listed get --base (default 000000).\n"
+              "<keys> uses the same names/groups as 'led key' (e.g. wasd=ff0000 esc=00ff00).\n"
+              "Backs up the profile block first; slot data is write-only and is not backed up. Needs\n"
+              "KBDD_ENABLE_PROFILE_WRITE=1. 'clear' leaves custom mode (effect 15 -> wave, other\n"
+              "effects preserved) and commits it. 'led effect 15' re-selects a stored layout\n"
+              "without re-uploading or writing flash. 'led save' is refused while custom data exists.\n", f);
     } else if (strcmp(subcommand, "save") == 0) {
         fputs("Usage: kbctl led save\n\n"
               "Commit the active profile's effect, brightness, and speed to flash.\n"
@@ -777,6 +791,61 @@ static int save_to_flash(void)
     return rc;
 }
 
+/* led custom [--base RRGGBB] <keys>=<RRGGBB> ... : per-key colours stored in flash. */
+static int cmd_led_custom(int argc, char **argv)
+{
+    uint8_t payload[3 * KBC_KEY_POSITIONS];
+    uint8_t br = 0, bg = 0, bb = 0;
+    int i, nspec = 0, have_base = 0;
+    size_t k;
+
+    if (argc == 4 && strcmp(argv[3], "clear") == 0) {
+        return profile_write(KBDD_IPC_OP_CLEAR_CUSTOM, NULL, 0);
+    }
+
+    for (i = 3; i < argc; i++) {
+        char spec[256], *eq, *tok, *save = NULL;
+        uint8_t r, g, b;
+        int keys = 0;
+        if (strcmp(argv[i], "--base") == 0) {
+            if (i + 1 >= argc || nspec != 0 || have_base ||
+                kbctl_parse_rgb(argv[i + 1], &br, &bg, &bb) != 0) goto usage;
+            have_base = 1;
+            i++;
+            continue;
+        }
+        if (nspec == 0) {                      /* defaults apply to every key before overrides */
+            for (k = 0; k < KBC_KEY_POSITIONS; k++) { payload[3*k] = br; payload[3*k+1] = bg; payload[3*k+2] = bb; }
+        }
+        if (strlen(argv[i]) >= sizeof(spec)) goto usage;
+        snprintf(spec, sizeof(spec), "%s", argv[i]);
+        eq = strrchr(spec, '=');
+        if (eq == NULL || eq == spec || kbctl_parse_rgb(eq + 1, &r, &g, &b) != 0) goto usage;
+        *eq = '\0';
+        for (tok = strtok_r(spec, ",", &save); tok != NULL; tok = strtok_r(NULL, ",", &save)) {
+            int tmp[KBC_KEY_POSITIONS];
+            size_t m = kbc_key_group(tok, tmp, KBC_KEY_POSITIONS), j;
+            int p = kbc_key_position(tok);
+            if (m == 0 && p >= 0) { tmp[0] = p; m = 1; }
+            if (m == 0) {
+                fprintf(stderr, "kbctl: unknown key '%s' (see: kbctl led keys)\n", tok);
+                return 2;
+            }
+            for (j = 0; j < m; j++) {
+                payload[3 * (size_t)tmp[j]] = r; payload[3 * (size_t)tmp[j] + 1] = g; payload[3 * (size_t)tmp[j] + 2] = b;
+            }
+            keys++;
+        }
+        if (keys == 0) goto usage;             /* e.g. ",=ff0000": no key names */
+        nspec++;
+    }
+    if (nspec == 0) goto usage;
+    return profile_write(KBDD_IPC_OP_SAVE_CUSTOM, payload, sizeof(payload));
+usage:
+    fprintf(stderr, "kbctl: led custom [--base RRGGBB] <keys>=<RRGGBB> [...]  (--base must come first)\n");
+    return 2;
+}
+
 static int cmd_led_color(int argc, char **argv)
 {
     uint8_t payload[2 + 3 * 14];
@@ -787,7 +856,8 @@ static int cmd_led_color(int argc, char **argv)
         save = 1;
         argc--;
     }
-    if (argc < 5 || (m = effect_from_arg(argv[3])) < 0 || argc - 4 > 14) {
+    if (argc < 5 || (m = effect_from_arg(argv[3])) < 0 ||
+        m >= KBC_LED_EFFECT_COUNT || argc - 4 > 14) {
         fprintf(stderr, "kbctl: led color <effect> <RRGGBB> [RRGGBB ...] [--save]  (max 14 colors)\n");
         return 2;
     }
@@ -807,13 +877,23 @@ static int cmd_led_effect(int argc, char **argv)
 {
     uint8_t mode;
     int m, save = wants_save(&argc, argv), rc;
-    if (argc != 4 || (m = effect_from_arg(argv[3])) < 0) {
+    if (argc != 4 || (m = effect_from_arg(argv[3])) < 0 ||
+        (m >= KBC_LED_EFFECT_COUNT && m != KBC_LED_EFFECT_CUSTOM)) {
         fprintf(stderr, "kbctl: led effect <name|index> [--save]  (see: kbctl led effects)\n");
         return 2;
     }
     mode = (uint8_t)m;
     rc = profile_write(KBDD_IPC_OP_SET_EFFECT, &mode, 1);
-    return (rc == 0 && save) ? save_to_flash() : rc;
+    if (rc != 0) return rc;
+    if (save) {
+        if (mode == KBC_LED_EFFECT_CUSTOM) {
+            /* The slot data is already in flash; 'led save' refuses a custom block. */
+            printf("note: custom layout is already stored in flash; nothing to save\n");
+        } else {
+            rc = save_to_flash();
+        }
+    }
+    return rc;
 }
 
 static int cmd_led_field(int argc, char **argv, uint8_t field, unsigned long lo,
@@ -964,6 +1044,7 @@ static int cmd_led(int argc, char **argv)
         free(resp);
         return perr;
     }
+    if (strcmp(sub, "custom") == 0) return cmd_led_custom(argc, argv);
     if (strcmp(sub, "keys") == 0) {
         size_t i;
         for (i = 0; i < KBC_KEY_POSITIONS; i++) {

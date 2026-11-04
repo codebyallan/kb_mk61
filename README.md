@@ -303,6 +303,21 @@ kbctl led save
   `KBDD_ENABLE_PROFILE_WRITE=1`; a backup of the block is stored in
   `~/.local/state/kbctl/` first. Each save writes flash twice, so `kbdd` accepts
   at most one save every 30 s (`error: save rate-limited ...` otherwise). Saved values survive unplugging the keyboard.
+- `led custom [--base RRGGBB] <keys>=<RRGGBB> ...` stores per-key colors in the keyboard
+  itself (custom slot 0: opcodes `0x08` colors, `0x09` frame, `0x0A` effect, then the block
+  with effect 15 and the slot count at offset 134, which commits to flash). Keys not listed
+  get `--base` (default off). It backs up the block first, verifies the block by read-back and
+  restores the original block if the keyboard does not confirm; it shares the 30 s save cooldown
+  and needs `KBDD_ENABLE_PROFILE_WRITE=1`. Re-saving an existing custom layout forces a
+  `1 -> 255 -> 1` count transition, which commits twice and makes a dropped write visible to
+  the read-back. Slot data is write-only in this protocol: the three slot reports are retried
+  and must be acknowledged, but they cannot be read back or backed up like the block. While
+  custom data exists `led save` is refused. To switch back to the stored layout after choosing
+  another effect, run `kbctl led effect 15` (or `led effect custom`): it re-selects the custom
+  slot in RAM without re-uploading or writing flash. To leave custom mode, run
+  `kbctl led custom clear` (count back to 255, effect 15 becomes 0, other effects are preserved;
+  same backup/verify/rollback/cooldown) or `kbctl restore-profile` with the backup (block only).
+  Not yet validated on hardware.
 
 Frame commands accept `--once` to send one frame without periodic refresh and
 `--stride N` to override the frame layout (default: the detected matrix size).

@@ -392,3 +392,101 @@ kbc_status kbc_profile_block_set_colors(const uint8_t *block, size_t block_len, 
     memset(out + KBC_PBLK_OFF_SPECTRUM, 0, KBC_PBLK_SPECTRUM_COUNT);
     return KBC_OK;
 }
+
+kbc_status kbc_custom_slot_reports(uint8_t hw_profile, uint8_t slot,
+                                   const uint8_t rgb[KBC_CUSTOM_KEYS][3],
+                                   uint8_t out[3][KBC_FEATURE_REPORT_SIZE])
+{
+    static const uint8_t opcodes[3] = {KBC_OP_CUSTOM_COLOR, KBC_OP_CUSTOM_FRAME, KBC_OP_CUSTOM_EFFECT};
+    uint8_t bufs[3][KBC_FEATURE_DATA_SIZE];
+    uint8_t params[KBC_FEATURE_PARAMS_SIZE] = {0, 0, 0, 0};
+    size_t k, i;
+    kbc_status st;
+
+    if (rgb == NULL || out == NULL) return KBC_ERR_INVALID_ARGUMENT;
+    if (slot >= KBC_CUSTOM_SLOTS || hw_profile < 1 || hw_profile > 4) return KBC_ERR_RANGE;
+    memset(bufs, 0, sizeof(bufs));
+
+    for (k = 0; k < KBC_CUSTOM_KEYS; k++) {
+        bufs[0][k]                          = rgb[k][0];            /* colour: R, G, B planes */
+        bufs[0][KBC_CUSTOM_KEYS + k]        = rgb[k][1];
+        bufs[0][2 * KBC_CUSTOM_KEYS + k]    = rgb[k][2];
+        bufs[1][1 + k / 8]                 |= (uint8_t)(1u << (k % 8)); /* frame 0 contains every key */
+        bufs[2][k]                          = KBC_CUSTOM_EFFECT_STATIC; /* effect plane; speed/breath = 0 */
+    }
+    bufs[1][0] = 1;                                                 /* one frame, time bytes (182,183) = 0 */
+
+    for (i = 0; i < 3; i++) {
+        st = kbc_build_feature_report(opcodes[i], hw_profile, slot, params,
+                                      bufs[i], sizeof(bufs[i]), out[i], KBC_FEATURE_REPORT_SIZE);
+        if (st != KBC_OK) return st;
+    }
+    return KBC_OK;
+}
+
+kbc_status kbc_profile_block_custom_report(const uint8_t *block, size_t block_len,
+                                           uint8_t profile, uint8_t slot,
+                                           uint8_t *out, size_t out_len)
+{
+    uint8_t count;
+    kbc_status st;
+
+    if (slot >= KBC_CUSTOM_SLOTS) return KBC_ERR_RANGE;
+    /* Only slot 0 maps to count 1, the only count that commits together with 255. */
+    if (slot != 0) return KBC_ERR_UNSUPPORTED;
+    st = kbc_profile_block_to_write(block, block_len, profile, out, out_len);
+    if (st != KBC_OK) return st;
+    count = block[KBC_PBLK_OFF_CUSTOM_COUNT];
+    if (block[KBC_PBLK_OFF_MODE] == KBC_LED_EFFECT_OBSERVED_14 ||
+        (count != KBC_COMMIT_CLEAN && (count < 1 || count > KBC_CUSTOM_SLOTS))) {
+        return KBC_ERR_UNSUPPORTED;
+    }
+    /* Normalise to 1.  A previous multi-slot count (2..5) would otherwise keep
+     * byte 134 unchanged and the keyboard would not commit the block. */
+    out[KBC_PBLK_OFF_MODE] = KBC_LED_EFFECT_CUSTOM;
+    out[KBC_PBLK_OFF_CUSTOM_COUNT] = KBC_COMMIT_ARM;
+    out[KBC_PBLK_OFF_CUSTOM_CURRENT] = 0;
+    memset(out + KBC_PBLK_OFF_SPECTRUM, 0, KBC_PBLK_SPECTRUM_COUNT);
+    return KBC_OK;
+}
+
+kbc_status kbc_profile_block_custom_arm_report(const uint8_t *block, size_t block_len,
+                                               uint8_t profile, uint8_t *out, size_t out_len)
+{
+    kbc_status st = kbc_profile_block_custom_report(block, block_len, profile, 0,
+                                                    out, out_len);
+    if (st != KBC_OK) return st;
+    out[KBC_PBLK_OFF_CUSTOM_COUNT] = KBC_COMMIT_CLEAN;
+    return KBC_OK;
+}
+
+kbc_status kbc_profile_block_custom_select_report(const uint8_t *block, size_t block_len,
+                                                  uint8_t profile, uint8_t *out, size_t out_len)
+{
+    kbc_status st = kbc_profile_block_to_write(block, block_len, profile, out, out_len);
+    uint8_t count;
+
+    if (st != KBC_OK) return st;
+    if (block[KBC_PBLK_OFF_MODE] == KBC_LED_EFFECT_OBSERVED_14) return KBC_ERR_UNSUPPORTED;
+    count = block[KBC_PBLK_OFF_CUSTOM_COUNT];
+    if (count < 1 || count > KBC_CUSTOM_SLOTS) return KBC_ERR_UNSUPPORTED;
+    out[KBC_PBLK_OFF_MODE] = KBC_LED_EFFECT_CUSTOM;
+    out[KBC_PBLK_OFF_CUSTOM_CURRENT] = 0;
+    memset(out + KBC_PBLK_OFF_SPECTRUM, 0, KBC_PBLK_SPECTRUM_COUNT);
+    return KBC_OK;
+}
+
+kbc_status kbc_profile_block_custom_clear_report(const uint8_t *block, size_t block_len,
+                                                 uint8_t profile, uint8_t *out, size_t out_len)
+{
+    kbc_status st = kbc_profile_block_to_write(block, block_len, profile, out, out_len);
+    uint8_t count;
+
+    if (st != KBC_OK) return st;
+    if (block[KBC_PBLK_OFF_MODE] == KBC_LED_EFFECT_OBSERVED_14) return KBC_ERR_UNSUPPORTED;
+    count = block[KBC_PBLK_OFF_CUSTOM_COUNT];
+    if (count < 1 || count > KBC_CUSTOM_SLOTS) return KBC_ERR_UNSUPPORTED;
+    out[KBC_PBLK_OFF_CUSTOM_COUNT] = KBC_COMMIT_CLEAN;
+    if (block[KBC_PBLK_OFF_MODE] == KBC_LED_EFFECT_CUSTOM) out[KBC_PBLK_OFF_MODE] = 0;
+    return KBC_OK;
+}

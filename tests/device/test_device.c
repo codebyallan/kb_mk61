@@ -200,6 +200,13 @@ struct kb {
     size_t nselects;
     size_t nwrites;
     uint8_t writes[4][264];
+    size_t nslot;              /* custom slot reports (0x08..0x0A) seen */
+    uint8_t slot[3][264];
+    int fail_slot_at;          /* 1-based slot report that fails (0 = none) */
+    size_t fail_block_first;   /* first N block (0x02) writes fail (0 = none) */
+    size_t order[8];           /* sequence of opcodes received */
+    size_t norder;
+    int drop_writes;           /* ignore the first N block (0x02) writes */
 };
 
 static ssize_t kb_set(void *ctx, const uint8_t *buf, size_t len)
@@ -207,6 +214,12 @@ static ssize_t kb_set(void *ctx, const uint8_t *buf, size_t len)
     struct kb *k = ctx;
     if (len != 264) return -1;
     k->last_op = buf[1];
+    if (buf[1] != 0x81 && buf[1] != 0x82 && k->norder < 8) k->order[k->norder++] = buf[1];
+    if (buf[1] >= 0x08 && buf[1] <= 0x0A) {
+        if (k->fail_slot_at && (int)k->nslot + 1 == k->fail_slot_at) return -1;
+        memcpy(k->slot[buf[1] - 0x08], buf, len);
+        k->nslot++;
+    }
     if (buf[1] == 0x01) {
         k->nselects++;
         if (!k->ignore_select) k->active = buf[2];
@@ -214,6 +227,10 @@ static ssize_t kb_set(void *ctx, const uint8_t *buf, size_t len)
     if (buf[1] == 0x02) {
         if (k->nwrites < 4) memcpy(k->writes[k->nwrites], buf, len);
         k->nwrites++;
+        if (k->fail_block_first > 0 && k->nwrites <= k->fail_block_first) {
+            return -1;
+        }
+        if (k->drop_writes > 0) { k->drop_writes--; return (ssize_t)len; }
         if (k->fail_after_arm && k->nwrites > 1) {
             return -1;
         }
@@ -269,8 +286,10 @@ static void test_set_effect_rejects(void)
     struct kb k; kbdd_dev_io_t io;
     kb_init(&k, &io);
     CHECK(kbdd_dev_set_effect(&io, 11, NULL) == KBDD_DEV_EINVAL);
-    CHECK(kbdd_dev_set_effect(&io, 15, NULL) == KBDD_DEV_EINVAL);
+    CHECK(kbdd_dev_set_effect(&io, 13, NULL) == KBDD_DEV_EINVAL);
+    CHECK(kbdd_dev_set_effect(&io, 14, NULL) == KBDD_DEV_EINVAL);
     CHECK(kbdd_dev_set_effect(&io, 99, NULL) == KBDD_DEV_EINVAL);
+    CHECK(kbdd_dev_set_effect(&io, 15, NULL) == KBDD_DEV_ENOCUSTOM);  /* no custom data */
     CHECK(k.nwrites == 0);
     kb_init(&k, &io); k.active = 9;                       /* bogus active profile */
     CHECK(kbdd_dev_set_effect(&io, 1, NULL) == KBDD_DEV_EPROTO && k.nwrites == 0);
@@ -278,6 +297,27 @@ static void test_set_effect_rejects(void)
     CHECK(kbdd_dev_set_effect(&io, 1, NULL) == KBDD_DEV_EPROTO && k.nwrites == 0);
     kb_init(&k, &io); k.block[2] = 1;                     /* reply for another profile */
     CHECK(kbdd_dev_set_effect(&io, 1, NULL) == KBDD_DEV_EPROTO && k.nwrites == 0);
+}
+
+/* Effect 15 re-selects the stored custom layout without a flash commit. */
+static void test_set_effect_custom(void)
+{
+    struct kb k; kbdd_dev_io_t io; uint8_t prof = 0;
+
+    kb_init(&k, &io); k.block[11] = 5; k.block[134] = 1; k.block[135] = 9;
+    CHECK(kbdd_dev_set_effect(&io, 15, &prof) == KBDD_DEV_OK);
+    CHECK(prof == 3 && k.nwrites == 1 && k.ncommits == 0);
+    CHECK(k.writes[0][1] == 0x02 && k.writes[0][11] == 15);
+    CHECK(k.writes[0][134] == 1 && k.writes[0][135] == 0);   /* count kept: no commit */
+    CHECK(k.block[11] == 15 && k.block[134] == 1 && k.block[135] == 0);
+
+    kb_init(&k, &io); k.block[134] = 1; k.block[11] = 14;    /* unknown state: refuse */
+    CHECK(kbdd_dev_set_effect(&io, 15, NULL) == KBDD_DEV_EPROTO && k.nwrites == 0);
+    CHECK(strstr(kbdd_dev_last_diag(), "effect 14") != NULL);
+
+    kb_init(&k, &io);
+    CHECK(kbdd_dev_set_effect(&io, 15, NULL) == KBDD_DEV_ENOCUSTOM && k.nwrites == 0);
+    CHECK(strstr(kbdd_dev_last_diag(), "no custom") != NULL);
 }
 
 static void test_set_effect_rollback(void)
@@ -426,6 +466,122 @@ static void test_save_profile(void)
     CHECK(kbdd_dev_save_profile(&io, NULL) == KBDD_DEV_EPROTO && k.nwrites == 0);
 }
 
+static void test_save_custom(void)
+{
+    struct kb k; kbdd_dev_io_t io; uint8_t prof = 0, rgb[70][3]; size_t i;
+
+    for (i = 0; i < 70; i++) { rgb[i][0] = (uint8_t)i; rgb[i][1] = (uint8_t)(i + 1); rgb[i][2] = (uint8_t)(i + 2); }
+
+    /* clean block: three slot reports, then one block write that commits */
+    kb_init(&k, &io); k.block[134] = 255; k.block[11] = 1; k.block[12] = 7;
+    CHECK(kbdd_dev_save_custom(&io, (const uint8_t (*)[3])rgb, &prof) == KBDD_DEV_OK);
+    CHECK(prof == 3 && k.nslot == 3 && k.nwrites == 1);
+    CHECK(k.order[0] == 0x08 && k.order[1] == 0x09 && k.order[2] == 0x0A && k.order[3] == 0x02);
+    CHECK(k.slot[0][2] == 3 && k.slot[0][3] == 0);                       /* profile, slot 0 */
+    CHECK(k.slot[0][8] == 0 && k.slot[0][8 + 70 + 5] == 6 && k.slot[0][8 + 140 + 69] == 71);
+    CHECK(k.slot[1][8] == 1 && k.slot[1][8 + 1] == 0xFF && k.slot[1][8 + 9] == 0x3F && k.slot[1][8 + 182] == 0);
+    CHECK(k.slot[2][8] == 2 && k.slot[2][8 + 69] == 2 && k.slot[2][8 + 70] == 0);
+    CHECK(k.block[11] == 15 && k.block[134] == 1 && k.block[135] == 0);   /* effect 15, 1 slot, slot 0 */
+    CHECK(k.block[12] == 7);                                              /* other fields untouched */
+    CHECK(k.ncommits == 1 && k.flash[11] == 15 && k.flash[134] == 1);     /* committed to flash */
+
+    /* multi-slot state: the count is normalised to 1, so the write commits */
+    kb_init(&k, &io); k.block[134] = 3; k.block[11] = 15;
+    CHECK(kbdd_dev_save_custom(&io, (const uint8_t (*)[3])rgb, NULL) == KBDD_DEV_OK);
+    CHECK(k.block[134] == 1 && k.block[135] == 0 && k.nwrites == 1 && k.ncommits == 1);
+
+    /* already at count 1: 1 -> 255 -> 1 forces a real commit */
+    kb_init(&k, &io); k.block[134] = 1; k.block[11] = 15;
+    CHECK(kbdd_dev_save_custom(&io, (const uint8_t (*)[3])rgb, NULL) == KBDD_DEV_OK);
+    CHECK(k.nwrites == 2 && k.ncommits == 2);
+    CHECK(k.writes[0][134] == 255 && k.writes[1][134] == 1);
+    CHECK(k.block[11] == 15 && k.block[134] == 1 && k.flash[134] == 1);
+
+    /* re-save: the dropped arm write is retried and both transitions commit */
+    kb_init(&k, &io); k.block[134] = 1; k.block[11] = 15; k.drop_writes = 1;
+    CHECK(kbdd_dev_save_custom(&io, (const uint8_t (*)[3])rgb, NULL) == KBDD_DEV_OK);
+    CHECK(k.nwrites == 3 && k.ncommits == 2 && k.block[134] == 1);
+
+    kb_init(&k, &io); k.block[134] = 9;                                   /* unknown state: nothing written */
+    CHECK(kbdd_dev_save_custom(&io, (const uint8_t (*)[3])rgb, NULL) == KBDD_DEV_EPROTO);
+    CHECK(k.nslot == 0 && k.nwrites == 0);
+    kb_init(&k, &io); k.block[134] = 255; k.block[11] = 14;
+    CHECK(kbdd_dev_save_custom(&io, (const uint8_t (*)[3])rgb, NULL) == KBDD_DEV_EPROTO);
+    CHECK(k.nslot == 0 && k.nwrites == 0);
+    kb_init(&k, &io); k.block[134] = 255; k.active = 9;                   /* bogus 0x81 */
+    CHECK(kbdd_dev_save_custom(&io, (const uint8_t (*)[3])rgb, NULL) == KBDD_DEV_EPROTO);
+    CHECK(k.nslot == 0 && k.nwrites == 0);
+    kb_init(&k, &io);
+    CHECK(kbdd_dev_save_custom(&io, NULL, NULL) == KBDD_DEV_EINVAL && k.nslot == 0);
+
+    /* an unacknowledged slot report aborts before the block is touched */
+    kb_init(&k, &io); k.block[134] = 255; k.fail_slot_at = 2;
+    CHECK(kbdd_dev_save_custom(&io, (const uint8_t (*)[3])rgb, NULL) == KBDD_DEV_EIO);
+    CHECK(k.nwrites == 0 && k.block[11] == 0 && k.ncommits == 0);
+    CHECK(k.nslot == 1);                                                  /* slot 0 ok, slot 1 failed twice */
+    CHECK(strstr(kbdd_dev_last_diag(), "not acknowledged") != NULL);
+
+    /* block write not acknowledged: EIO and the original block is restored */
+    kb_init(&k, &io); k.block[134] = 255; k.fail_block_first = 1;
+    CHECK(kbdd_dev_save_custom(&io, (const uint8_t (*)[3])rgb, NULL) == KBDD_DEV_EIO);
+    CHECK(k.nwrites == 2 && k.block[11] == 0 && k.block[134] == 255 && k.ncommits == 0);
+    CHECK(strstr(kbdd_dev_last_diag(), "restored (confirmed)") != NULL);
+
+    kb_init(&k, &io); k.block[134] = 255; k.ignore_write = 1;             /* block ignored: rollback attempted */
+    CHECK(kbdd_dev_save_custom(&io, (const uint8_t (*)[3])rgb, NULL) == KBDD_DEV_EVERIFY);
+    CHECK(k.nwrites == 3 && k.writes[2][11] == 0 && k.writes[2][134] == 255);   /* 2 tries + rollback */
+    CHECK(strstr(kbdd_dev_last_diag(), "not applied") != NULL);
+    CHECK(strstr(kbdd_dev_last_diag(), "@11 want 0x0f") != NULL);
+
+    kb_init(&k, &io); k.block[134] = 255; k.drop_writes = 1;              /* first block write dropped: resent */
+    CHECK(kbdd_dev_save_custom(&io, (const uint8_t (*)[3])rgb, NULL) == KBDD_DEV_OK);
+    CHECK(k.nwrites == 2 && k.block[11] == 15 && k.block[134] == 1 && k.ncommits == 1);
+}
+
+static void test_clear_custom(void)
+{
+    struct kb k; kbdd_dev_io_t io; uint8_t prof = 0, effect = 0xFF;
+
+    kb_init(&k, &io); k.block[134] = 1; k.block[11] = 15; k.block[12] = 7;
+    CHECK(kbdd_dev_clear_custom(&io, &prof, &effect) == KBDD_DEV_OK);
+    CHECK(prof == 3 && effect == 0 && k.nwrites == 2 && k.nslot == 0);   /* effect, then count */
+    CHECK(k.writes[0][11] == 0 && k.writes[0][134] == 1 && k.writes[1][134] == 255);
+    CHECK(k.block[11] == 0 && k.block[134] == 255 && k.block[12] == 7);
+    CHECK(k.ncommits == 1 && k.flash[134] == 255 && k.flash[11] == 0);
+
+    kb_init(&k, &io); k.block[134] = 255;                 /* no custom data: nothing written */
+    CHECK(kbdd_dev_clear_custom(&io, NULL, NULL) == KBDD_DEV_EPROTO && k.nwrites == 0);
+    CHECK(strstr(kbdd_dev_last_diag(), "no custom") != NULL);
+    kb_init(&k, &io); k.block[134] = 1; k.block[11] = 14; /* unknown effect-14 state: refuse */
+    CHECK(kbdd_dev_clear_custom(&io, NULL, NULL) == KBDD_DEV_EPROTO && k.nwrites == 0);
+    kb_init(&k, &io); k.block[134] = 1; k.active = 9;
+    CHECK(kbdd_dev_clear_custom(&io, NULL, NULL) == KBDD_DEV_EPROTO && k.nwrites == 0);
+
+    kb_init(&k, &io); k.block[134] = 1; k.block[11] = 15; k.ignore_write = 1;
+    CHECK(kbdd_dev_clear_custom(&io, NULL, NULL) == KBDD_DEV_EVERIFY);
+    CHECK(strstr(kbdd_dev_last_diag(), "step 1/2") != NULL);
+    CHECK(k.nwrites == 3 && k.writes[2][134] == 1 && k.writes[2][11] == 15);   /* 2 tries + rollback */
+
+    /* transport failure on the first step is rolled back too */
+    kb_init(&k, &io); k.block[134] = 1; k.block[11] = 15; k.fail_block_first = 1;
+    CHECK(kbdd_dev_clear_custom(&io, NULL, NULL) == KBDD_DEV_EIO);
+    CHECK(k.nwrites == 2 && k.block[134] == 1 && k.block[11] == 15 && k.ncommits == 0);
+    CHECK(strstr(kbdd_dev_last_diag(), "restored (confirmed)") != NULL);
+
+    kb_init(&k, &io); k.block[134] = 1; k.block[11] = 15; k.drop_writes = 1;   /* dropped write is resent */
+    CHECK(kbdd_dev_clear_custom(&io, NULL, NULL) == KBDD_DEV_OK);
+    CHECK(k.nwrites == 3 && k.block[134] == 255 && k.block[11] == 0 && k.ncommits == 1);
+
+    kb_init(&k, &io); k.block[134] = 2; k.block[11] = 5;                      /* effect already fine: one write */
+    effect = 0xFF;
+    CHECK(kbdd_dev_clear_custom(&io, NULL, &effect) == KBDD_DEV_OK &&
+          k.nwrites == 1 && k.block[11] == 5 && k.block[134] == 255);
+    CHECK(effect == 5);
+
+    kb_init(&k, &io); k.block[134] = 1; k.block[11] = 15;
+    CHECK(kbdd_dev_clear_custom(&io, NULL, NULL) == KBDD_DEV_OK && k.block[11] == 0);
+}
+
 static void test_set_field_diag(void)
 {
     struct kb k; kbdd_dev_io_t io;
@@ -479,10 +635,13 @@ int main(void)
     test_set_colors();
     test_set_field_diag();
     test_save_profile();
+    test_save_custom();
+    test_clear_custom();
     test_switch_profile();
     test_set_field();
     test_set_effect_ok();
     test_set_effect_rejects();
+    test_set_effect_custom();
     test_set_effect_rollback();
     test_restore_profile();
     test_query_active();

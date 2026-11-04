@@ -183,6 +183,23 @@ static int edit_profile(const kbdd_dev_io_t *io, int field, uint8_t value,
         st = kbc_profile_block_set_colors(before, sizeof(before), prof, ce->effect,
                                           (const uint8_t (*)[3])ce->rgb, ce->count,
                                           rep, sizeof(rep));
+    } else if (field == KBC_FIELD_MODE && value == KBC_LED_EFFECT_CUSTOM) {
+        /* Re-select the custom layout that is already stored; the count byte is
+         * kept, so this is a RAM change only (no flash commit). */
+        st = kbc_profile_block_custom_select_report(before, sizeof(before), prof,
+                                                    rep, sizeof(rep));
+        if (st == KBC_ERR_UNSUPPORTED) {
+            if (before[KBC_PBLK_OFF_MODE] == KBC_LED_EFFECT_OBSERVED_14) {
+                (void)snprintf(g_diag, sizeof(g_diag),
+                               "profile %u: effect 14 is an unknown device state; not overwriting",
+                               (unsigned)prof);
+                return KBDD_DEV_EPROTO;
+            }
+            (void)snprintf(g_diag, sizeof(g_diag),
+                           "profile %u has no custom LED layout (count %u)",
+                           (unsigned)prof, (unsigned)before[KBC_PBLK_OFF_CUSTOM_COUNT]);
+            return KBDD_DEV_ENOCUSTOM;
+        }
     } else {
         st = kbc_profile_block_set_field(before, sizeof(before), prof,
                                          (kbc_profile_field)field, value, rep, sizeof(rep));
@@ -383,4 +400,185 @@ int kbdd_dev_save_profile(const kbdd_dev_io_t *io, uint8_t *profile_out)
         return KBDD_DEV_EVERIFY;
     }
     return KBDD_DEV_OK;
+}
+
+/* Sends `rep` at most twice and returns 1 once the read-back matches it exactly.
+ * On failure *rc_out receives the last transport/protocol error. */
+static int write_confirm(const kbdd_dev_io_t *io, uint8_t prof, const uint8_t *rep,
+                         uint8_t *after, int *rc_out)
+{
+    int i, rc = KBDD_DEV_OK;
+
+    *rc_out = KBDD_DEV_OK;
+    for (i = 0; i < 2; i++) {
+        if (io->set_feature(io->ctx, rep, KBC_FEATURE_REPORT_SIZE) < 0) {
+            *rc_out = KBDD_DEV_EIO;
+            return 0;
+        }
+        io->sleep_ms(io->ctx, 300u);
+        rc = kbdd_dev_query(io, KBC_OP_READ_PROFILE_BLOCK, prof, after);
+        if (rc == KBDD_DEV_OK && memcmp(after + 3, rep + 3, 261) == 0) return 1;
+        io->sleep_ms(io->ctx, 500u);
+        rc = kbdd_dev_query(io, KBC_OP_READ_PROFILE_BLOCK, prof, after);
+        if (rc == KBDD_DEV_OK && memcmp(after + 3, rep + 3, 261) == 0) return 1;
+    }
+    *rc_out = rc;
+    return 0;
+}
+
+/* 0x08/0x09/0x0A are write-only in this protocol: there is no read-back for slot
+ * data.  Retry a failed report, but abort before the block commit if one is still
+ * not acknowledged; the keyboard then keeps the previously committed slot data. */
+static int write_custom_slots(const kbdd_dev_io_t *io,
+                              const uint8_t slots[3][KBC_FEATURE_REPORT_SIZE])
+{
+    size_t i;
+    int tries;
+
+    for (i = 0; i < 3; i++) {
+        for (tries = 0; tries < 2; tries++) {
+            if (io->set_feature(io->ctx, slots[i], KBC_FEATURE_REPORT_SIZE) >= 0) break;
+            io->sleep_ms(io->ctx, 200u);
+        }
+        if (tries == 2) {
+            (void)snprintf(g_diag, sizeof(g_diag),
+                           "slot report %zu/3 (opcode 0x%02X) not acknowledged; "
+                           "block not activated (slot data is write-only and may be partial)",
+                           i + 1, (unsigned)slots[i][1]);
+            return KBDD_DEV_EIO;
+        }
+        io->sleep_ms(io->ctx, i == 2 ? 600u : 300u);   /* the keyboard may be busy storing the slot */
+    }
+    return KBDD_DEV_OK;
+}
+
+int kbdd_dev_save_custom(const kbdd_dev_io_t *io, const uint8_t rgb[70][3], uint8_t *profile_out)
+{
+    uint8_t act[264], before[264], rep[264], arm[264], undo[264], after[264], chk[264];
+    uint8_t slots[3][KBC_FEATURE_REPORT_SIZE];
+    uint8_t prof;
+    kbc_status st;
+    const uint8_t *wanted;
+    int rc = KBDD_DEV_OK, stage = 1;
+
+    g_diag[0] = '\0';
+    if (io == NULL || rgb == NULL) return KBDD_DEV_EINVAL;
+    rc = kbdd_dev_query(io, KBC_OP_READ_ACTIVE_PROFILE, 0, act);
+    if (rc != KBDD_DEV_OK) return rc;
+    if (act[1] != KBC_OP_READ_ACTIVE_PROFILE) return KBDD_DEV_EPROTO;
+    prof = act[2];
+    if (prof < 1 || prof > 4) return KBDD_DEV_EPROTO;
+    rc = kbdd_dev_query(io, KBC_OP_READ_PROFILE_BLOCK, prof, before);
+    if (rc != KBDD_DEV_OK) return rc;
+
+    /* Build everything first: nothing is written if any report is invalid. */
+    if (kbc_custom_slot_reports(prof, 0, rgb, slots) != KBC_OK) return KBDD_DEV_EINVAL;
+    st = kbc_profile_block_custom_report(before, sizeof(before), prof, 0, rep, sizeof(rep));
+    if (st == KBC_OK) {
+        st = kbc_profile_block_custom_arm_report(before, sizeof(before), prof,
+                                                 arm, sizeof(arm));
+    }
+    if (st != KBC_OK) {
+        (void)snprintf(g_diag, sizeof(g_diag),
+                       "profile %u: effect byte %u, custom count %u",
+                       (unsigned)prof, before[KBC_PBLK_OFF_MODE],
+                       before[KBC_PBLK_OFF_CUSTOM_COUNT]);
+        return KBDD_DEV_EPROTO;
+    }
+    if (profile_out != NULL) *profile_out = prof;
+
+    /* 1) slot data (0x08 colour, 0x09 frame, 0x0A effect): allowlisted opcodes only.
+     * The block is only touched after all three reports were acknowledged. */
+    rc = write_custom_slots(io, slots);
+    if (rc != KBDD_DEV_OK) return rc;
+
+    /* 2) activate: effect 15 + count 1.  If the profile is already at count 1,
+     * write the 255 arm report first; without a count transition the keyboard
+     * would not commit (and a dropped write would be invisible to the read-back). */
+    if (before[KBC_PBLK_OFF_CUSTOM_COUNT] == KBC_COMMIT_ARM) {
+        if (!write_confirm(io, prof, arm, after, &rc)) goto failed;
+    }
+    stage = 2;
+    if (write_confirm(io, prof, rep, after, &rc)) return KBDD_DEV_OK;
+
+failed:
+    wanted = (stage == 1) ? arm : rep;
+    (void)snprintf(g_diag, sizeof(g_diag), "profile %u, step %d/2 not applied: ",
+                   (unsigned)prof, stage);
+    if (rc == KBDD_DEV_OK) diag_append_diffs(wanted, after);
+
+    /* Best effort: the original block is restored and verified.  Slot data is
+     * write-only, so a partial slot report cannot be rolled back. */
+    if (kbc_profile_block_to_write(before, sizeof(before), prof, undo, sizeof(undo)) == KBC_OK) {
+        (void)io->set_feature(io->ctx, undo, sizeof(undo));
+        io->sleep_ms(io->ctx, 300u);
+        if (kbdd_dev_query(io, KBC_OP_READ_PROFILE_BLOCK, prof, chk) == KBDD_DEV_OK &&
+            memcmp(chk + 3, before + 3, sizeof(chk) - 3) == 0) {
+            strncat(g_diag, "original block restored (confirmed); slot data is write-only",
+                    sizeof(g_diag) - strlen(g_diag) - 1);
+        } else {
+            strncat(g_diag, "RESTORE NOT CONFIRMED: check with kbctl dump-block",
+                    sizeof(g_diag) - strlen(g_diag) - 1);
+        }
+    }
+    return rc == KBDD_DEV_EIO ? KBDD_DEV_EIO : KBDD_DEV_EVERIFY;
+}
+
+int kbdd_dev_clear_custom(const kbdd_dev_io_t *io, uint8_t *profile_out,
+                          uint8_t *effect_out)
+{
+    uint8_t act[264], before[264], rep[264], step1[264], undo[264], after[264], chk[264];
+    uint8_t prof;
+    const uint8_t *wanted;
+    int rc = KBDD_DEV_OK, stage = 1;
+
+    g_diag[0] = '\0';
+    if (io == NULL) return KBDD_DEV_EINVAL;
+    rc = kbdd_dev_query(io, KBC_OP_READ_ACTIVE_PROFILE, 0, act);
+    if (rc != KBDD_DEV_OK) return rc;
+    if (act[1] != KBC_OP_READ_ACTIVE_PROFILE) return KBDD_DEV_EPROTO;
+    prof = act[2];
+    if (prof < 1 || prof > 4) return KBDD_DEV_EPROTO;
+    rc = kbdd_dev_query(io, KBC_OP_READ_PROFILE_BLOCK, prof, before);
+    if (rc != KBDD_DEV_OK) return rc;
+    if (kbc_profile_block_custom_clear_report(before, sizeof(before), prof,
+                                              rep, sizeof(rep)) != KBC_OK) {
+        (void)snprintf(g_diag, sizeof(g_diag), "profile %u has no custom LED data (count %u)",
+                       (unsigned)prof, before[KBC_PBLK_OFF_CUSTOM_COUNT]);
+        return KBDD_DEV_EPROTO;
+    }
+    if (profile_out != NULL) *profile_out = prof;
+
+    /* Two single-field steps, safest order: (1) effect only (RAM, no commit), then
+     * (2) count 255, the same clean write 'led save' uses (commits to flash). */
+    memcpy(step1, rep, sizeof(step1));
+    step1[KBC_PBLK_OFF_CUSTOM_COUNT] = before[KBC_PBLK_OFF_CUSTOM_COUNT];
+    if (step1[KBC_PBLK_OFF_MODE] != before[KBC_PBLK_OFF_MODE] &&
+        !write_confirm(io, prof, step1, after, &rc)) {
+        goto failed;
+    }
+    stage = 2;
+    if (write_confirm(io, prof, rep, after, &rc)) {
+        if (effect_out != NULL) *effect_out = rep[KBC_PBLK_OFF_MODE];
+        return KBDD_DEV_OK;
+    }
+
+failed:
+    wanted = (stage == 1) ? step1 : rep;
+    (void)snprintf(g_diag, sizeof(g_diag), "profile %u, step %d/2 not applied: ",
+                   (unsigned)prof, stage);
+    if (rc == KBDD_DEV_OK) diag_append_diffs(wanted, after);
+    if (kbc_profile_block_to_write(before, sizeof(before), prof, undo, sizeof(undo)) == KBC_OK) {
+        (void)io->set_feature(io->ctx, undo, sizeof(undo));
+        io->sleep_ms(io->ctx, 300u);
+        if (kbdd_dev_query(io, KBC_OP_READ_PROFILE_BLOCK, prof, chk) == KBDD_DEV_OK &&
+            memcmp(chk + 3, before + 3, sizeof(chk) - 3) == 0) {
+            strncat(g_diag, "original block restored (confirmed)",
+                    sizeof(g_diag) - strlen(g_diag) - 1);
+        } else {
+            strncat(g_diag, "RESTORE NOT CONFIRMED: check with kbctl dump-block",
+                    sizeof(g_diag) - strlen(g_diag) - 1);
+        }
+    }
+    return rc == KBDD_DEV_EIO ? KBDD_DEV_EIO : KBDD_DEV_EVERIFY;
 }

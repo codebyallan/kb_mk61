@@ -119,10 +119,39 @@ static void test_valid_animation_config(void)
     CHECK(k.config_anim_rgb[0] == 10 && k.config_anim_rgb[1] == 20 && k.config_anim_rgb[2] == 30);
 }
 
+/* mode 5 = keyboard-owned custom LED: valid, and preserved by a save/load. */
+static void test_valid_custom_config(void)
+{
+    char dir[] = "/tmp/kbdd-config-custom-XXXXXX";
+    char path[512];
+    kbdd_ctx_t k, r;
+
+    CHECK(load_temp("mode 5\neffect 12\nbrightness 9\n", &k) == 0);
+    CHECK(k.config_mode == KBDD_CONFIG_CUSTOM);
+    CHECK(k.config_effect == 12);
+    CHECK(k.config_brightness == 9);
+
+    CHECK(mkdtemp(dir) != NULL);
+    CHECK(setenv("XDG_CONFIG_HOME", dir, 1) == 0);
+    CHECK(kbdd_save_config(&k) == 0);
+    snprintf(path, sizeof(path), "%s/kbdd/config", dir);
+    memset(&r, 0, sizeof(r));
+    CHECK(kbdd_load_config_file(&r, path) == 0);
+    CHECK(r.config_mode == KBDD_CONFIG_CUSTOM);
+    CHECK(r.config_effect == 12);
+    CHECK(r.config_brightness == 9);
+
+    unlink(path);
+    snprintf(path, sizeof(path), "%s/kbdd", dir);
+    rmdir(path);
+    rmdir(dir);
+    unsetenv("XDG_CONFIG_HOME");
+}
+
 static void test_invalid_cases(void)
 {
     static const char * const cases[] = {
-        "mode 5\n",                       /* invalid mode */
+        "mode 6\n",                       /* invalid mode */
         "effect 13\n",                    /* effect out of range */
         "effect foo\n",                   /* effect not a number */
         "brightness 11\n",                /* brightness > max */
@@ -336,6 +365,7 @@ int main(void)
     test_empty_file_defaults();
     test_valid_full_config();
     test_valid_animation_config();
+    test_valid_custom_config();
     test_invalid_cases();
     test_boundary_cases();
     test_save_writes_animation_once();

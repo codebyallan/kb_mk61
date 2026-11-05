@@ -1,5 +1,5 @@
 Name:           mk61
-Version:        0.5.1
+Version:        1.0.0
 Release:        1%{?dist}
 Summary:        Clean-room keyboard stack for Linux (library, daemon and CLI)
 License:        GPL-2.0-only
@@ -63,6 +63,24 @@ fi
 %{_libdir}/libkbcore.so
 
 %changelog
+* Thu Nov 05 2026 mk61 maintainers - 1.0.0-1
+- First stable release (stable 1)
+- Add kbctl caps command to persist LED/write capabilities
+- Persist macro alongside keymap config
+- Fix single-writer keymap persistence
+- Persist keymap/remap alongside LED config
+- Add led palette persistence, permission-gated restore and field reapply
+- Arm custom slot 0 in save_profile write
+- Verify read-back after save_profile restoration write
+- Persist profile opts (0x0B direction/win_lock) across restart
+- Rollback keymap marker when macro write fails
+- Retry opts write on transport failure
+- Add profile opts command (0x0B direction/winlock)
+- Add key macros (0xB2/0x05) and fix macro encoding
+- Update README for hardware validation status
+- Add key remap (0x03) command and daemon support
+- Accept 'custom' alias for led effect 15
+
 * Mon Nov 02 2026 mk61 maintainers - 0.4.1-1
 - remove public generic profile write
 - add verified profile recovery

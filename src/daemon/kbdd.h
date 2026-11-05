@@ -148,8 +148,6 @@ int kbdd_load_config(kbdd_ctx_t *k);
 int kbdd_load_config_file(kbdd_ctx_t *k, const char *path);
 int kbdd_save_config(const kbdd_ctx_t *k);
 int kbdd_config_has_colors(const kbdd_ctx_t *k);
-int kbdd_save_keymap(const kbdd_ctx_t *k, uint8_t profile,
-                     const uint8_t map[3][KBC_KEY_POSITIONS]);
 int kbdd_load_keymap(kbdd_ctx_t *k, uint8_t profile,
                      uint8_t map[3][KBC_KEY_POSITIONS]);
 int kbdd_hidraw_enumerate(const kbdd_model_t *models, size_t model_count,

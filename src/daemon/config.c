@@ -445,54 +445,10 @@ static int kbdd_keymap_path(char *path, size_t size, uint8_t profile)
     return 0;
 }
 
-/* Persist the 3 x 70 keymap of `profile` atomically: write a 16-byte header
- * (magic + version + dimensions) followed by the matrix to a .tmp file,
- * tighten permissions to 0600, then rename over the real file. Mirrors
- * kbdd_save_config() so a crash never leaves a partial keymap behind. */
-int kbdd_save_keymap(const kbdd_ctx_t *k, uint8_t profile,
-                     const uint8_t map[3][KBC_KEY_POSITIONS])
-{
-    char path[768], tmp[800];
-    FILE *f;
-    kbdd_keymap_header_t hdr;
-
-    if (k == NULL || map == NULL || profile < 1 || profile > 4 ||
-        kbdd_keymap_path(path, sizeof(path), profile) != 0 ||
-        snprintf(tmp, sizeof(tmp), "%s.tmp", path) >= (int)sizeof(tmp)) {
-        return -1;
-    }
-
-    /* Build header: magic + version + fixed dimensions. */
-    memset(&hdr, 0, sizeof(hdr));
-    hdr.magic = KBDD_KEYMAP_MAGIC;
-    hdr.version = KBDD_KEYMAP_VERSION;
-    hdr.layer_count = 3;
-    hdr.positions_per_layer = KBC_KEY_POSITIONS;
-
-    f = fopen(tmp, "w");
-    if (f == NULL) return -1;
-    if (fchmod(fileno(f), 0600) != 0) {
-        fclose(f);
-        unlink(tmp);
-        return -1;
-    }
-    if (fwrite(&hdr, 1, sizeof(hdr), f) != sizeof(hdr) ||
-        fwrite(map, 1, 3u * KBC_KEY_POSITIONS, f) != 3u * KBC_KEY_POSITIONS) {
-        fclose(f);
-        unlink(tmp);
-        return -1;
-    }
-    if (fclose(f) != 0 || rename(tmp, path) != 0) {
-        unlink(tmp);
-        return -1;
-    }
-    return 0;
-}
-
 /* Load the persisted keymap of `profile` if present. Returns 0 and fills
  * `map` on success, 0 when no file exists yet (nothing to restore), -1 on
  * error or if the file fails magic/version/size validation (corrupt or not
- * a keymap file). */
+ * a keymap file). The file is owned by kbctl; the daemon only reads it back. */
 int kbdd_load_keymap(kbdd_ctx_t *k, uint8_t profile,
                      uint8_t map[3][KBC_KEY_POSITIONS])
 {

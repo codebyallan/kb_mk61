@@ -248,6 +248,8 @@ kbctl remap reset
   profile on restore. The file starts with a 16-byte header (magic, version, layer
   count, positions per layer); on load the daemon validates magic and version before
   trusting the 210-byte matrix, so corrupt or unrelated files are rejected.
+  The file is written by `kbctl remap`/`kbctl macro` and read by `kbdd` only for
+  restore; the daemon does not overwrite it.
 
 ```sh
 kbctl remap caps=lctrl

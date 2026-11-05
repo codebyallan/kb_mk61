@@ -1106,16 +1106,9 @@ static void op_complete(kbdd_ctx_t *kctx, kbdd_op_node_t *op,
             if (n >= 0 && (size_t)n < sizeof(buf)) {
                 op_reply(kctx, op, buf, (uint32_t)n + 1);
             }
-            /* Persist the keymap locally, same atomic temp-then-rename
-             * pattern as kbdd_save_config() for LED/other profile settings. */
-            if (kbdd_save_keymap(kctx, r->profile,
-                                 (const uint8_t (*)[KBC_KEY_POSITIONS])op->payload) != 0) {
-                fprintf(stderr,
-                        "kbdd: keymap written to profile %u but local state not saved\n",
-                        (unsigned)r->profile);
-            }
             /* Remember the persisted keymap so a reconnect/restart can
-             * re-apply it via kbdd_op_queue_restore_config(). */
+             * re-apply it via kbdd_op_queue_restore_config(). The actual
+             * file is owned by kbctl; the daemon only reads it back. */
             kctx->config_keymap_profile = r->profile;
             memcpy(kctx->config_keymap, op->payload, 3u * KBC_KEY_POSITIONS);
             kctx->config_keymap_set = 1;

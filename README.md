@@ -203,6 +203,11 @@ kbctl profile <1-4>
   the complete block by reading it back, and rolls back to the previous block
   if verification fails. It changes RAM only and requires
   `KBDD_ENABLE_PROFILE_WRITE=1`.
+- `restore-profile` writes the full profile parameter block to the keyboard,
+  which may contain an older (or no) key matrix. It does **not** delete or
+  modify `~/.config/kbdd/keymap-profile<N>.bin`. After a successful restore,
+  `kbdd` re-applies the locally persisted keymap to the active profile so the
+  user's remap is not silently lost by the restore.
 - `dump-block` reads and displays a raw 264-byte profile parameter block,
   optionally saving it to a file.
 - `diff-block` compares two saved 264-byte blocks and reports changed offsets.
@@ -230,13 +235,19 @@ kbctl remap reset
   `lctrl`, `left`, `play`, `volup`, `mouse1`, `profile1`, ...) or a raw `0xNN`.
 - The matrix is write-only in the protocol: the write is acknowledged but cannot be
   verified by read-back. `kbctl` keeps a local copy of the last matrix it wrote for each
-  profile (`$XDG_STATE_HOME/kbctl/keymap-profile<N>.bin`, default
-  `~/.local/state/kbctl`). Each call starts from that copy, so keys you do not
-  mention keep their previous remap. `remap reset` restores the factory map and
-  deletes the copy. A remap made by another tool is unknown to `kbctl` and is
+  profile (`$XDG_CONFIG_HOME/kbdd/keymap-profile<N>.bin`, default
+  `~/.config/kbdd/`, beside the daemon config). Each call starts from that copy, so keys
+  you do not mention keep their previous remap. `remap reset` restores the factory map
+  and deletes the copy. A remap made by another tool is unknown to `kbctl` and is
   overwritten by the next call.
 - `0xB2` (macro marker) is rejected by `remap`; use `kbctl macro` instead. A `0xB2` left in
   the local copy is replaced by the factory code on the next `remap`.
+- The daemon persists the keymap locally (`~/.config/kbdd/keymap-profile<N>.bin`,
+  mode `0600`, atomic temp-then-rename, same pattern as the LED config) so it survives
+  a `kbdd` restart or keyboard reconnect. The saved keymap is re-applied to the active
+  profile on restore. The file starts with a 16-byte header (magic, version, layer
+  count, positions per layer); on load the daemon validates magic and version before
+  trusting the 210-byte matrix, so corrupt or unrelated files are rejected.
 
 ```sh
 kbctl remap caps=lctrl
@@ -407,10 +418,13 @@ report-rate index (`led report-rate`) in `$XDG_CONFIG_HOME/kbdd/config` (or
 arrows / Win lock) are likewise persisted and re-applied on daemon restart
 or keyboard reconnect. Direction and report rate are restored on daemon
 restart or keyboard reconnect only when they were set through `kbctl`, so a
-value never chosen on this host is not overwritten. Keys unknown to this
-version are ignored and kept on save (so a downgrade
-does not lose newer settings); a file with invalid values is moved to
-`config.invalid` rather than overwritten. `kbdd/` may be a symlink to a
+value never chosen on this host is not overwritten. The key remap written by
+`kbctl remap`/`kbctl macro` is also persisted in
+`$XDG_CONFIG_HOME/kbdd/keymap-profile<N>.bin` (mode `0600`, atomic
+temp-then-rename) and re-applied to the active profile on restart or
+reconnect. Keys unknown to this version are ignored and kept on save (so a
+downgrade does not lose newer settings); a file with invalid values is moved
+to `config.invalid` rather than overwritten. `kbdd/` may be a symlink to a
 directory you own. Selecting `solid`, `pos`, or `effect` replaces the
 other visual modes, so only one is restored after a keyboard reconnect or
 daemon restart. `led clear` removes all saved colors and disables the saved

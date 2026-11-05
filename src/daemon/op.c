@@ -1015,6 +1015,24 @@ static void op_complete(kbdd_ctx_t *kctx, kbdd_op_node_t *op,
         if (r->rc == KBDD_DEV_OK) {
             op_reply_text(kctx, op,
                 "ok: profile restored and verified by read-back (RAM only; use 'led save' for the active profile)");
+            /* A restored 264-byte block may contain an older (or no) key
+             * matrix. Re-apply the locally persisted keymap so the user's
+             * remap is not silently lost by the restore. restore-profile does
+             * not delete or modify ~/.config/kbdd/keymap-profile<N>.bin. */
+            if (kctx->config_keymap_set &&
+                kctx->config_keymap_profile >= 1 &&
+                kctx->config_keymap_profile <= 4) {
+                kbdd_ipc_message_t fake_req;
+                memset(&fake_req, 0, sizeof(fake_req));
+                fake_req.payload = kctx->config_keymap[0];
+                fake_req.payload_len = 3u * KBC_KEY_POSITIONS;
+                if (!kbdd_op_has_room() ||
+                    kbdd_op_queue_keymap(&fake_req, &op->dev, 0) != 0) {
+                    fprintf(stderr,
+                            "kbdd: profile %u restored but keymap re-apply queued failed\n",
+                            (unsigned)kctx->config_keymap_profile);
+                }
+            }
         } else {
             op_send_error(kctx, op, r);
         }
@@ -1088,6 +1106,19 @@ static void op_complete(kbdd_ctx_t *kctx, kbdd_op_node_t *op,
             if (n >= 0 && (size_t)n < sizeof(buf)) {
                 op_reply(kctx, op, buf, (uint32_t)n + 1);
             }
+            /* Persist the keymap locally, same atomic temp-then-rename
+             * pattern as kbdd_save_config() for LED/other profile settings. */
+            if (kbdd_save_keymap(kctx, r->profile,
+                                 (const uint8_t (*)[KBC_KEY_POSITIONS])op->payload) != 0) {
+                fprintf(stderr,
+                        "kbdd: keymap written to profile %u but local state not saved\n",
+                        (unsigned)r->profile);
+            }
+            /* Remember the persisted keymap so a reconnect/restart can
+             * re-apply it via kbdd_op_queue_restore_config(). */
+            kctx->config_keymap_profile = r->profile;
+            memcpy(kctx->config_keymap, op->payload, 3u * KBC_KEY_POSITIONS);
+            kctx->config_keymap_set = 1;
         } else {
             op_send_error(kctx, op, r);
         }
@@ -1656,6 +1687,21 @@ int kbdd_op_queue_restore_config(kbdd_ctx_t *k, const kbdd_hid_device_t *dev)
         }
         memcpy(k->led_frame, frame, sizeof(k->led_frame));
         has_frame = 1;
+    }
+
+    /* Re-apply the persisted key remap first (write-only in the protocol,
+     * so it cannot be verified by read-back). Follows the same restore
+     * pattern as the LED config saved by kbdd_save_config(). */
+    if (k->config_keymap_set && k->allow_profile_write) {
+        kbdd_op_node_t *kop = op_new(OP_SET_KEYMAP, NULL);
+        if (kop == NULL) {
+            return -1;
+        }
+        op_attach_dev(kop, dev);
+        kop->flags = 0;
+        op_set_payload(kop, (const uint8_t *)k->config_keymap,
+                       3u * KBC_KEY_POSITIONS);
+        op_enqueue(kop);
     }
 
     kbdd_op_node_t *op = op_new(OP_RESTORE_CONFIG, NULL);

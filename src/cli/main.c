@@ -866,16 +866,24 @@ usage:
     return 2;
 }
 
-/* Local copy of the last key matrix written per profile (the keyboard cannot read it back). */
+/* Local copy of the last key matrix written per profile (the keyboard cannot
+ * read it back). Kept beside the daemon config so kbctl and kbdd share a
+ * single source of truth:
+ *   $XDG_CONFIG_HOME/kbdd/keymap-profile<N>.bin  (default ~/.config/kbdd/).
+ * Matches the atomic, 0600-protected pattern of kbdd_save_config(). */
 static int keymap_state_path(unsigned prof, char *out, size_t outsz)
 {
-    const char *base = getenv("XDG_STATE_HOME");
+    const char *xdg = getenv("XDG_CONFIG_HOME");
     const char *home = getenv("HOME");
-    char dir[400];
+    char dir[480];
 
-    if (base != NULL && base[0] == '/') snprintf(dir, sizeof(dir), "%s/kbctl", base);
-    else if (home != NULL) snprintf(dir, sizeof(dir), "%s/.local/state/kbctl", home);
-    else return -1;
+    if (xdg != NULL && xdg[0] != '\0') {
+        snprintf(dir, sizeof(dir), "%s/kbdd", xdg);
+    } else if (home != NULL && home[0] != '\0') {
+        snprintf(dir, sizeof(dir), "%s/.config/kbdd", home);
+    } else {
+        return -1;
+    }
     if (mkdir_p(dir) != 0) return -1;
     snprintf(out, outsz, "%s/keymap-profile%u.bin", dir, prof);
     return 0;
@@ -1004,6 +1012,7 @@ bad_step:
     if (rc == 0 && have_path && (f = fopen(spath, "wb")) != NULL) {
         (void)fwrite(map, 1, 3 * KBC_KEY_POSITIONS, f);
         fclose(f);
+        (void)chmod(spath, 0600);
     }
     return rc;
 usage:
@@ -1070,6 +1079,7 @@ static int cmd_remap(int argc, char **argv)
     if (rc == 0 && have_path && (f = fopen(spath, "wb")) != NULL) {
         (void)fwrite(payload, 1, sizeof(payload), f);
         fclose(f);
+        (void)chmod(spath, 0600);
     }
     return rc;
 usage:

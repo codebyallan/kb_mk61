@@ -162,6 +162,7 @@ kbctl read-config
 kbctl enable-notifications
 kbctl watch
 kbctl active-profile
+kbctl caps
 ```
 
 - `list` lists the devices discovered by `kbdd`.
@@ -174,6 +175,60 @@ kbctl active-profile
   A reader that falls behind loses events but keeps its connection; it then
   receives a `warning: N event(s) dropped` line.
 - `active-profile` queries the active profile from the keyboard.
+- `caps` shows or changes runtime capabilities (LED control and profile writes).
+
+### Capability commands
+
+Runtime capability switches are opt-in and normally set through environment
+variables before starting `kbdd` (`KBDD_ENABLE_LED=1` and/or
+`KBDD_ENABLE_PROFILE_WRITE=1`).  The `kbctl caps` command lets you query and
+toggle them while the daemon is running, with an interactive confirmation for
+any activation.
+
+```sh
+kbctl caps
+kbctl caps led on
+kbctl caps led off
+kbctl caps write on
+kbctl caps write off
+kbctl caps all on
+kbctl caps all off
+```
+
+- `kbctl caps` (no arguments) prints the current state of both capabilities.
+- `kbctl caps led <on|off>` enables or disables LED frame control
+  (`KBDD_ENABLE_LED`). Enabling requires confirmation (`y/n`) and is a no-op
+  when already enabled.
+- `kbctl caps write <on|off>` enables or disables profile/flash writes
+  (`KBDD_ENABLE_PROFILE_WRITE`). Enabling requires confirmation (`y/n`) and is
+  a no-op when already enabled.
+- `kbctl caps all <on|off>` applies the action to both capabilities. Each
+  capability is confirmed individually when enabling.
+
+Changes are **persisted permanently**. When you enable a capability,
+`kbctl caps ... on` writes the matching `Environment=KBDD_ENABLE_*=1` line
+to the systemd drop-in file
+`~/.config/systemd/user/kbdd.service.d/led.conf` — exactly the same file
+that `./install.sh` creates when you run `ENABLE_LED=1 ./install.sh` or
+`ENABLE_PROFILE_WRITE=1 ./install.sh`. It also writes the value to the
+daemon config file (`$XDG_CONFIG_HOME/kbdd/config`).
+
+Because the value lives in the systemd unit environment, it survives a
+`systemctl --user restart kbdd` automatically — no need to re-run the
+command after restarting the daemon.
+
+Environment variables always take precedence over persisted values: if
+`KBDD_ENABLE_LED=1` or `KBDD_ENABLE_PROFILE_WRITE=1` is set in the daemon
+environment (e.g. via the systemd drop-in), that value wins. Use the
+environment variables for production/systemd setups, and `kbctl caps` for
+temporary runtime toggling that you want to make permanent.
+
+> **Security note:** Enabling profile writes allows any local user that can
+> connect to the `kbdd` socket to modify the keyboard's stored state (flash,
+> key remaps, macros, LED effects). Enable `KBDD_ENABLE_PROFILE_WRITE` only
+> when you need it, and prefer the environment-variable opt-in over runtime
+> activation on shared systems. The drop-in and config files are written
+> with mode `0600`, owned by your user.
 
 ### Profile commands
 

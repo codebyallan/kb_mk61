@@ -126,6 +126,8 @@ void kbdd_config_defaults(kbdd_ctx_t *k)
     k->config_macro_key = 0xFF;
     memset(k->config_macro_data, 0, sizeof(k->config_macro_data));
     k->config_macro_set = 0;
+    k->config_allow_led = 0;
+    k->config_allow_profile_write = 0;
 }
 
 int kbdd_config_has_colors(const kbdd_ctx_t *k)
@@ -206,6 +208,18 @@ int kbdd_load_config_file(kbdd_ctx_t *k, const char *path)
                 return -1;
             }
             k->config_opts_set = (int)value;
+        } else if (strcmp(key, "allow_led") == 0) {
+            if (fscanf(f, "%u", &value) != 1 || value > 1) {
+                fclose(f);
+                return -1;
+            }
+            k->config_allow_led = (int)value;
+        } else if (strcmp(key, "allow_profile_write") == 0) {
+            if (fscanf(f, "%u", &value) != 1 || value > 1) {
+                fclose(f);
+                return -1;
+            }
+            k->config_allow_profile_write = (int)value;
         } else if (strcmp(key, "led_direction") == 0) {
             if (fscanf(f, "%u", &value) != 1 || value > 3) {
                 fclose(f);
@@ -367,6 +381,17 @@ int kbdd_save_config(const kbdd_ctx_t *k)
     }
     if (k->config_opts_set &&
         fprintf(f, "opts_set 1\n") < 0) {
+        fclose(f);
+        unlink(tmp);
+        return -1;
+    }
+    if (fprintf(f, "allow_led %u\n", (unsigned)k->config_allow_led) < 0) {
+        fclose(f);
+        unlink(tmp);
+        return -1;
+    }
+    if (fprintf(f, "allow_profile_write %u\n",
+                (unsigned)k->config_allow_profile_write) < 0) {
         fclose(f);
         unlink(tmp);
         return -1;

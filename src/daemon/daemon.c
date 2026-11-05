@@ -134,6 +134,9 @@ static int kbdd_refresh_devices(kbdd_ctx_t *k)
 }
 
 static int kbdd_reply_text(kbdd_ipc_message_t *resp, const char *msg);
+/* Replies with a raw byte buffer (no NUL terminator). */
+static int kbdd_reply_bytes(kbdd_ipc_message_t *resp, const uint8_t *data,
+                            size_t len);
 
 static void kbdd_publish_input_event(kbdd_ctx_t *k, const uint8_t *buf, size_t len)
 {
@@ -647,6 +650,42 @@ int kbdd_handle_opts(kbdd_ctx_t *k, const kbdd_ipc_message_t *req,
                : kbdd_queue_busy(resp);
 }
 
+int kbdd_handle_get_caps(kbdd_ctx_t *k, const kbdd_ipc_message_t *req,
+                         kbdd_ipc_message_t *resp)
+{
+    (void)req;
+    uint8_t payload[1] = {
+        (uint8_t)((k->allow_led ? 1u : 0u) |
+                  ((k->allow_profile_write ? 1u : 0u) << 1))
+    };
+    return kbdd_reply_bytes(resp, payload, sizeof(payload));
+}
+
+int kbdd_handle_set_caps(kbdd_ctx_t *k, const kbdd_ipc_message_t *req,
+                         kbdd_ipc_message_t *resp)
+{
+    const uint8_t *p = req->payload;
+
+    if (p == NULL || req->payload_len != 2) {
+        return kbdd_reply_text(resp, "error: payload must be [mask, value]");
+    }
+
+    uint8_t mask = p[0];
+    uint8_t value = p[1];
+
+    if (mask & KBDD_CAPS_MASK_LED) {
+        k->allow_led = (value & KBDD_CAPS_MASK_LED) ? 1 : 0;
+    }
+    if (mask & KBDD_CAPS_MASK_WRITE) {
+        k->allow_profile_write = ((value >> 1) & 0x01u) ? 1 : 0;
+    }
+
+    /* Persist the new capability state so it survives a daemon restart. */
+    (void)kbdd_save_config(k);
+
+    return kbdd_reply_text(resp, "ok: capabilities updated");
+}
+
 void kbdd_restore_tick(kbdd_ctx_t *k)
 {
     if (k == NULL || !k->restore_pending ||
@@ -716,6 +755,19 @@ static int kbdd_reply_text(kbdd_ipc_message_t *resp, const char *msg)
     }
     memcpy(resp->payload, msg, n + 1);
     resp->payload_len = (uint32_t)(n + 1);
+    return 0;
+}
+
+/* Replies with a raw byte buffer (no NUL terminator). */
+static int kbdd_reply_bytes(kbdd_ipc_message_t *resp, const uint8_t *data,
+                            size_t len)
+{
+    resp->payload = malloc(len);
+    if (resp->payload == NULL) {
+        return -1;
+    }
+    memcpy(resp->payload, data, len);
+    resp->payload_len = (uint32_t)len;
     return 0;
 }
 
@@ -893,6 +945,10 @@ int kbdd_ipc_handle(const kbdd_ipc_message_t *req, kbdd_ipc_message_t *resp,
             return kbdd_handle_field(kctx, req, resp);
         case KBDD_IPC_OP_SET_OPTS:
             return kbdd_handle_opts(kctx, req, resp);
+        case KBDD_IPC_OP_GET_CAPS:
+            return kbdd_handle_get_caps(kctx, req, resp);
+        case KBDD_IPC_OP_SET_CAPS:
+            return kbdd_handle_set_caps(kctx, req, resp);
         default: {
             const char *msg = "error: unsupported command";
             size_t n = strlen(msg);
@@ -995,8 +1051,19 @@ int kbdd_run(int argc, char **argv)
     {
         const char *want_led = getenv("KBDD_ENABLE_LED");
         const char *want_pw = getenv("KBDD_ENABLE_PROFILE_WRITE");
-        kctx.allow_led = (want_led != NULL && strcmp(want_led, "1") == 0);
-        kctx.allow_profile_write = (want_pw != NULL && strcmp(want_pw, "1") == 0);
+        /* Environment variables always win over the persisted config file.
+         * When an env var is absent, fall back to the stored value so a
+         * runtime 'kbctl caps ... on' survives a daemon restart. */
+        if (want_led != NULL) {
+            kctx.allow_led = (strcmp(want_led, "1") == 0) ? 1 : 0;
+        } else {
+            kctx.allow_led = kctx.config_allow_led;
+        }
+        if (want_pw != NULL) {
+            kctx.allow_profile_write = (strcmp(want_pw, "1") == 0) ? 1 : 0;
+        } else {
+            kctx.allow_profile_write = kctx.config_allow_profile_write;
+        }
     }
     if (kctx.count != 0 && (kctx.config_mode != KBDD_CONFIG_CUSTOM ||
         kbdd_config_has_colors(&kctx) || kctx.config_led_direction_set ||

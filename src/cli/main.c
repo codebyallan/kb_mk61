@@ -60,6 +60,7 @@ static void usage(FILE *f)
     fputs("    opts: --once (send one frame, no streaming)  --stride N (frame layout, default = matrix size)\n", f);
     fputs("          sweep: --delay MS  --color RRGGBB  --from N\n", f);
     fputs("  opts <dir 0|1> <winlock 0|1>  Set 0x0B options (transposed arrows, Win lock)\n", f);
+    fputs("  caps [led|write|all] [on|off]  Show or change runtime capabilities (LED, profile write)\n", f);
     fputs("  help                          Show this help\n", f);
     fputs("  version                       Show version\n", f);
     fputs("\nUse 'kbctl help <command>' for detailed help.\n", f);
@@ -112,6 +113,23 @@ static void usage_command(FILE *f, const char *command)
         fputs("Usage: kbctl led <subcommand> [arguments]\n\nUse 'kbctl help led <subcommand>' for a specific LED command.\n", f);
     } else if (strcmp(command, "version") == 0) {
         fputs("Usage: kbctl version\n\nPrint the kbctl and libkbcore versions.\n", f);
+    } else if (strcmp(command, "caps") == 0) {
+        fputs("Usage: kbctl caps\n"
+              "       kbctl caps <led|write|all> <on|off>\n\n"
+              "With no arguments, prints the current runtime capability state:\n"
+              "  LED control:    enabled/disabled  (KBDD_ENABLE_LED)\n"
+              "  Profile write:  enabled/disabled  (KBDD_ENABLE_PROFILE_WRITE)\n\n"
+              "With a target and action, changes a capability at runtime:\n"
+              "  kbctl caps led on     Enable LED frame control (requires interactive confirmation)\n"
+              "  kbctl caps led off    Disable LED frame control\n"
+              "  kbctl caps write on   Enable profile/flash writes (requires interactive confirmation)\n"
+              "  kbctl caps write off  Disable profile/flash writes\n"
+              "  kbctl caps all on     Enable both capabilities (each is confirmed separately)\n"
+              "  kbctl caps all off    Disable both capabilities\n\n"
+              "Enabling a capability that is already enabled is a no-op. Enabling a disabled\n"
+              "capability prompts 'Are you sure ...? (y/n): ' and only proceeds on 'y'.\n"
+              "Changes apply to the running kbdd only; they are not persisted across daemon\n"
+              "restarts unless the matching environment variable is also set.\n", f);
     } else {
         fprintf(f, "kbctl: no help available for '%s'\n", command);
     }
@@ -1493,6 +1511,290 @@ static void hexdump_block(const uint8_t *d, size_t n)
     }
 }
 
+/* Path of the systemd drop-in that kbctl writes to persist capabilities,
+ * mirroring what ./install.sh creates:
+ * ~/.config/systemd/user/kbdd.service.d/led.conf
+ * with lines like: Environment=KBDD_ENABLE_LED=1 */
+static int kbctl_dropin_path(char *out, size_t outsz)
+{
+    const char *xdg = getenv("XDG_CONFIG_HOME");
+    const char *home = getenv("HOME");
+    char dir[512];
+
+    if (xdg != NULL && xdg[0] != '\0') {
+        snprintf(dir, sizeof(dir), "%s/systemd/user/kbdd.service.d", xdg);
+    } else if (home != NULL && home[0] != '\0') {
+        snprintf(dir, sizeof(dir), "%s/.config/systemd/user/kbdd.service.d", home);
+    } else {
+        return -1;
+    }
+    if (mkdir_p(dir) != 0) return -1;
+    if (snprintf(out, outsz, "%s/led.conf", dir) >= (int)outsz) return -1;
+    return 0;
+}
+
+/* Write (or overwrite) the drop-in with the given Environment lines.
+ * Mode 0600, owned by the current user. */
+static int kbctl_dropin_write(int led, int write)
+{
+    char path[512];
+    FILE *f;
+
+    if (kbctl_dropin_path(path, sizeof(path)) != 0) return -1;
+
+    f = fopen(path, "w");
+    if (f == NULL) return -1;
+    if (fchmod(fileno(f), 0600) != 0) {
+        fclose(f);
+        return -1;
+    }
+    fprintf(f, "[Service]\n");
+    if (led) fprintf(f, "Environment=KBDD_ENABLE_LED=1\n");
+    if (write) fprintf(f, "Environment=KBDD_ENABLE_PROFILE_WRITE=1\n");
+    if (fclose(f) != 0) return -1;
+    return 0;
+}
+
+/* Remove a single "Environment=KBDD_ENABLE_<NAME>=1" line from the drop-in,
+ * preserving all other lines. Returns 0 if the line was not present. */
+static int kbctl_dropin_remove_env(const char *name)
+{
+    char path[512];
+    FILE *f, *tmp;
+    char line[256];
+    char want[128];
+    int found = 0;
+
+    if (kbctl_dropin_path(path, sizeof(path)) != 0) return -1;
+
+    f = fopen(path, "r");
+    if (f == NULL) return errno == ENOENT ? 0 : -1;
+
+    snprintf(want, sizeof(want), "Environment=KBDD_ENABLE_%s=1", name);
+
+    tmp = tmpfile();
+    if (tmp == NULL) { fclose(f); return -1; }
+
+    while (fgets(line, sizeof(line), f) != NULL) {
+        line[strcspn(line, "\r\n")] = '\0';
+        if (strcmp(line, want) == 0) {
+            found = 1;
+            continue;
+        }
+        fprintf(tmp, "%s\n", line);
+    }
+    fclose(f);
+
+    if (!found) {
+        fclose(tmp);
+        return 0;
+    }
+
+    /* Rewrite the file without the removed line. */
+    rewind(tmp);
+    f = fopen(path, "w");
+    if (f == NULL) { fclose(tmp); return -1; }
+    if (fchmod(fileno(f), 0600) != 0) { fclose(f); fclose(tmp); return -1; }
+    {
+        int ch;
+        while ((ch = fgetc(tmp)) != EOF) fputc(ch, f);
+    }
+    if (fclose(f) != 0 || fclose(tmp) != 0) return -1;
+    return 0;
+}
+
+/* Apply persisted capability changes: reload systemd and restart kbdd so the
+ * new Environment= lines take effect immediately. */
+static int kbctl_systemd_apply(void)
+{
+    if (system("systemctl --user daemon-reload") != 0) {
+        fprintf(stderr, "kbctl: warning: 'systemctl --user daemon-reload' failed\n");
+        return -1;
+    }
+    if (system("systemctl --user restart kbdd") != 0) {
+        fprintf(stderr, "kbctl: warning: 'systemctl --user restart kbdd' failed\n");
+        return -1;
+    }
+    return 0;
+}
+
+/* Confirms a capability-changing action on stdin.
+ * Returns 1 if the user answered 'y'/'Y', 0 otherwise (including EOF). */
+static int confirm_action(const char *prompt)
+{
+    char buf[16];
+    for (;;) {
+        fputs(prompt, stdout);
+        fflush(stdout);
+        if (fgets(buf, sizeof(buf), stdin) == NULL) {
+            return 0; /* EOF -> treat as no */
+        }
+        if (buf[0] == 'y' || buf[0] == 'Y') {
+            return 1;
+        }
+        if (buf[0] == 'n' || buf[0] == 'N') {
+            return 0;
+        }
+        /* Invalid input: reprompt. */
+    }
+}
+
+/* kbctl caps [led|write|all] [on|off]
+ *
+ * With no arguments, prints the current capability state.
+ * With a target and action, enables or disables the given capability.
+ * Enabling a capability that is already enabled is a no-op.
+ * Enabling a disabled capability requires interactive confirmation (y/n). */
+static int cmd_caps(int argc, char **argv)
+{
+    uint8_t *resp = NULL;
+    uint32_t rlen = 0;
+    int cur_led = 0, cur_write = 0;
+
+    /* Read current state first. */
+    if (ipc_request(KBDD_IPC_OP_GET_CAPS, NULL, 0, &resp, &rlen) != 0) {
+        free(resp);
+        return 1;
+    }
+    if (rlen < 1) {
+        free(resp);
+        fprintf(stderr, "kbctl: daemon did not return capability state\n");
+        return 1;
+    }
+    cur_led   = (resp[0] & KBDD_CAPS_MASK_LED) ? 1 : 0;
+    cur_write = ((resp[0] >> 1) & KBDD_CAPS_MASK_WRITE) ? 1 : 0;
+    free(resp);
+    resp = NULL;
+
+    /* Get-only mode. */
+    if (argc == 2) {
+        printf("LED control:    %s\n", cur_led   ? "enabled" : "disabled");
+        printf("Profile write:  %s\n", cur_write ? "enabled" : "disabled");
+        return 0;
+    }
+
+    /* Set mode: kbctl caps <led|write|all> <on|off> */
+    if (argc != 4) {
+        fprintf(stderr, "Usage: kbctl caps [led|write|all] [on|off]\n");
+        return 2;
+    }
+
+    const char *target = argv[2];
+    const char *action = argv[3];
+
+    int want_led = 0, want_write = 0;
+    if (strcmp(target, "led") == 0) {
+        want_led = 1;
+    } else if (strcmp(target, "write") == 0) {
+        want_write = 1;
+    } else if (strcmp(target, "all") == 0) {
+        want_led = 1;
+        want_write = 1;
+    } else {
+        fprintf(stderr, "kbctl: invalid target '%s' (use led, write or all)\n",
+                target);
+        return 2;
+    }
+
+    int enable;
+    if (strcmp(action, "on") == 0) {
+        enable = 1;
+    } else if (strcmp(action, "off") == 0) {
+        enable = 0;
+    } else {
+        fprintf(stderr, "kbctl: invalid action '%s' (use on or off)\n", action);
+        return 2;
+    }
+
+    uint8_t mask = 0, value = 0;
+    int changed = 0;
+    int new_led = cur_led, new_write = cur_write;
+
+    if (want_led) {
+        if (enable && cur_led) {
+            printf("LED control is already enabled.\n");
+        } else if (enable) {
+            if (!confirm_action("Are you sure you want to enable LED control? (y/n): ")) {
+                printf("Aborted.\n");
+                return 0;
+            }
+            mask |= KBDD_CAPS_MASK_LED;
+            value |= KBDD_CAPS_MASK_LED;
+            new_led = 1;
+            changed = 1;
+        } else if (!enable && !cur_led) {
+            printf("LED control is already disabled.\n");
+        } else {
+            /* disable while enabled: no confirmation needed */
+            mask |= KBDD_CAPS_MASK_LED;
+            new_led = 0;
+            changed = 1;
+        }
+    }
+
+    if (want_write) {
+        if (enable && cur_write) {
+            printf("Profile write is already enabled.\n");
+        } else if (enable) {
+            if (!confirm_action("Are you sure you want to enable profile writes? (y/n): ")) {
+                printf("Aborted.\n");
+                return 0;
+            }
+            mask |= KBDD_CAPS_MASK_WRITE;
+            value |= (uint8_t)(KBDD_CAPS_MASK_WRITE << 1);
+            new_write = 1;
+            changed = 1;
+        } else if (!enable && !cur_write) {
+            printf("Profile write is already disabled.\n");
+        } else {
+            mask |= KBDD_CAPS_MASK_WRITE;
+            new_write = 0;
+            changed = 1;
+        }
+    }
+
+    if (!changed) {
+        return 0;
+    }
+
+    uint8_t payload[2] = { mask, value };
+    if (ipc_request(KBDD_IPC_OP_SET_CAPS, payload, sizeof(payload), &resp, &rlen) != 0) {
+        free(resp);
+        return 1;
+    }
+    int perr = print_reply(resp, rlen);
+    free(resp);
+    if (perr != 0) return perr;
+
+    /* Persist to the systemd drop-in (same file ./install.sh creates) so the
+     * flag survives a 'systemctl --user restart kbdd'. */
+    if (enable) {
+        if (kbctl_dropin_write(new_led, new_write) != 0) {
+            fprintf(stderr, "kbctl: warning: could not write systemd drop-in\n");
+        } else {
+            if (kbctl_systemd_apply() != 0) {
+                fprintf(stderr,
+                    "kbctl: warning: could not apply systemd changes automatically\n");
+            }
+        }
+    } else {
+        if (want_led) kbctl_dropin_remove_env("LED");
+        if (want_write) kbctl_dropin_remove_env("WRITE");
+        if (!new_led && !new_write) {
+            char path[512];
+            if (kbctl_dropin_path(path, sizeof(path)) == 0) (void)unlink(path);
+        }
+        if (want_led || want_write) {
+            if (kbctl_systemd_apply() != 0) {
+                fprintf(stderr,
+                    "kbctl: warning: could not apply systemd changes automatically\n");
+            }
+        }
+    }
+
+    return perr;
+}
+
 static int cmd_dump_block(int argc, char **argv)
 {
     unsigned long prof;
@@ -1801,6 +2103,7 @@ int main(int argc, char **argv)
         free(resp);
         return perr;
     }
+    if (strcmp(cmd, "caps") == 0) return cmd_caps(argc, argv);
     if (strcmp(cmd, "dump-block") == 0) return cmd_dump_block(argc, argv);
     if (strcmp(cmd, "diff-block") == 0) return cmd_diff_block(argc, argv);
     if (strcmp(cmd, "keys") == 0) return cmd_keys();

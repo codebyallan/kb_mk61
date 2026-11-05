@@ -39,6 +39,13 @@
 #define KBDD_OPTS_PAYLOAD_SIZE 2u
 #define KBDD_IPC_OP_RESTORE_PROFILE 20u /* payload [profile 1..4, raw 264-byte read block] */
 
+/* Capability flags (runtime opt-in switches guarded by the daemon). */
+#define KBDD_IPC_OP_GET_CAPS   26u /* no payload; reply: single byte [led|write] */
+#define KBDD_IPC_OP_SET_CAPS   27u /* payload: [mask, value] */
+
+#define KBDD_CAPS_MASK_LED   0x01u /* bit 0: LED control (KBDD_ENABLE_LED) */
+#define KBDD_CAPS_MASK_WRITE 0x02u /* bit 1: profile/flash writes (KBDD_ENABLE_PROFILE_WRITE) */
+
 /* LED_SET payload: [flags, stride, mode, pos, r, g, b] */
 #define KBDD_LED_PAYLOAD_SIZE 7u
 #define KBDD_LED_FLAG_HOLD 0x01u     /* keep re-sending the frame every 40 ms */

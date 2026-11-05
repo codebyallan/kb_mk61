@@ -117,6 +117,11 @@ typedef struct kbdd_ctx {
     uint8_t config_macro_key;      /* key index 0..139, or 0xFF when none */
     uint8_t config_macro_data[KBC_MACRO_SIZE];
     int config_macro_set;          /* 1 once a macro has been persisted */
+    /* Persisted runtime capability switches (survive daemon restart).
+     * These are only honoured when the matching environment variable is not
+     * set; environment variables always win over the stored value. */
+    int config_allow_led;          /* persisted KBDD_ENABLE_LED */
+    int config_allow_profile_write;/* persisted KBDD_ENABLE_PROFILE_WRITE */
     int restore_pending;
     unsigned restore_attempts;
     long long restore_next_ms;
@@ -322,6 +327,10 @@ int kbdd_handle_field(kbdd_ctx_t *k, const kbdd_ipc_message_t *req,
                       kbdd_ipc_message_t *resp);
 int kbdd_handle_opts(kbdd_ctx_t *k, const kbdd_ipc_message_t *req,
                      kbdd_ipc_message_t *resp);
+int kbdd_handle_get_caps(kbdd_ctx_t *k, const kbdd_ipc_message_t *req,
+                         kbdd_ipc_message_t *resp);
+int kbdd_handle_set_caps(kbdd_ctx_t *k, const kbdd_ipc_message_t *req,
+                         kbdd_ipc_message_t *resp);
 void kbdd_restore_tick(kbdd_ctx_t *k);
 
 /* daemon */

@@ -454,12 +454,14 @@ static void test_switch_profile(void)
 
 static void test_save_profile(void)
 {
-    struct kb k; kbdd_dev_io_t io; uint8_t prof = 0;
+    struct kb k; kbdd_dev_io_t io; uint8_t prof = 0, orig135;
 
     kb_init(&k, &io); k.block[134] = 255; k.block[11] = 1; k.block[12] = 7; k.block[19] = 40;
+    orig135 = k.block[135];
     CHECK(kbdd_dev_save_profile(&io, &prof) == KBDD_DEV_OK);
     CHECK(prof == 3 && k.ncommits == 2 && k.nwrites == 2);
     CHECK(k.writes[0][134] == 1 && k.writes[1][134] == 255);       /* arm, then clean */
+    CHECK(k.writes[0][135] == 0 && k.writes[1][135] == orig135);   /* current slot: 0, then restored */
     CHECK(k.flash[12] == 7 && k.flash[19] == 40 && k.flash[134] == 255 && k.flash[11] == 1);
     CHECK(k.block[134] == 255);
 

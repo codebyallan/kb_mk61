@@ -397,6 +397,12 @@ int kbdd_dev_save_profile(const kbdd_dev_io_t *io, uint8_t *profile_out)
     }
     if (profile_out != NULL) *profile_out = prof;
 
+    /* The arming write must toggle both custom fields proven across unplug
+     * cycles: custom count 255 -> 1 and current custom slot 255 -> 0.  The
+     * clean frame (built from the block read above) restores both fields to
+     * their original values. */
+    arm[KBC_PBLK_OFF_CUSTOM_CURRENT] = 0;
+
     /* 1) arm: the keyboard must accept the write (byte 134 reads back as 1) */
     if (io->set_feature(io->ctx, arm, sizeof(arm)) < 0) return KBDD_DEV_EIO;
     io->sleep_ms(io->ctx, 200u);

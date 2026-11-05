@@ -1033,6 +1033,28 @@ static void op_complete(kbdd_ctx_t *kctx, kbdd_op_node_t *op,
                             (unsigned)kctx->config_keymap_profile);
                 }
             }
+            /* Re-apply the locally persisted macro so it is not silently lost
+             * by the restore. restore-profile does not delete or modify
+             * ~/.config/kbdd/macro-profile<N>.bin. */
+            if (kctx->config_macro_set &&
+                kctx->config_macro_key < 2u * KBC_KEY_POSITIONS) {
+                uint8_t mpayload[KBDD_MACRO_PAYLOAD_SIZE];
+                memset(mpayload, 0, sizeof(mpayload));
+                memcpy(mpayload, kctx->config_keymap[0], 3u * KBC_KEY_POSITIONS);
+                mpayload[3u * KBC_KEY_POSITIONS] = kctx->config_macro_key;
+                memcpy(mpayload + 3u * KBC_KEY_POSITIONS + 1,
+                       kctx->config_macro_data, KBC_MACRO_SIZE);
+                kbdd_ipc_message_t fake_req;
+                memset(&fake_req, 0, sizeof(fake_req));
+                fake_req.payload = mpayload;
+                fake_req.payload_len = KBDD_MACRO_PAYLOAD_SIZE;
+                if (!kbdd_op_has_room() ||
+                    kbdd_op_queue_macro(&fake_req, &op->dev, 0) != 0) {
+                    fprintf(stderr,
+                            "kbdd: profile %u restored but macro re-apply queued failed\n",
+                            (unsigned)kctx->config_macro_key);
+                }
+            }
         } else {
             op_send_error(kctx, op, r);
         }
@@ -1092,6 +1114,16 @@ static void op_complete(kbdd_ctx_t *kctx, kbdd_op_node_t *op,
             if (n >= 0 && (size_t)n < sizeof(buf)) {
                 op_reply(kctx, op, buf, (uint32_t)n + 1);
             }
+            /* Remember the persisted macro so a reconnect/restart can
+             * re-apply it via kbdd_op_queue_restore_config(). The actual
+             * file is owned by kbctl; the daemon only reads it back. */
+            if (op->payload != NULL && op->payload_len >= 1) {
+                kctx->config_macro_key = op->payload[3u * KBC_KEY_POSITIONS];
+                memcpy(kctx->config_macro_data,
+                       op->payload + 3u * KBC_KEY_POSITIONS + 1,
+                       KBC_MACRO_SIZE);
+                kctx->config_macro_set = 1;
+            }
         } else {
             op_send_error(kctx, op, r);
         }
@@ -1112,6 +1144,19 @@ static void op_complete(kbdd_ctx_t *kctx, kbdd_op_node_t *op,
             kctx->config_keymap_profile = r->profile;
             memcpy(kctx->config_keymap, op->payload, 3u * KBC_KEY_POSITIONS);
             kctx->config_keymap_set = 1;
+            /* If a macro was persisted on a key and this keymap write
+             * removed the 0xB2 marker (macro <key> clear), invalidate the
+             * in-memory macro so it is not re-applied on restore,
+             * reconnect or restart. The macro file on disk was already
+             * removed by kbctl clear. */
+            if (kctx->config_macro_set &&
+                kctx->config_macro_key < 2u * KBC_KEY_POSITIONS &&
+                op->payload[kctx->config_macro_key] != 0xB2) {
+                kctx->config_macro_set = 0;
+                kctx->config_macro_key = 0xFF;
+                memset(kctx->config_macro_data, 0,
+                       sizeof(kctx->config_macro_data));
+            }
         } else {
             op_send_error(kctx, op, r);
         }
@@ -1695,6 +1740,27 @@ int kbdd_op_queue_restore_config(kbdd_ctx_t *k, const kbdd_hid_device_t *dev)
         op_set_payload(kop, (const uint8_t *)k->config_keymap,
                        3u * KBC_KEY_POSITIONS);
         op_enqueue(kop);
+    }
+
+    /* Re-apply the persisted macro after the keymap (write-only in the
+     * protocol, so it cannot be verified by read-back). */
+    if (k->config_macro_set &&
+        k->config_macro_key < 2u * KBC_KEY_POSITIONS &&
+        k->allow_profile_write) {
+        uint8_t mpayload[KBDD_MACRO_PAYLOAD_SIZE];
+        memset(mpayload, 0, sizeof(mpayload));
+        memcpy(mpayload, k->config_keymap[0], 3u * KBC_KEY_POSITIONS);
+        mpayload[3u * KBC_KEY_POSITIONS] = k->config_macro_key;
+        memcpy(mpayload + 3u * KBC_KEY_POSITIONS + 1,
+               k->config_macro_data, KBC_MACRO_SIZE);
+        kbdd_op_node_t *mop = op_new(OP_SET_MACRO, NULL);
+        if (mop == NULL) {
+            return -1;
+        }
+        op_attach_dev(mop, dev);
+        mop->flags = 0;
+        op_set_payload(mop, mpayload, KBDD_MACRO_PAYLOAD_SIZE);
+        op_enqueue(mop);
     }
 
     kbdd_op_node_t *op = op_new(OP_RESTORE_CONFIG, NULL);

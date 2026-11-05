@@ -866,11 +866,33 @@ usage:
     return 2;
 }
 
-/* Local copy of the last key matrix written per profile (the keyboard cannot
- * read it back). Kept beside the daemon config so kbctl and kbdd share a
- * single source of truth:
- *   $XDG_CONFIG_HOME/kbdd/keymap-profile<N>.bin  (default ~/.config/kbdd/).
- * Matches the atomic, 0600-protected pattern of kbdd_save_config(). */
+/* Path of the persisted macro for a profile, beside the keymap file:
+ * $XDG_CONFIG_HOME/kbdd/macro-profile<N>.bin  (default ~/.config/kbdd/).
+ * Format: 16-byte header (magic, version, key_index, data_len) followed by
+ * KBC_MACRO_SIZE (256) bytes of macro data. Matches the daemon's on-disk
+ * layout so kbdd can read it back for restore. */
+static int macro_state_path(unsigned prof, char *out, size_t outsz)
+{
+    const char *xdg = getenv("XDG_CONFIG_HOME");
+    const char *home = getenv("HOME");
+    char dir[480];
+
+    if (xdg != NULL && xdg[0] != '\0') {
+        snprintf(dir, sizeof(dir), "%s/kbdd", xdg);
+    } else if (home != NULL && home[0] != '\0') {
+        snprintf(dir, sizeof(dir), "%s/.config/kbdd", home);
+    } else {
+        return -1;
+    }
+    if (mkdir_p(dir) != 0) return -1;
+    snprintf(out, outsz, "%s/macro-profile%u.bin", dir, prof);
+    return 0;
+}
+
+/* Path of the persisted keymap for a profile (shared by remap and macro):
+ * $XDG_CONFIG_HOME/kbdd/keymap-profile<N>.bin  (default ~/.config/kbdd/).
+ * Format: 16-byte header (magic, version, layer_count, positions_per_layer)
+ * followed by 3 x KBC_KEY_POSITIONS (210) bytes of keymap. */
 static int keymap_state_path(unsigned prof, char *out, size_t outsz)
 {
     const char *xdg = getenv("XDG_CONFIG_HOME");
@@ -886,6 +908,76 @@ static int keymap_state_path(unsigned prof, char *out, size_t outsz)
     }
     if (mkdir_p(dir) != 0) return -1;
     snprintf(out, outsz, "%s/keymap-profile%u.bin", dir, prof);
+    return 0;
+}
+
+#define KBDD_MACRO_MAGIC_CLI 0x4D435244u   /* "MACD" */
+#define KBDD_MACRO_VERSION_CLI 1u
+
+/* Load persisted macro data (key_index + 256 bytes) for `prof`. Returns 0 and
+ * fills `key_index`/`data` on success, 0 when no file exists yet, -1 on error
+ * or header validation failure. */
+static int macro_state_load(unsigned prof, uint8_t *key_index,
+                            uint8_t data[KBC_MACRO_SIZE])
+{
+    char spath[512];
+    FILE *f;
+    uint32_t hdr[4];
+    size_t n;
+
+    if (macro_state_path(prof, spath, sizeof(spath)) != 0) return -1;
+    f = fopen(spath, "rb");
+    if (f == NULL) return errno == ENOENT ? 0 : -1;
+    n = fread(hdr, 1, sizeof(hdr), f);
+    if (n != sizeof(hdr) ||
+        hdr[0] != KBDD_MACRO_MAGIC_CLI ||
+        hdr[1] != KBDD_MACRO_VERSION_CLI ||
+        hdr[2] >= 2u * KBC_KEY_POSITIONS ||
+        hdr[3] != KBC_MACRO_SIZE) {
+        fclose(f);
+        return -1;
+    }
+    *key_index = (uint8_t)hdr[2];
+    n = fread(data, 1, KBC_MACRO_SIZE, f);
+    fclose(f);
+    if (n != KBC_MACRO_SIZE) return -1;
+    return 0;
+}
+
+/* Persist macro data (key_index + 256 bytes) for `prof` atomically: .tmp +
+ * chmod 0600 + rename. */
+static int macro_state_save(unsigned prof, uint8_t key_index,
+                            const uint8_t data[KBC_MACRO_SIZE])
+{
+    char spath[512], tmp[560];
+    FILE *f;
+    uint32_t hdr[4];
+
+    if (macro_state_path(prof, spath, sizeof(spath)) != 0 ||
+        snprintf(tmp, sizeof(tmp), "%s.tmp", spath) >= (int)sizeof(tmp)) {
+        return -1;
+    }
+    hdr[0] = KBDD_MACRO_MAGIC_CLI;
+    hdr[1] = KBDD_MACRO_VERSION_CLI;
+    hdr[2] = key_index;
+    hdr[3] = KBC_MACRO_SIZE;
+    f = fopen(tmp, "w");
+    if (f == NULL) return -1;
+    if (fchmod(fileno(f), 0600) != 0) {
+        fclose(f);
+        unlink(tmp);
+        return -1;
+    }
+    if (fwrite(hdr, 1, sizeof(hdr), f) != sizeof(hdr) ||
+        fwrite(data, 1, KBC_MACRO_SIZE, f) != KBC_MACRO_SIZE) {
+        fclose(f);
+        unlink(tmp);
+        return -1;
+    }
+    if (fclose(f) != 0 || rename(tmp, spath) != 0) {
+        unlink(tmp);
+        return -1;
+    }
     return 0;
 }
 
@@ -927,18 +1019,31 @@ static int cmd_macro(int argc, char **argv)
     uint8_t def[KBC_KEY_POSITIONS];
     size_t layer = 0, nsteps = 0, l;
     unsigned prof = 0, reps = 1;
-    char spath[512];
-    int i, pos = -1, clear = 0, rc, have_path;
+    char spath[512], spath_macro[512];
+    int i, pos = -1, clear = 0, rc, have_path, have_macro_path;
     FILE *f;
 
     if (active_profile(&prof) != 0) return 1;
     have_path = keymap_state_path(prof, spath, sizeof(spath)) == 0;
+    have_macro_path = macro_state_path(prof, spath_macro, sizeof(spath_macro)) == 0;
     memset(payload, 0, sizeof(payload));
     for (l = 0; l < 3; l++) (void)kbc_keymap_default(l, map + l * KBC_KEY_POSITIONS);
     if (have_path && (f = fopen(spath, "rb")) != NULL) {
         uint8_t saved[3 * KBC_KEY_POSITIONS];
         if (fread(saved, 1, sizeof(saved), f) == sizeof(saved)) memcpy(map, saved, sizeof(saved));
         fclose(f);
+    }
+    if (have_macro_path) {
+        uint8_t mkey = 0;
+        uint8_t mdata[KBC_MACRO_SIZE];
+        if (macro_state_load(prof, &mkey, mdata) == 0) {
+            /* Restore the macro marker in the keymap layer and the macro data. */
+            size_t mlayer = mkey / KBC_KEY_POSITIONS;
+            size_t mpos = mkey % KBC_KEY_POSITIONS;
+            map[mlayer * KBC_KEY_POSITIONS + mpos] = 0xB2;
+            memcpy(payload + 3 * KBC_KEY_POSITIONS + 1, mdata, KBC_MACRO_SIZE);
+            payload[3 * KBC_KEY_POSITIONS] = mkey;
+        }
     }
     /* options first, then the key, then steps */
     for (i = 2; i < argc && pos < 0; i++) {
@@ -1013,6 +1118,18 @@ bad_step:
         (void)fwrite(map, 1, 3 * KBC_KEY_POSITIONS, f);
         fclose(f);
         (void)chmod(spath, 0600);
+    }
+    if (rc == 0 && have_macro_path) {
+        if (clear) {
+            /* Remove persisted macro file when clearing the macro key. */
+            (void)remove(spath_macro);
+        } else if (pos >= 0) {
+            /* Persist macro key index + data for restore. */
+            uint8_t mkey = (uint8_t)(layer * KBC_KEY_POSITIONS + (size_t)pos);
+            if (macro_state_save(prof, mkey, mac) != 0) {
+                fprintf(stderr, "kbctl: macro written to device but local state not saved\n");
+            }
+        }
     }
     return rc;
 usage:

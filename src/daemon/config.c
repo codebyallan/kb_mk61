@@ -123,6 +123,9 @@ void kbdd_config_defaults(kbdd_ctx_t *k)
     memset(k->config_keymap, 0, sizeof(k->config_keymap));
     k->config_keymap_profile = 0;
     k->config_keymap_set = 0;
+    k->config_macro_key = 0xFF;
+    memset(k->config_macro_data, 0, sizeof(k->config_macro_data));
+    k->config_macro_set = 0;
 }
 
 int kbdd_config_has_colors(const kbdd_ctx_t *k)
@@ -478,6 +481,55 @@ int kbdd_load_keymap(kbdd_ctx_t *k, uint8_t profile,
     n = fread(map, 1, 3u * KBC_KEY_POSITIONS, f);
     fclose(f);
     if (n != 3u * KBC_KEY_POSITIONS) return -1;
+    return 0;
+}
+
+/* Path of the persisted macro for a profile, beside the daemon config:
+ * $XDG_CONFIG_HOME/kbdd/macro-profile<N>.bin  (default ~/.config/kbdd/).
+ * Same directory and ownership rules as kbdd_config_path(). */
+static int kbdd_macro_path(char *path, size_t size, uint8_t profile)
+{
+    char dir[512];
+    if (kbdd_config_dir(dir, sizeof(dir)) != 0 ||
+        snprintf(path, size, "%s/macro-profile%u.bin", dir, profile) >= (int)size) {
+        return -1;
+    }
+    return 0;
+}
+
+/* Load the persisted macro of `profile` if present. Returns 0 and fills
+ * `key_index` and `data` on success, 0 when no file exists yet, -1 on
+ * error or if the file fails magic/version/size validation. */
+int kbdd_load_macro(kbdd_ctx_t *k, uint8_t profile,
+                    uint8_t *key_index, uint8_t data[KBC_MACRO_SIZE])
+{
+    char path[768];
+    FILE *f;
+    kbdd_macro_header_t hdr;
+    size_t n;
+
+    if (k == NULL || key_index == NULL || data == NULL || profile < 1 ||
+        profile > 4 || kbdd_macro_path(path, sizeof(path), profile) != 0) {
+        return -1;
+    }
+    f = fopen(path, "rb");
+    if (f == NULL) return errno == ENOENT ? 0 : -1;
+
+    /* Validate header before trusting the payload. */
+    n = fread(&hdr, 1, sizeof(hdr), f);
+    if (n != sizeof(hdr) ||
+        hdr.magic != KBDD_MACRO_MAGIC ||
+        hdr.version != KBDD_MACRO_VERSION ||
+        hdr.key_index >= 2u * KBC_KEY_POSITIONS ||
+        hdr.data_len != KBC_MACRO_SIZE) {
+        fclose(f);
+        return -1;
+    }
+
+    n = fread(data, 1, KBC_MACRO_SIZE, f);
+    fclose(f);
+    if (n != KBC_MACRO_SIZE) return -1;
+    *key_index = (uint8_t)hdr.key_index;
     return 0;
 }
 

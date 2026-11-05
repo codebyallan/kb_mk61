@@ -111,6 +111,12 @@ typedef struct kbdd_ctx {
     uint8_t config_keymap[3][KBC_KEY_POSITIONS];
     uint8_t config_keymap_profile; /* profile (1..4) the stored keymap belongs to */
     int config_keymap_set;         /* 1 once a keymap has been persisted */
+    /* Persisted macro of the active profile: key index (0..139) and 256 bytes
+     * of macro data (opcode 0x05). Saved to ~/.config/kbdd/macro-profile<N>.bin
+     * on every successful OP_SET_MACRO, same atomic pattern as keymap. */
+    uint8_t config_macro_key;      /* key index 0..139, or 0xFF when none */
+    uint8_t config_macro_data[KBC_MACRO_SIZE];
+    int config_macro_set;          /* 1 once a macro has been persisted */
     int restore_pending;
     unsigned restore_attempts;
     long long restore_next_ms;
@@ -140,6 +146,18 @@ typedef struct {
     uint32_t positions_per_layer; /* must be KBC_KEY_POSITIONS */
 } kbdd_keymap_header_t;
 
+/* On-disk header for the persisted macro file (~/.config/kbdd/macro-profile<N>.bin).
+ * Magic lets us reject unrelated files; version lets us evolve the layout. */
+#define KBDD_MACRO_MAGIC 0x4D435244u   /* "MACD" */
+#define KBDD_MACRO_VERSION 1u
+
+typedef struct {
+    uint32_t magic;              /* must be KBDD_MACRO_MAGIC */
+    uint32_t version;            /* must be KBDD_MACRO_VERSION */
+    uint32_t key_index;          /* key index 0..139 (70 + layer*70 for Fn layer) */
+    uint32_t data_len;           /* must be KBC_MACRO_SIZE (256) */
+} kbdd_macro_header_t;
+
 const char *kbdd_dev_err(int rc);
 
 /* config */
@@ -150,6 +168,8 @@ int kbdd_save_config(const kbdd_ctx_t *k);
 int kbdd_config_has_colors(const kbdd_ctx_t *k);
 int kbdd_load_keymap(kbdd_ctx_t *k, uint8_t profile,
                      uint8_t map[3][KBC_KEY_POSITIONS]);
+int kbdd_load_macro(kbdd_ctx_t *k, uint8_t profile,
+                    uint8_t *key_index, uint8_t data[KBC_MACRO_SIZE]);
 int kbdd_hidraw_enumerate(const kbdd_model_t *models, size_t model_count,
                           kbdd_hid_device_t **out_devs, size_t *out_count);
 void kbdd_hidraw_free(kbdd_hid_device_t *devs, size_t count);

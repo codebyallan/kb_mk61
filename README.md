@@ -205,9 +205,10 @@ kbctl profile <1-4>
   `KBDD_ENABLE_PROFILE_WRITE=1`.
 - `restore-profile` writes the full profile parameter block to the keyboard,
   which may contain an older (or no) key matrix. It does **not** delete or
-  modify `~/.config/kbdd/keymap-profile<N>.bin`. After a successful restore,
-  `kbdd` re-applies the locally persisted keymap to the active profile so the
-  user's remap is not silently lost by the restore.
+  modify `~/.config/kbdd/keymap-profile<N>.bin` or
+  `~/.config/kbdd/macro-profile<N>.bin`. After a successful restore,
+  `kbdd` re-applies the locally persisted keymap and macro to the active
+  profile so neither is silently lost by the restore.
 - `dump-block` reads and displays a raw 264-byte profile parameter block,
   optionally saving it to a file.
 - `diff-block` compares two saved 264-byte blocks and reports changed offsets.
@@ -273,7 +274,21 @@ kbctl macro [--layer 0|1|normal|fn] <key> clear
 - Write-only like `remap`: acknowledged but not verifiable by read-back. The matrix
   copy kept by `kbctl` (see Key remap) includes the `0xB2` marker.
 - `clear` restores the factory code of that key (the stale macro data is ignored by
-  the keyboard once the marker is gone). `remap reset` also removes every macro key.
+  the keyboard once the marker is gone). It also removes the macro file and
+  invalidates the in-memory macro in `kbdd`, so a subsequent `restore-profile`,
+  reconnect or restart will not re-apply the old macro. `remap reset` also
+  removes every macro key.
+- The macro data (`0x05`) is write-only like `remap`: the write is acknowledged but
+  cannot be verified by read-back. `kbctl` keeps a local copy of the last macro it
+  wrote for each profile (`$XDG_CONFIG_HOME/kbdd/macro-profile<N>.bin`, default
+  `~/.config/kbdd/`, beside the daemon config and the keymap file). Each `macro`
+  call starts from that copy. The file starts with a 16-byte header (magic, version,
+  key index, data length) followed by 256 bytes of macro data; on load the daemon
+  validates magic and version before trusting the payload, so corrupt or unrelated
+  files are rejected. The file is written by `kbctl macro`/`kbctl macro clear` and
+  read by `kbdd` only for restore; the daemon does not overwrite it. `clear` removes
+  the macro file. Mode `0600`, atomic temp-then-rename, same pattern as the LED and
+  keymap config.
 
 Use cases and how to undo each:
 
@@ -424,9 +439,12 @@ value never chosen on this host is not overwritten. The key remap written by
 `kbctl remap`/`kbctl macro` is also persisted in
 `$XDG_CONFIG_HOME/kbdd/keymap-profile<N>.bin` (mode `0600`, atomic
 temp-then-rename) and re-applied to the active profile on restart or
-reconnect. Keys unknown to this version are ignored and kept on save (so a
-downgrade does not lose newer settings); a file with invalid values is moved
-to `config.invalid` rather than overwritten. `kbdd/` may be a symlink to a
+reconnect. The macro data (`0x05`) written by `kbctl macro`/`kbctl macro clear`
+is likewise persisted in `$XDG_CONFIG_HOME/kbdd/macro-profile<N>.bin` (mode
+`0600`, atomic temp-then-rename) and re-applied on restart, reconnect, and
+`restore-profile`. Keys unknown to this version are ignored and kept on save
+(so a downgrade does not lose newer settings); a file with invalid values is
+moved to `config.invalid` rather than overwritten. `kbdd/` may be a symlink to a
 directory you own. Selecting `solid`, `pos`, or `effect` replaces the
 other visual modes, so only one is restored after a keyboard reconnect or
 daemon restart. `led clear` removes all saved colors and disables the saved

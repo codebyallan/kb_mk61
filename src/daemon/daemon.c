@@ -121,8 +121,10 @@ static int kbdd_refresh_devices(kbdd_ctx_t *k)
     }
     fprintf(stderr, "kbdd: device set changed, now tracking %zu interface(s)\n",
             found_count);
-    if (found_count != 0 && k->config_mode != KBDD_CONFIG_NONE &&
-        k->config_mode != KBDD_CONFIG_CUSTOM) {
+    if (found_count != 0 && ((k->config_mode != KBDD_CONFIG_NONE &&
+        k->config_mode != KBDD_CONFIG_CUSTOM) || kbdd_config_has_colors(k) ||
+        k->config_led_direction_set || k->config_report_rate_set ||
+        k->config_opts_set || k->config_opts_direction || k->config_opts_win_lock)) {
         k->restore_pending = 1;
         k->restore_attempts = 0;
         k->restore_next_ms = kbdd_now_ms() + 300;
@@ -650,8 +652,11 @@ void kbdd_restore_tick(kbdd_ctx_t *k)
         kbdd_now_ms() < k->restore_next_ms) {
         return;
     }
-    if (k->config_mode == KBDD_CONFIG_NONE ||
-        k->config_mode == KBDD_CONFIG_CUSTOM) {
+    if ((k->config_mode == KBDD_CONFIG_NONE ||
+         k->config_mode == KBDD_CONFIG_CUSTOM) && !kbdd_config_has_colors(k) &&
+        !k->config_led_direction_set && !k->config_report_rate_set &&
+        !k->config_opts_set &&
+        !(k->config_opts_direction || k->config_opts_win_lock)) {
         k->restore_pending = 0;
         return;
     }
@@ -991,7 +996,10 @@ int kbdd_run(int argc, char **argv)
         kctx.allow_led = (want_led != NULL && strcmp(want_led, "1") == 0);
         kctx.allow_profile_write = (want_pw != NULL && strcmp(want_pw, "1") == 0);
     }
-    if (kctx.count != 0 && kctx.config_mode != KBDD_CONFIG_CUSTOM) {
+    if (kctx.count != 0 && (kctx.config_mode != KBDD_CONFIG_CUSTOM ||
+        kbdd_config_has_colors(&kctx) || kctx.config_led_direction_set ||
+        kctx.config_report_rate_set || kctx.config_opts_set ||
+        kctx.config_opts_direction || kctx.config_opts_win_lock)) {
         kctx.restore_pending = 1;
         kctx.restore_next_ms = kbdd_now_ms() + 300;
     }

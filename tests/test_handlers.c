@@ -1085,6 +1085,251 @@ static void test_restore_ignores_custom(void)
     kbdd_op_shutdown();
 }
 
+/* Saved palettes are profile writes: without KBDD_ENABLE_PROFILE_WRITE they
+ * cannot be applied, so a colour-only restore must not be queued (nor reported
+ * as restored on the next reconnect). */
+static void test_restore_colors_require_profile_write(void)
+{
+    mock_init();
+    setup_ctx(1, 0);
+    g_ctx.config_mode = KBDD_CONFIG_CUSTOM;
+    g_ctx.config_color_count[1] = 2;             /* breath palette */
+    g_ctx.config_colors[1][0][0] = 0x11;
+    g_ctx.config_colors[1][0][1] = 0x44;
+    g_ctx.config_colors[1][0][2] = 0x22;
+    g_ctx.config_colors[1][1][0] = 0x55;
+    g_ctx.config_colors[1][1][1] = 0x33;
+    g_ctx.config_colors[1][1][2] = 0x66;
+    g_ctx.restore_pending = 1;
+    g_ctx.restore_next_ms = 0;
+
+    kbdd_restore_tick(&g_ctx);
+    CHECK(g_ctx.restore_pending == 0);
+    CHECK(!kbdd_op_pending());
+    CHECK(g_mock->nsent == 0);
+
+    /* the direct queue path must drop it too */
+    g_ctx.restore_pending = 1;
+    CHECK(kbdd_op_queue_restore_config(&g_ctx, &g_dev) == 0);
+    CHECK(g_ctx.restore_pending == 0);
+    CHECK(!kbdd_op_pending());
+    CHECK(g_mock->nsent == 0);
+    kbdd_op_shutdown();
+}
+
+/* The same colour-only restore must still run when profile writes are on. */
+static void test_restore_colors_with_profile_write(void)
+{
+    mock_init();
+    setup_ctx(1, 1);
+    g_ctx.config_mode = KBDD_CONFIG_CUSTOM;
+    g_ctx.config_color_count[1] = 1;
+    g_ctx.config_colors[1][0][0] = 0x11;
+    g_ctx.config_colors[1][0][1] = 0x44;
+    g_ctx.config_colors[1][0][2] = 0x22;
+    g_ctx.restore_pending = 1;
+    g_ctx.restore_next_ms = 0;
+
+    kbdd_restore_tick(&g_ctx);
+    CHECK(kbdd_op_pending());
+    wait_for_op(&g_ctx);
+    CHECK(!kbdd_op_pending());
+    CHECK(g_ctx.restore_pending == 0);
+    CHECK(g_mock->nsent >= 1);
+    kbdd_op_shutdown();
+}
+
+/* A basic mode still restores its RAM-only frame without profile writes; only
+ * the palettes are withheld. */
+static void test_restore_frame_without_profile_write(void)
+{
+    mock_init();
+    setup_ctx(1, 0);
+    g_ctx.config_mode = KBDD_CONFIG_SOLID;
+    g_ctx.config_solid[0] = 0xAA;
+    g_ctx.config_solid[1] = 0xBB;
+    g_ctx.config_solid[2] = 0xCC;
+    g_ctx.config_color_count[1] = 1;
+    g_ctx.config_colors[1][0][0] = 0x11;
+    g_ctx.restore_pending = 1;
+    g_ctx.restore_next_ms = 0;
+
+    kbdd_restore_tick(&g_ctx);
+    CHECK(kbdd_op_pending());
+    wait_for_op(&g_ctx);
+    CHECK(!kbdd_op_pending());
+    CHECK(g_ctx.restore_pending == 0);
+    CHECK(g_mock->nsent >= 1);
+    kbdd_op_shutdown();
+}
+
+/* Direction and report rate are restored even when no lighting mode is saved. */
+static void test_restore_led_fields(void)
+{
+    int saw_direction = 0, saw_rate = 0;
+
+    mock_init();
+    setup_ctx(1, 1);
+    g_ctx.config_mode = KBDD_CONFIG_NONE;
+    g_ctx.config_led_direction = 2;
+    g_ctx.config_led_direction_set = 1;
+    g_ctx.config_report_rate = 3;
+    g_ctx.config_report_rate_set = 1;
+    g_ctx.restore_pending = 1;
+    g_ctx.restore_next_ms = 0;
+
+    kbdd_restore_tick(&g_ctx);
+    CHECK(kbdd_op_pending());
+    wait_for_op(&g_ctx);
+    CHECK(!kbdd_op_pending());
+    CHECK(g_ctx.restore_pending == 0);
+    for (size_t i = 0; i < g_mock->nsent; i++) {
+        if (g_mock->sent[i][1] != KBC_OP_PROFILE_PARAMS) continue;
+        if (g_mock->sent[i][KBC_PBLK_OFF_DIRECTION] == 2) saw_direction = 1;
+        if (g_mock->sent[i][KBC_PBLK_OFF_RATE] == 4) saw_rate = 1;
+    }
+    CHECK(saw_direction == 1);
+    CHECK(saw_rate == 1);
+    kbdd_op_shutdown();
+}
+
+/* Successful field writes must persist direction/report rate in the config. */
+static void test_field_persists_led_fields(void)
+{
+    kbdd_ipc_message_t req, resp;
+    uint8_t field[2];
+    char path[512], line[128];
+    int saw_direction = 0, saw_rate = 0;
+    FILE *f;
+
+    mock_init();
+    setup_ctx(1, 1);
+    memset(&resp, 0, sizeof(resp));
+
+    field[0] = KBC_FIELD_DIRECTION;
+    field[1] = 2;
+    make_msg(&req, KBDD_IPC_OP_SET_FIELD, field, 2);
+    setup_resp(&resp);
+    CHECK(kbdd_handle_field(&g_ctx, &req, &resp) == KBDD_HANDLER_DEFER);
+    wait_for_op(&g_ctx);
+    CHECK(g_ctx.config_led_direction == 2);
+    CHECK(g_ctx.config_led_direction_set == 1);
+
+    field[0] = KBC_FIELD_REPORT_RATE;
+    field[1] = 3;
+    make_msg(&req, KBDD_IPC_OP_SET_FIELD, field, 2);
+    setup_resp(&resp);
+    CHECK(kbdd_handle_field(&g_ctx, &req, &resp) == KBDD_HANDLER_DEFER);
+    wait_for_op(&g_ctx);
+    CHECK(g_ctx.config_report_rate == 3);
+    CHECK(g_ctx.config_report_rate_set == 1);
+
+    const char *cfg_home = getenv("XDG_CONFIG_HOME");
+    snprintf(path, sizeof(path), "%s/kbdd/config",
+             cfg_home != NULL ? cfg_home : "");
+    f = fopen(path, "r");
+    CHECK(f != NULL);
+    while (f != NULL && fgets(line, sizeof(line), f) != NULL) {
+        if (strcmp(line, "led_direction 2\n") == 0) saw_direction = 1;
+        if (strcmp(line, "report_rate 3\n") == 0) saw_rate = 1;
+    }
+    if (f != NULL) fclose(f);
+    CHECK(saw_direction == 1);
+    CHECK(saw_rate == 1);
+
+    kbdd_op_shutdown();
+    free_resp(&resp);
+}
+
+/* 0x0B opts (transposed arrows / Win lock) are re-applied on restore. */
+static void test_restore_opts(void)
+{
+    int saw_opts = 0;
+
+    mock_init();
+    setup_ctx(1, 1);
+    g_ctx.config_mode = KBDD_CONFIG_NONE;
+    g_ctx.config_opts_direction = 1;
+    g_ctx.config_opts_win_lock = 1;
+    g_ctx.restore_pending = 1;
+    g_ctx.restore_next_ms = 0;
+
+    kbdd_restore_tick(&g_ctx);
+    CHECK(kbdd_op_pending());
+    wait_for_op(&g_ctx);
+    CHECK(!kbdd_op_pending());
+    CHECK(g_ctx.restore_pending == 0);
+    for (size_t i = 0; i < g_mock->nsent; i++) {
+        if (g_mock->sent[i][1] == KBC_OP_PROFILE_EXTRA) {
+            saw_opts = 1;
+        }
+    }
+    CHECK(saw_opts == 1);
+    kbdd_op_shutdown();
+}
+
+/* 0x0B opts set explicitly to 0,0 are still re-applied when the flag is set. */
+static void test_restore_opts_explicit_zero(void)
+{
+    int saw_opts = 0;
+
+    mock_init();
+    setup_ctx(1, 1);
+    g_ctx.config_mode = KBDD_CONFIG_NONE;
+    g_ctx.config_opts_direction = 0;
+    g_ctx.config_opts_win_lock = 0;
+    g_ctx.config_opts_set = 1;
+    g_ctx.restore_pending = 1;
+    g_ctx.restore_next_ms = 0;
+
+    kbdd_restore_tick(&g_ctx);
+    CHECK(kbdd_op_pending());
+    wait_for_op(&g_ctx);
+    CHECK(!kbdd_op_pending());
+    CHECK(g_ctx.restore_pending == 0);
+    for (size_t i = 0; i < g_mock->nsent; i++) {
+        if (g_mock->sent[i][1] == KBC_OP_PROFILE_EXTRA) {
+            saw_opts = 1;
+        }
+    }
+    CHECK(saw_opts == 1);
+    kbdd_op_shutdown();
+}
+
+/* 'led opts' must persist the opts_set marker. */
+static void test_opts_persists_set_flag(void)
+{
+    kbdd_ipc_message_t req, resp;
+    uint8_t payload[KBDD_OPTS_PAYLOAD_SIZE] = {0, 0};
+    char path[512], line[128];
+    int saw = 0;
+    FILE *f;
+
+    mock_init();
+    setup_ctx(1, 1);
+    memset(&resp, 0, sizeof(resp));
+
+    make_msg(&req, KBDD_IPC_OP_SET_OPTS, payload, KBDD_OPTS_PAYLOAD_SIZE);
+    setup_resp(&resp);
+    CHECK(kbdd_handle_opts(&g_ctx, &req, &resp) == KBDD_HANDLER_DEFER);
+    wait_for_op(&g_ctx);
+    CHECK(g_ctx.config_opts_set == 1);
+
+    const char *cfg_home = getenv("XDG_CONFIG_HOME");
+    snprintf(path, sizeof(path), "%s/kbdd/config",
+             cfg_home != NULL ? cfg_home : "");
+    f = fopen(path, "r");
+    CHECK(f != NULL);
+    while (f != NULL && fgets(line, sizeof(line), f) != NULL) {
+        if (strcmp(line, "opts_set 1\n") == 0) saw = 1;
+    }
+    if (f != NULL) fclose(f);
+    CHECK(saw == 1);
+
+    kbdd_op_shutdown();
+    free_resp(&resp);
+}
+
 static void test_save_cooldown(void)
 {
     kbdd_ipc_message_t req, resp;
@@ -1231,6 +1476,94 @@ static void test_async_restore_config(void)
     kbdd_op_shutdown();
 }
 
+static void test_async_restore_animation(void)
+{
+    setup_ctx(1, 1);
+    mock_init();
+
+    g_ctx.config_mode = KBDD_CONFIG_ANIMATION;
+    g_ctx.config_anim = KBC_ANIM_CYCLE;
+    g_ctx.config_anim_period = 4000;
+    g_ctx.config_anim_rgb[0] = 10;
+    g_ctx.config_anim_rgb[1] = 20;
+    g_ctx.config_anim_rgb[2] = 30;
+    g_ctx.config_brightness = KBC_BRIGHTNESS_RAW_MAX;
+    g_ctx.restore_pending = 1;
+    g_ctx.restore_next_ms = 0;
+
+    kbdd_restore_tick(&g_ctx);
+    CHECK(kbdd_op_pending());
+    wait_for_op(&g_ctx);
+    CHECK(!kbdd_op_pending());
+    CHECK(g_ctx.restore_pending == 0);
+    CHECK(g_mock->nsent >= 1);
+    kbdd_op_shutdown();
+}
+
+static void test_async_restore_positions(void)
+{
+    setup_ctx(1, 1);
+    mock_init();
+
+    g_ctx.config_mode = KBDD_CONFIG_POSITIONS;
+    g_ctx.config_stride = 70;
+    g_ctx.config_positions[0][0] = 1;
+    g_ctx.config_positions[0][1] = 2;
+    g_ctx.config_positions[0][2] = 3;
+    g_ctx.config_brightness = KBC_BRIGHTNESS_RAW_MAX;
+    g_ctx.restore_pending = 1;
+    g_ctx.restore_next_ms = 0;
+
+    kbdd_restore_tick(&g_ctx);
+    CHECK(kbdd_op_pending());
+    wait_for_op(&g_ctx);
+    CHECK(!kbdd_op_pending());
+    CHECK(g_ctx.restore_pending == 0);
+    CHECK(g_mock->nsent >= 1);
+    kbdd_op_shutdown();
+}
+
+/* 'led custom clear' must leave custom mode and persist the effect it landed on. */
+static void test_clear_custom_persists(void)
+{
+    kbdd_ipc_message_t req, resp;
+    char path[512], line[128];
+    int saw_mode = 0, saw_effect = 0;
+    FILE *f;
+
+    mock_init();
+    setup_ctx(1, 1);
+    g_mock->reply[0] = 0x07;
+    g_mock->reply[1] = KBC_OP_READ_PROFILE_BLOCK;
+    g_mock->reply[2] = 1;
+    g_mock->reply[11] = KBC_LED_EFFECT_CUSTOM;
+    g_mock->reply[134] = 1;
+    g_mock->reply[135] = 0;
+    memset(&resp, 0, sizeof(resp));
+
+    make_msg(&req, KBDD_IPC_OP_CLEAR_CUSTOM, NULL, 0);
+    setup_resp(&resp);
+    CHECK(kbdd_handle_clear_custom(&g_ctx, &req, &resp) == KBDD_HANDLER_DEFER);
+    wait_for_op(&g_ctx);
+    CHECK(!kbdd_op_pending());
+    CHECK(g_ctx.config_mode == KBDD_CONFIG_EFFECT);
+    CHECK(g_ctx.config_effect == 0);
+
+    snprintf(path, sizeof(path), "%s/kbdd/config", getenv("XDG_CONFIG_HOME"));
+    f = fopen(path, "r");
+    CHECK(f != NULL);
+    while (f != NULL && fgets(line, sizeof(line), f) != NULL) {
+        if (strcmp(line, "mode 1\n") == 0) saw_mode = 1;
+        if (strcmp(line, "effect 0\n") == 0) saw_effect = 1;
+    }
+    if (f != NULL) fclose(f);
+    CHECK(saw_mode == 1);
+    CHECK(saw_effect == 1);
+
+    kbdd_op_shutdown();
+    free_resp(&resp);
+}
+
 static void test_async_read_active(void)
 {
     ipc_fixture_t f;
@@ -1278,8 +1611,90 @@ static void test_async_read_active(void)
     ipc_fixture_close(&f);
 }
 
+/* The handlers persist the daemon config on completion.  Point it at a scratch
+ * directory so running the tests never overwrites the user's real
+ * ~/.config/kbdd/config. */
+static char g_cfg_dir[] = "/tmp/kbdd-handlers-cfg-XXXXXX";
+
+static void cfg_isolate(void)
+{
+    if (mkdtemp(g_cfg_dir) == NULL || setenv("XDG_CONFIG_HOME", g_cfg_dir, 1) != 0) {
+        fprintf(stderr, "cannot isolate XDG_CONFIG_HOME for the tests\n");
+        exit(1);
+    }
+}
+
+static void cfg_cleanup(void)
+{
+    char path[512];
+    snprintf(path, sizeof(path), "%s/kbdd/config", g_cfg_dir);
+    unlink(path);
+    snprintf(path, sizeof(path), "%s/kbdd/config.tmp", g_cfg_dir);
+    unlink(path);
+    snprintf(path, sizeof(path), "%s/kbdd/config.invalid", g_cfg_dir);
+    unlink(path);
+    snprintf(path, sizeof(path), "%s/kbdd", g_cfg_dir);
+    rmdir(path);
+    rmdir(g_cfg_dir);
+    unsetenv("XDG_CONFIG_HOME");
+}
+
+static int count_color_lines(const char *path)
+{
+    FILE *f = fopen(path, "r");
+    char line[128];
+    int n = 0;
+
+    if (f == NULL) return -1;
+    while (fgets(line, sizeof(line), f) != NULL) {
+        if (strncmp(line, "color ", 6) == 0) n++;
+    }
+    fclose(f);
+    return n;
+}
+
+/* 'led clear' must drop every saved colour, including the per-effect palettes
+ * persisted by 'led color'; otherwise the next reconnect restores them. */
+static void test_led_clear_drops_saved_palettes(void)
+{
+    kbdd_ipc_message_t req, resp;
+    uint8_t payload[KBDD_LED_PAYLOAD_SIZE];
+    char path[512];
+
+    mock_init();
+    setup_ctx(1, 0);
+    g_ctx.config_mode = KBDD_CONFIG_POSITIONS;
+    g_ctx.config_color_count[0] = 14;          /* Wave palette */
+    g_ctx.config_color_count[1] = 2;           /* Breath palette */
+    g_ctx.config_colors[1][0][0] = 0x12;
+    g_ctx.config_colors[1][1][2] = 0x34;
+    CHECK(kbdd_config_has_colors(&g_ctx) == 1);
+    CHECK(kbdd_save_config(&g_ctx) == 0);
+
+    snprintf(path, sizeof(path), "%s/kbdd/config", g_cfg_dir);
+    CHECK(count_color_lines(path) == 2);
+
+    memset(payload, 0, sizeof(payload));
+    payload[1] = 70;                           /* stride */
+    payload[2] = KBDD_LED_MODE_CLEAR;
+    make_msg(&req, KBDD_IPC_OP_LED_SET, payload, sizeof(payload));
+    setup_resp(&resp);
+    CHECK(kbdd_handle_led(&g_ctx, &req, &resp) == KBDD_HANDLER_DEFER);
+    free_resp(&resp);
+    wait_for_op(&g_ctx);
+    CHECK(!kbdd_op_pending());
+
+    CHECK(g_ctx.config_mode == KBDD_CONFIG_NONE);
+    CHECK(kbdd_config_has_colors(&g_ctx) == 0);
+    CHECK(g_ctx.config_color_count[0] == 0 && g_ctx.config_color_count[1] == 0);
+    CHECK(g_ctx.config_colors[1][0][0] == 0 && g_ctx.config_colors[1][1][2] == 0);
+    CHECK(count_color_lines(path) == 0);
+    kbdd_op_shutdown();
+}
+
 int main(void)
 {
+    cfg_isolate();
     test_env_gates();
     test_led_only_has_no_flash_access();
     test_save_cooldown();
@@ -1292,6 +1707,7 @@ int main(void)
     test_led_solid_success();
     test_anim_validation();
     test_colors_validation();
+    test_led_clear_drops_saved_palettes();
     test_async_frame_queue();
     test_async_frame_cancel();
     test_async_queue_full();
@@ -1307,8 +1723,20 @@ int main(void)
     test_async_field();
     test_async_restore_config();
     test_restore_ignores_custom();
+    test_restore_colors_require_profile_write();
+    test_restore_colors_with_profile_write();
+    test_restore_frame_without_profile_write();
+    test_restore_led_fields();
+    test_restore_opts();
+    test_restore_opts_explicit_zero();
+    test_opts_persists_set_flag();
+    test_async_restore_animation();
+    test_async_restore_positions();
+    test_clear_custom_persists();
+    test_field_persists_led_fields();
     test_async_read_active();
 
+    cfg_cleanup();
     if (failures != 0) {
         fprintf(stderr, "%d test(s) failed\n", failures);
         return 1;

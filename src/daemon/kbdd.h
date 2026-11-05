@@ -85,10 +85,22 @@ typedef struct kbdd_ctx {
     uint8_t config_anim;
     uint32_t config_anim_period;
     uint8_t config_anim_rgb[3];
+    /* Per-effect palettes set with 'led color' (0 = none saved). Persisted so they
+     * are re-applied after a reconnect/restart even if never committed to flash. */
+    uint8_t config_color_count[KBC_LED_EFFECT_COUNT];
+    uint8_t config_colors[KBC_LED_EFFECT_COUNT][14][3];
     /* 0x0B profile options (write-only, not verifiable by read-back).
      * Persisted so they survive a daemon restart. */
     uint8_t config_opts_direction;  /* transposed arrows: 0 or 1 */
     uint8_t config_opts_win_lock;   /* Win lock: 0 or 1 */
+    int config_opts_set;            /* 1 once 'led opts' was used; 0 = never set */
+    /* Profile fields 4 (animation direction, 0..3) and 5 (report-rate index,
+     * 0..254).  The *_set flags tell "never set here" apart from a real 0, so a
+     * restore never overwrites a value the user did not choose in kbctl. */
+    uint8_t config_led_direction;
+    uint8_t config_report_rate;
+    int config_led_direction_set;
+    int config_report_rate_set;
     char config_extra[KBDD_CONFIG_EXTRA_MAX];
     size_t config_extra_len;
     int restore_pending;
@@ -104,6 +116,7 @@ typedef struct kbdd_ctx {
 #define KBDD_CONFIG_POSITIONS 3u
 #define KBDD_CONFIG_ANIMATION 4u
 #define KBDD_CONFIG_CUSTOM 5u   /* keyboard-owned effect 15; never overridden on restore */
+#define KBDD_CONFIG_UNSET 0xFFu /* "not stored in config" sentinel for restore payloads */
 
 const char *kbdd_dev_err(int rc);
 
@@ -112,6 +125,7 @@ void kbdd_config_defaults(kbdd_ctx_t *k);
 int kbdd_load_config(kbdd_ctx_t *k);
 int kbdd_load_config_file(kbdd_ctx_t *k, const char *path);
 int kbdd_save_config(const kbdd_ctx_t *k);
+int kbdd_config_has_colors(const kbdd_ctx_t *k);
 int kbdd_hidraw_enumerate(const kbdd_model_t *models, size_t model_count,
                           kbdd_hid_device_t **out_devs, size_t *out_count);
 void kbdd_hidraw_free(kbdd_hid_device_t *devs, size_t count);

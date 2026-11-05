@@ -401,8 +401,14 @@ kbctl led save
 Frame commands accept `--once` to send one frame without periodic refresh and
 `--stride N` to override the frame layout (default: the detected matrix size).
 The daemon persists the selected lighting mode, custom colors, per-effect
-speed, and global brightness in `$XDG_CONFIG_HOME/kbdd/config` (or
-`~/.config/kbdd/config`). Keys unknown to this version are ignored and kept on save (so a downgrade
+speed, global brightness, animation direction (`led direction`) and
+report-rate index (`led report-rate`) in `$XDG_CONFIG_HOME/kbdd/config` (or
+`~/.config/kbdd/config`). Profile options set with `led opts` (transposed
+arrows / Win lock) are likewise persisted and re-applied on daemon restart
+or keyboard reconnect. Direction and report rate are restored on daemon
+restart or keyboard reconnect only when they were set through `kbctl`, so a
+value never chosen on this host is not overwritten. Keys unknown to this
+version are ignored and kept on save (so a downgrade
 does not lose newer settings); a file with invalid values is moved to
 `config.invalid` rather than overwritten. `kbdd/` may be a symlink to a
 directory you own. Selecting `solid`, `pos`, or `effect` replaces the

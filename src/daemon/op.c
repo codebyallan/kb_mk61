@@ -410,6 +410,8 @@ static void worker_exec(const kbdd_worker_req_t *req, kbdd_op_result_t *result)
         uint8_t effect = req->payload_len >= 2 ? req->payload[1] : 0;
         uint8_t speed = req->payload_len >= 3 ? req->payload[2] : 0;
 
+        int basic = cfg_mode != KBDD_CONFIG_NONE && cfg_mode != KBDD_CONFIG_CUSTOM;
+
         result->rc = KBDD_DEV_OK;
         if (allow_pw) {
             result->rc = kbdd_dev_set_field(&io, KBC_FIELD_BRIGHTNESS, brightness, NULL);
@@ -420,7 +422,44 @@ static void worker_exec(const kbdd_worker_req_t *req, kbdd_op_result_t *result)
                 }
             }
         }
-        if (result->rc == KBDD_DEV_OK && cfg_mode != KBDD_CONFIG_EFFECT && allow_led) {
+        /* Direction and report rate are independent of the lighting mode, so
+         * they are restored even when the saved mode is NONE/CUSTOM. */
+        if (result->rc == KBDD_DEV_OK && allow_pw && req->payload_len >= 7) {
+            uint8_t dir = req->payload[5];
+            uint8_t rate = req->payload[6];
+            if (dir != KBDD_CONFIG_UNSET) {
+                result->rc = kbdd_dev_set_field(&io, KBC_FIELD_DIRECTION, dir, NULL);
+            }
+            if (result->rc == KBDD_DEV_OK && rate != KBDD_CONFIG_UNSET) {
+                result->rc = kbdd_dev_set_field(&io, KBC_FIELD_REPORT_RATE, rate, NULL);
+            }
+        }
+        /* 0x0B opts (transposed arrows / Win lock) are write-only profile
+         * options; re-apply them on restore whenever a restore runs. */
+        if (result->rc == KBDD_DEV_OK && allow_pw && req->payload_len >= 9) {
+            result->rc = kbdd_dev_set_opts(&io, req->payload[7],
+                                           req->payload[8], NULL);
+        }
+        if (result->rc == KBDD_DEV_OK && allow_pw && req->payload_len >= 9) {
+            size_t pos = 9;
+            for (unsigned c = 0; c < req->payload[4] && result->rc == KBDD_DEV_OK; c++) {
+                kbdd_color_edit_t ce;
+                memset(&ce, 0, sizeof(ce));
+                if (pos + 2 > req->payload_len) { result->rc = KBDD_DEV_EINVAL; break; }
+                ce.effect = req->payload[pos];
+                ce.count = req->payload[pos + 1];
+                pos += 2;
+                if (ce.count < 1 || ce.count > 14 || pos + 3u * ce.count > req->payload_len) {
+                    result->rc = KBDD_DEV_EINVAL;
+                    break;
+                }
+                for (size_t j = 0; j < ce.count; j++, pos += 3) {
+                    memcpy(ce.rgb[j], req->payload + pos, 3);
+                }
+                result->rc = kbdd_dev_set_colors(&io, &ce, NULL);
+            }
+        }
+        if (result->rc == KBDD_DEV_OK && basic && cfg_mode != KBDD_CONFIG_EFFECT && allow_led) {
             if (req->data_len == KBC_LED_BUFFER_SIZE && req->stride > 0) {
                 uint8_t frame[KBC_LED_BUFFER_SIZE];
                 memcpy(frame, req->data, sizeof(frame));
@@ -904,6 +943,12 @@ static void op_complete(kbdd_ctx_t *kctx, kbdd_op_node_t *op,
                 }
             } else if (field == KBC_FIELD_SPEED) {
                 kctx->config_speed[kctx->config_effect] = op->payload[1];
+            } else if (field == KBC_FIELD_DIRECTION) {
+                kctx->config_led_direction = op->payload[1];
+                kctx->config_led_direction_set = 1;
+            } else if (field == KBC_FIELD_REPORT_RATE) {
+                kctx->config_report_rate = op->payload[1];
+                kctx->config_report_rate_set = 1;
             } else if (field == KBC_FIELD_MODE) {
                 kctx->config_mode = KBDD_CONFIG_EFFECT;
                 kctx->config_effect = op->payload[1];
@@ -924,6 +969,15 @@ static void op_complete(kbdd_ctx_t *kctx, kbdd_op_node_t *op,
     case OP_SET_COLORS:
         if (r->rc == KBDD_DEV_OK) {
             const char *name = kbc_led_effect_name(op->payload[0]);
+            if (op->payload != NULL && op->payload_len >= 5 &&
+                op->payload[0] < KBC_LED_EFFECT_COUNT) {
+                uint8_t e = op->payload[0], cn = op->payload[1];
+                if (cn >= 1 && cn <= 14 && op->payload_len == 2u + 3u * cn) {
+                    kctx->config_color_count[e] = cn;
+                    memcpy(kctx->config_colors[e], op->payload + 2, 3u * cn);
+                    (void)kbdd_save_config(kctx);
+                }
+            }
             char buf[192];
             int n = snprintf(buf, sizeof(buf),
                              "ok: %s colors set on profile %u, verified by read-back (RAM only; use --save or 'led save')",
@@ -1004,6 +1058,7 @@ static void op_complete(kbdd_ctx_t *kctx, kbdd_op_node_t *op,
             /* Persist write-only opts so they survive a daemon restart. */
             kctx->config_opts_direction = op->payload[0];
             kctx->config_opts_win_lock = op->payload[1];
+            kctx->config_opts_set = 1;
             (void)kbdd_save_config(kctx);
         } else {
             op_send_error(kctx, op, r);
@@ -1142,6 +1197,12 @@ static void op_complete(kbdd_ctx_t *kctx, kbdd_op_node_t *op,
                         memset(kctx->config_solid, 0, sizeof(kctx->config_solid));
                         memset(kctx->config_positions, 0,
                                sizeof(kctx->config_positions));
+                        /* 'led clear' removes every saved colour, including the
+                         * per-effect palettes persisted by 'led color'.  Without
+                         * this the next reconnect would restore them. */
+                        memset(kctx->config_color_count, 0,
+                               sizeof(kctx->config_color_count));
+                        memset(kctx->config_colors, 0, sizeof(kctx->config_colors));
                     } else if (mode == KBDD_LED_MODE_POS) {
                         size_t pos = pp[3];
                         if (kctx->config_mode != KBDD_CONFIG_POSITIONS ||
@@ -1509,8 +1570,23 @@ int kbdd_op_queue_restore_config(kbdd_ctx_t *k, const kbdd_hid_device_t *dev)
     if (k == NULL || dev == NULL || !kbdd_op_has_room()) {
         return -1;
     }
-    if (k->config_mode == KBDD_CONFIG_NONE ||
-        k->config_mode == KBDD_CONFIG_CUSTOM) {
+    int basic = !(k->config_mode == KBDD_CONFIG_NONE ||
+                  k->config_mode == KBDD_CONFIG_CUSTOM);
+    /* Palettes are profile writes.  Without KBDD_ENABLE_PROFILE_WRITE they can
+     * never be applied, so do not enqueue them; and when a colour-only restore
+     * is the only thing left, drop the pending restore instead of queueing an
+     * operation that would log a restore it did not perform. */
+    int restore_colors = k->allow_profile_write && kbdd_config_has_colors(k);
+    int restore_fields = basic && k->allow_profile_write;
+    int restore_direction = k->allow_profile_write && k->config_led_direction_set;
+    int restore_rate = k->allow_profile_write && k->config_report_rate_set;
+    int restore_opts = k->allow_profile_write &&
+                      (k->config_opts_set || k->config_opts_direction ||
+                       k->config_opts_win_lock);
+    int restore_frame = basic && k->config_mode != KBDD_CONFIG_EFFECT &&
+                        k->allow_led;
+    if (!restore_colors && !restore_fields && !restore_direction &&
+        !restore_rate && !restore_opts && !restore_frame) {
         k->restore_pending = 0;
         return 0;
     }
@@ -1519,16 +1595,36 @@ int kbdd_op_queue_restore_config(kbdd_ctx_t *k, const kbdd_hid_device_t *dev)
     size_t count = matrix < stride ? matrix : stride;
     uint8_t flags = (k->allow_profile_write ? 0x01u : 0u) | (k->allow_led ? 0x02u : 0u);
 
-    uint8_t payload[4];
+    /* [0..3] brightness, effect, speed, anim; [4] palette count;
+     * [5] direction / [6] report rate (KBDD_CONFIG_UNSET when not stored);
+     * [7] opts direction / [8] opts win_lock (0x0B); then palettes. */
+    uint8_t payload[9 + KBC_LED_EFFECT_COUNT * (2 + 3 * 14)];
+    size_t plen = 9;
     payload[0] = k->config_brightness;
     payload[1] = k->config_effect;
     payload[2] = k->config_effect < KBC_LED_EFFECT_COUNT ? k->config_speed[k->config_effect] : 0;
     payload[3] = k->config_anim;
+    payload[4] = 0;
+    payload[5] = restore_direction ? k->config_led_direction : KBDD_CONFIG_UNSET;
+    payload[6] = restore_rate ? k->config_report_rate : KBDD_CONFIG_UNSET;
+    payload[7] = k->config_opts_direction ? 1 : 0;
+    payload[8] = k->config_opts_win_lock ? 1 : 0;
+    for (size_t e = 0; restore_colors && e < KBC_LED_EFFECT_COUNT; e++) {
+        size_t n = k->config_color_count[e];
+        if (n == 0) continue;
+        payload[plen++] = (uint8_t)e;
+        payload[plen++] = (uint8_t)n;
+        for (size_t j = 0; j < n; j++) {
+            memcpy(payload + plen, k->config_colors[e][j], 3);
+            plen += 3;
+        }
+        payload[4]++;
+    }
 
     uint8_t frame[KBC_LED_BUFFER_SIZE];
     int has_frame = 0;
 
-    if (k->config_mode != KBDD_CONFIG_EFFECT && k->allow_led) {
+    if (restore_frame) {
         if (kbc_led_frame_page_count(stride) == 0) {
             return -1;
         }
@@ -1571,7 +1667,7 @@ int kbdd_op_queue_restore_config(kbdd_ctx_t *k, const kbdd_hid_device_t *dev)
     op->flags = flags;
     op->stride = stride;
     op->count = count;
-    op_set_payload(op, payload, sizeof(payload));
+    op_set_payload(op, payload, plen);
     if (has_frame) {
         op_set_data(op, frame, sizeof(frame));
     }

@@ -30,6 +30,9 @@ static void defaults_check(const kbdd_ctx_t *k)
     for (size_t i = 0; i < KBC_LED_EFFECT_COUNT; i++) {
         CHECK(k->config_speed[i] == 50);
     }
+    CHECK(k->config_led_direction_set == 0);
+    CHECK(k->config_report_rate_set == 0);
+    CHECK(k->config_opts_set == 0);
 }
 
 static int load_temp(const char *contents, kbdd_ctx_t *k)
@@ -254,6 +257,47 @@ static void test_invalid_opts_config(void)
     }
 }
 
+/* opts_set flag: explicit marker that 'led opts' was used. */
+static void test_valid_opts_set_config(void)
+{
+    kbdd_ctx_t k;
+
+    CHECK(load_temp("opts_set 1\n", &k) == 0);
+    CHECK(k.config_opts_set == 1);
+
+    CHECK(load_temp("opts_set 0\n", &k) == 0);
+    CHECK(k.config_opts_set == 0);
+
+    /* non-default opts imply set, even without the marker (back-compat) */
+    CHECK(load_temp("direction 1\nwin_lock 0\n", &k) == 0);
+    CHECK(k.config_opts_set == 1);
+
+    /* absent marker and default opts stay unset */
+    CHECK(load_temp("brightness 7\n", &k) == 0);
+    CHECK(k.config_opts_set == 0);
+}
+
+static void test_invalid_opts_set_config(void)
+{
+    static const char * const cases[] = {
+        "opts_set 2\n",
+        "opts_set -1\n",
+        "opts_set abc\n",
+        "opts_set\n",
+    };
+    for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
+        kbdd_ctx_t k;
+        memset(&k, 0, sizeof(k));
+        int rc = load_temp(cases[i], &k);
+        if (rc != -1) {
+            fprintf(stderr, "invalid opts_set case %u unexpectedly succeeded\n",
+                    (unsigned)i);
+            failures++;
+        }
+        CHECK(k.config_opts_set == 0);
+    }
+}
+
 /* Save/load round-trip for 0x0B opts. */
 static void test_save_load_opts_roundtrip(void)
 {
@@ -270,6 +314,7 @@ static void test_save_load_opts_roundtrip(void)
     k.config_solid[0] = 1; k.config_solid[1] = 2; k.config_solid[2] = 3;
     k.config_opts_direction = 1;
     k.config_opts_win_lock = 1;
+    k.config_opts_set = 1;
     CHECK(kbdd_save_config(&k) == 0);
 
     snprintf(path, sizeof(path), "%s/kbdd/config", dir);
@@ -277,6 +322,7 @@ static void test_save_load_opts_roundtrip(void)
     CHECK(kbdd_load_config_file(&r, path) == 0);
     CHECK(r.config_opts_direction == 1);
     CHECK(r.config_opts_win_lock == 1);
+    CHECK(r.config_opts_set == 1);
     CHECK(r.config_mode == KBDD_CONFIG_SOLID);
     CHECK(r.config_solid[0] == 1 && r.config_solid[1] == 2 && r.config_solid[2] == 3);
 
@@ -284,15 +330,17 @@ static void test_save_load_opts_roundtrip(void)
     {
         FILE *f = fopen(path, "r");
         char line[64];
-        int saw_direction = 0, saw_win_lock = 0;
+        int saw_direction = 0, saw_win_lock = 0, saw_opts_set = 0;
         CHECK(f != NULL);
         while (f != NULL && fgets(line, sizeof(line), f) != NULL) {
             if (strcmp(line, "direction 1\n") == 0) saw_direction = 1;
             if (strcmp(line, "win_lock 1\n") == 0) saw_win_lock = 1;
+            if (strcmp(line, "opts_set 1\n") == 0) saw_opts_set = 1;
         }
         if (f != NULL) fclose(f);
         CHECK(saw_direction == 1);
         CHECK(saw_win_lock == 1);
+    CHECK(saw_opts_set == 1);
     }
 
     unlink(path);
@@ -300,6 +348,149 @@ static void test_save_load_opts_roundtrip(void)
     rmdir(path);
     rmdir(dir);
     unsetenv("XDG_CONFIG_HOME");
+}
+
+/* Animation direction (0..3) and report-rate index (0..254). */
+static void test_valid_led_field_config(void)
+{
+    kbdd_ctx_t k;
+
+    CHECK(load_temp("led_direction 0\nreport_rate 0\n", &k) == 0);
+    CHECK(k.config_led_direction == 0 && k.config_led_direction_set == 1);
+    CHECK(k.config_report_rate == 0 && k.config_report_rate_set == 1);
+
+    CHECK(load_temp("led_direction 3\nreport_rate 254\n", &k) == 0);
+    CHECK(k.config_led_direction == 3);
+    CHECK(k.config_report_rate == 254);
+
+    /* absent keys stay unset, so a restore does not force the defaults */
+    CHECK(load_temp("brightness 7\n", &k) == 0);
+    CHECK(k.config_led_direction_set == 0);
+    CHECK(k.config_report_rate_set == 0);
+}
+
+static void test_invalid_led_field_config(void)
+{
+    static const char * const cases[] = {
+        "led_direction 4\n",   /* > 3 */
+        "report_rate 255\n",   /* > 254 */
+        "led_direction\n",     /* missing value */
+        "report_rate\n",       /* missing value */
+        "led_direction abc\n", /* not a number */
+        "report_rate -1\n",    /* negative */
+    };
+
+    for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
+        kbdd_ctx_t k;
+        memset(&k, 0, sizeof(k));
+        int rc = load_temp(cases[i], &k);
+        if (rc != -1) {
+            fprintf(stderr, "invalid LED field case %u unexpectedly succeeded\n",
+                    (unsigned)i);
+            failures++;
+        }
+        CHECK(k.config_led_direction_set == 0);
+        CHECK(k.config_report_rate_set == 0);
+    }
+}
+
+/* Save/load round-trip for direction/report rate. */
+static void test_save_load_led_fields_roundtrip(void)
+{
+    char dir[] = "/tmp/kbdd-config-ledfields-XXXXXX";
+    char path[512], line[128];
+    kbdd_ctx_t k, r;
+    int saw_direction = 0, saw_rate = 0;
+    FILE *f;
+
+    CHECK(mkdtemp(dir) != NULL);
+    CHECK(setenv("XDG_CONFIG_HOME", dir, 1) == 0);
+
+    memset(&k, 0, sizeof(k));
+    kbdd_config_defaults(&k);
+    k.config_led_direction = 2;
+    k.config_led_direction_set = 1;
+    k.config_report_rate = 7;
+    k.config_report_rate_set = 1;
+    CHECK(kbdd_save_config(&k) == 0);
+
+    snprintf(path, sizeof(path), "%s/kbdd/config", dir);
+    f = fopen(path, "r");
+    CHECK(f != NULL);
+    while (f != NULL && fgets(line, sizeof(line), f) != NULL) {
+        if (strcmp(line, "led_direction 2\n") == 0) saw_direction = 1;
+        if (strcmp(line, "report_rate 7\n") == 0) saw_rate = 1;
+    }
+    if (f != NULL) fclose(f);
+    CHECK(saw_direction == 1);
+    CHECK(saw_rate == 1);
+
+    memset(&r, 0, sizeof(r));
+    CHECK(kbdd_load_config_file(&r, path) == 0);
+    CHECK(r.config_led_direction == 2 && r.config_led_direction_set == 1);
+    CHECK(r.config_report_rate == 7 && r.config_report_rate_set == 1);
+
+    /* Unset fields are not written, so a fresh config does not override them. */
+    memset(&k, 0, sizeof(k));
+    kbdd_config_defaults(&k);
+    CHECK(kbdd_save_config(&k) == 0);
+    saw_direction = saw_rate = 0;
+    f = fopen(path, "r");
+    CHECK(f != NULL);
+    while (f != NULL && fgets(line, sizeof(line), f) != NULL) {
+        if (strncmp(line, "led_direction ", 14) == 0) saw_direction++;
+        if (strncmp(line, "report_rate ", 12) == 0) saw_rate++;
+    }
+    if (f != NULL) fclose(f);
+    CHECK(saw_direction == 0);
+    CHECK(saw_rate == 0);
+
+    unlink(path);
+    snprintf(path, sizeof(path), "%s/kbdd", dir);
+    rmdir(path);
+    rmdir(dir);
+    unsetenv("XDG_CONFIG_HOME");
+}
+
+/* 'led color' palettes: save/load round-trip and rejection of bad lines. */
+static void test_colors_roundtrip(void)
+{
+    char dir[] = "/tmp/kbdd-config-colors-XXXXXX";
+    char path[512];
+    kbdd_ctx_t k, r;
+
+    CHECK(mkdtemp(dir) != NULL);
+    CHECK(setenv("XDG_CONFIG_HOME", dir, 1) == 0);
+
+    memset(&k, 0, sizeof(k));
+    kbdd_config_defaults(&k);
+    CHECK(kbdd_config_has_colors(&k) == 0);
+    k.config_color_count[1] = 2;                 /* Breath: 2 colours */
+    k.config_colors[1][0][0] = 255;
+    k.config_colors[1][1][2] = 128;
+    k.config_color_count[0] = 14;                /* Wave: 14 colours */
+    for (int i = 0; i < 14; i++) k.config_colors[0][i][1] = (uint8_t)(i * 10);
+    CHECK(kbdd_config_has_colors(&k) == 1);
+    CHECK(kbdd_save_config(&k) == 0);
+
+    snprintf(path, sizeof(path), "%s/kbdd/config", dir);
+    memset(&r, 0, sizeof(r));
+    CHECK(kbdd_load_config_file(&r, path) == 0);
+    CHECK(r.config_color_count[1] == 2 && r.config_colors[1][0][0] == 255 &&
+          r.config_colors[1][1][2] == 128);
+    CHECK(r.config_color_count[0] == 14 && r.config_colors[0][13][1] == 130);
+    CHECK(r.config_color_count[3] == 0);
+
+    unlink(path);
+    snprintf(path, sizeof(path), "%s/kbdd", dir);
+    rmdir(path);
+    rmdir(dir);
+    unsetenv("XDG_CONFIG_HOME");
+
+    CHECK(load_temp("color 1 3 1 2 3 4 5 6 7 8 9\n", &k) != 0);  /* Breath holds 2 */
+    CHECK(load_temp("color 99 1 1 2 3\n", &k) != 0);             /* bad effect */
+    CHECK(load_temp("color 1 1 1 2 300\n", &k) != 0);            /* bad channel */
+    CHECK(load_temp("color 1 2 1 2 3\n", &k) != 0);              /* truncated */
 }
 
 /* save_config must write the animation line once, not once per speed entry. */
@@ -463,6 +654,12 @@ int main(void)
     test_boundary_cases();
     test_valid_opts_config();
     test_invalid_opts_config();
+    test_valid_opts_set_config();
+    test_invalid_opts_set_config();
+    test_valid_led_field_config();
+    test_invalid_led_field_config();
+    test_save_load_led_fields_roundtrip();
+    test_colors_roundtrip();
     test_save_load_opts_roundtrip();
     test_save_writes_animation_once();
     test_unknown_keys_tolerated_and_preserved();

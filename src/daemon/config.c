@@ -113,6 +113,23 @@ void kbdd_config_defaults(kbdd_ctx_t *k)
     }
     k->config_opts_direction = 0;
     k->config_opts_win_lock = 0;
+    k->config_opts_set = 0;
+    k->config_led_direction = 0;
+    k->config_report_rate = 0;
+    k->config_led_direction_set = 0;
+    k->config_report_rate_set = 0;
+    memset(k->config_color_count, 0, sizeof(k->config_color_count));
+    memset(k->config_colors, 0, sizeof(k->config_colors));
+}
+
+int kbdd_config_has_colors(const kbdd_ctx_t *k)
+{
+    size_t i;
+    if (k == NULL) return 0;
+    for (i = 0; i < KBC_LED_EFFECT_COUNT; i++) {
+        if (k->config_color_count[i] != 0) return 1;
+    }
+    return 0;
 }
 
 int kbdd_load_config_file(kbdd_ctx_t *k, const char *path)
@@ -169,12 +186,34 @@ int kbdd_load_config_file(kbdd_ctx_t *k, const char *path)
                 return -1;
             }
             k->config_opts_direction = (uint8_t)value;
+            if (value != 0) k->config_opts_set = 1;
         } else if (strcmp(key, "win_lock") == 0) {
             if (fscanf(f, "%u", &value) != 1 || value > 1) {
                 fclose(f);
                 return -1;
             }
             k->config_opts_win_lock = (uint8_t)value;
+            if (value != 0) k->config_opts_set = 1;
+        } else if (strcmp(key, "opts_set") == 0) {
+            if (fscanf(f, "%u", &value) != 1 || value > 1) {
+                fclose(f);
+                return -1;
+            }
+            k->config_opts_set = (int)value;
+        } else if (strcmp(key, "led_direction") == 0) {
+            if (fscanf(f, "%u", &value) != 1 || value > 3) {
+                fclose(f);
+                return -1;
+            }
+            k->config_led_direction = (uint8_t)value;
+            k->config_led_direction_set = 1;
+        } else if (strcmp(key, "report_rate") == 0) {
+            if (fscanf(f, "%u", &value) != 1 || value > 254) {
+                fclose(f);
+                return -1;
+            }
+            k->config_report_rate = (uint8_t)value;
+            k->config_report_rate_set = 1;
         } else if (strcmp(key, "speed") == 0) {
             if (fscanf(f, "%u", &value) != 1 || value >= KBC_LED_EFFECT_COUNT) {
                 fclose(f);
@@ -202,6 +241,27 @@ int kbdd_load_config_file(kbdd_ctx_t *k, const char *path)
                 return -1;
             }
             k->config_stride = value;
+        } else if (strcmp(key, "color") == 0) {
+            unsigned eff, cnt, j;
+            size_t slots = 0;
+
+            if (fscanf(f, "%u %u", &eff, &cnt) != 2 || eff >= KBC_LED_EFFECT_COUNT ||
+                cnt < 1 || cnt > 14 ||
+                !kbc_effect_color_slots((uint8_t)eff, NULL, &slots) || cnt > slots) {
+                fclose(f);
+                return -1;
+            }
+            for (j = 0; j < cnt; j++) {
+                if (fscanf(f, "%u %u %u", &r, &g, &b) != 3 ||
+                    r > 255 || g > 255 || b > 255) {
+                    fclose(f);
+                    return -1;
+                }
+                k->config_colors[eff][j][0] = (uint8_t)r;
+                k->config_colors[eff][j][1] = (uint8_t)g;
+                k->config_colors[eff][j][2] = (uint8_t)b;
+            }
+            k->config_color_count[eff] = (uint8_t)cnt;
         } else if (strcmp(key, "pos") == 0) {
             if (fscanf(f, "%zu %u %u %u", &pos, &r, &g, &b) != 4 ||
                 pos >= KBC_MAX_MATRIX_SIZE || r > 255 || g > 255 || b > 255) {
@@ -287,12 +347,45 @@ int kbdd_save_config(const kbdd_ctx_t *k)
         unlink(tmp);
         return -1;
     }
+    if (k->config_led_direction_set &&
+        fprintf(f, "led_direction %u\n", (unsigned)k->config_led_direction) < 0) {
+        fclose(f);
+        unlink(tmp);
+        return -1;
+    }
+    if (k->config_report_rate_set &&
+        fprintf(f, "report_rate %u\n", (unsigned)k->config_report_rate) < 0) {
+        fclose(f);
+        unlink(tmp);
+        return -1;
+    }
+    if (k->config_opts_set &&
+        fprintf(f, "opts_set 1\n") < 0) {
+        fclose(f);
+        unlink(tmp);
+        return -1;
+    }
     for (i = 0; i < KBC_LED_EFFECT_COUNT; i++) {
         if (fprintf(f, "speed %zu %u\n", i, (unsigned)k->config_speed[i]) < 0) {
             fclose(f);
             unlink(tmp);
             return -1;
         }
+    }
+    for (i = 0; i < KBC_LED_EFFECT_COUNT; i++) {
+        size_t j;
+        if (k->config_color_count[i] == 0) continue;
+        if (fprintf(f, "color %zu %u", i, (unsigned)k->config_color_count[i]) < 0) {
+            fclose(f);
+            unlink(tmp);
+            return -1;
+        }
+        for (j = 0; j < k->config_color_count[i]; j++) {
+            fprintf(f, " %u %u %u", (unsigned)k->config_colors[i][j][0],
+                    (unsigned)k->config_colors[i][j][1],
+                    (unsigned)k->config_colors[i][j][2]);
+        }
+        fputc('\n', f);
     }
     if (k->config_mode == KBDD_CONFIG_ANIMATION) {
         if (fprintf(f, "animation %u %u %u %u %u\n",

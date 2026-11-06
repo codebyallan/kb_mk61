@@ -1,5 +1,5 @@
 Name:           mk61
-Version:        1.0.0
+Version:        1.1.0
 Release:        1%{?dist}
 Summary:        Clean-room keyboard stack for Linux (library, daemon and CLI)
 License:        GPL-2.0-only
@@ -63,6 +63,23 @@ fi
 %{_libdir}/libkbcore.so
 
 %changelog
+* Fri Nov 06 2026 mk61 maintainers - 1.1.0-1
+- Add multi-macro support per profile (up to 255 macros)
+  - Indexed filenames macro-profile<N>-MMM.bin; legacy macro-profile<N>.bin
+    treated as index 1
+  - cli macro list shows all macros per profile with key name (fn+N for
+    Fn layer), repetitions, steps and rendered macro
+  - cli macro save auto-increments to next free slot; overwrites existing
+    slot for same key (no duplicates)
+  - cli macro <key> clear removes only the file(s) for that key
+  - daemon restore re-applies every persisted macro whose 0xB2 marker is
+    still present in the restored keymap
+  - cli/daemon: secure file I/O (open+O_NOFOLLOW+O_NONBLOCK+fstat+
+    S_ISREG) to reject symlinks and FIFOs
+  - tests: add unit tests for macro slot functions; add e2e tests for
+    multi-macro listing, slot removal and corrupt indexed file
+  - docs: README documents multi-macro per profile and slot file layout
+
 * Thu Nov 05 2026 mk61 maintainers - 1.0.0-1
 - First stable release (stable 1)
 - Add kbctl caps command to persist LED/write capabilities

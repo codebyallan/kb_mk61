@@ -35,6 +35,7 @@ change the keyboard's stored state are opt-in through environment variables
   (`kbctl profile <1-4>`, confirmed by a read-back).
 - Key remapping (`kbctl remap`): 3 layers x 70 positions of raw HID codes (normal, Fn, custom).
 - Key macros (`kbctl macro`): `0xB2` marker in the key matrix plus separate macro data (`0x05`).
+  `kbctl macro list [--profile 1-4]` lists the macros saved locally for each profile (offline).
 - LED color, position, sweep, brightness, speed, and built-in effect commands.
   The `led brightness` value also scales host-driven solid colors, which are
   sent as direct RGB frames instead of using the keyboard's built-in effect.
@@ -371,6 +372,32 @@ kbctl macro grave clear
 # 5. Undo everything at once (all remaps and macros of the active profile)
 kbctl remap reset
 ```
+
+#### Listing saved macros
+
+```sh
+kbctl macro list
+kbctl macro list --profile 2
+```
+
+- `kbctl macro list` scans all four profiles and prints one compact row for
+  each profile that has a saved macro (offline; no daemon needed; it never
+  creates or modifies the config directory). Profiles without a file are
+  omitted; when none exist it prints `(no macros saved for any profile)`.
+  Each profile holds at most one macro, bound to a single key. Columns:
+  profile, key name, matrix position, repetitions, step count, and the
+  rendered step list (`+code 20ms` = key down, `-code 20ms` = key up).
+- `kbctl macro list --profile N` shows a detailed view for profile `N` (1-4),
+  including the key, repetitions, step count and the full step list. With no
+  saved macro it prints `profile N: no macro saved`.
+- Macro files live in `$XDG_CONFIG_HOME/kbdd/macro-profile<N>.bin`
+  (default `~/.config/kbdd/`, mode `0600`, atomic temp-then-rename). A file
+  that exists but cannot be validated or decoded is shown as `<corrupt>`.
+  Exit status is 0 on success (including no saved macro), 1 on a read error,
+  and 2 on a usage error.
+- The listing renders the exact keycodes of every step. Macros that type
+  sensitive text (for example a password) are therefore shown in clear; the
+  state file is `0600`, and `macro list` is meant to be run by the owner.
 
 If something goes wrong, restore the backup printed as `backup: <path>` with
 `kbctl restore-profile <profile> <file>`.

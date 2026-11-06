@@ -44,6 +44,7 @@ static void usage(FILE *f)
     fputs("  led key <keys> <RRGGBB>       Color keys by name: w,a,s,d | wasd | esc,numbers (see: keys)\n", f);
     fputs("  remap [--layer 0|1|2] <key>=<code>... | reset   Remap keys (normal/Fn/custom layer) of the active profile\n", f);
     fputs("  macro [--layer 0|1] [--repeat N] <key> <step>...   Bind a macro (0xB2 + 0x05) to a key\n", f);
+    fputs("  macro list [--profile 1-4]          List saved macros (offline)\n", f);
     fputs("  keys                          List key names and matrix positions (offline; 'led keys' also works)\n", f);
     fputs("  led custom [--base RRGGBB] <keys>=<RRGGBB>...  Store per-key colors in the keyboard (flash)\n", f);
     fputs("  led custom clear              Leave custom mode and commit to flash (effect 15 -> wave)\n", f);
@@ -95,12 +96,15 @@ static void usage_command(FILE *f, const char *command)
         fputs("Usage: kbctl diff-block <a.bin> <b.bin>\n\nCompare two saved 264-byte profile blocks and print changed offsets.\n", f);
     } else if (strcmp(command, "macro") == 0) {
         fputs("Usage: kbctl macro [--layer 0|1|normal|fn] [--repeat N] <key> <step> [...]\n"
-              "       kbctl macro [--layer L] <key> clear\n\n"
+              "       kbctl macro [--layer L] <key> clear\n"
+              "       kbctl macro list [--profile 1-4]\n\n"
               "Bind a macro to <key> of the active profile: the key matrix gets the 0xB2 marker and the\n"
               "macro data is written separately (0x05). <step> is +code[:ms] (key down), -code[:ms] (key up)\n"
               "or code[:ms] (down + up); code is a HID name or 0xNN, ms 20..255 (default 20), up to 80 steps,\n"
               "N 0..1000 repetitions (default 1). Example: kbctl macro f1 lctrl+ ... : kbctl macro f1 +lctrl c -lctrl\n"
-              "'clear' restores the factory code of that key. Needs KBDD_ENABLE_PROFILE_WRITE=1.\n", f);
+              "'clear' restores the factory code of that key. Needs KBDD_ENABLE_PROFILE_WRITE=1.\n"
+              "'list' shows the macros saved locally for each profile (offline; no daemon needed).\n"
+              "Each profile holds at most one macro, bound to a single key.\n", f);
     } else if (strcmp(command, "remap") == 0) {
         fputs("Usage: kbctl remap [--layer 0|1|2|normal|fn|custom] <key>=<code> [...]\n"
               "       kbctl remap reset\n\n"
@@ -884,26 +888,47 @@ usage:
     return 2;
 }
 
+/* Resolve the directory that holds the persisted state:
+ * $XDG_CONFIG_HOME/kbdd or ~/.config/kbdd. Pure path computation: callers
+ * that write must create the directory themselves. */
+static int state_dir(char *out, size_t outsz)
+{
+    const char *xdg = getenv("XDG_CONFIG_HOME");
+    const char *home = getenv("HOME");
+    int n;
+
+    if (xdg != NULL && xdg[0] != '\0') {
+        n = snprintf(out, outsz, "%s/kbdd", xdg);
+    } else if (home != NULL && home[0] != '\0') {
+        n = snprintf(out, outsz, "%s/.config/kbdd", home);
+    } else {
+        errno = ENOENT;
+        return -1;
+    }
+    if (n < 0 || (size_t)n >= outsz) {
+        errno = ENAMETOOLONG;
+        return -1;
+    }
+    return 0;
+}
+
 /* Path of the persisted macro for a profile, beside the keymap file:
  * $XDG_CONFIG_HOME/kbdd/macro-profile<N>.bin  (default ~/.config/kbdd/).
  * Format: 16-byte header (magic, version, key_index, data_len) followed by
  * KBC_MACRO_SIZE (256) bytes of macro data. Matches the daemon's on-disk
- * layout so kbdd can read it back for restore. */
+ * layout so kbdd can read it back for restore. Read-only: no mkdir here, so
+ * `kbctl macro list` never mutates the filesystem. */
 static int macro_state_path(unsigned prof, char *out, size_t outsz)
 {
-    const char *xdg = getenv("XDG_CONFIG_HOME");
-    const char *home = getenv("HOME");
-    char dir[480];
+    char dir[512];
+    int n;
 
-    if (xdg != NULL && xdg[0] != '\0') {
-        snprintf(dir, sizeof(dir), "%s/kbdd", xdg);
-    } else if (home != NULL && home[0] != '\0') {
-        snprintf(dir, sizeof(dir), "%s/.config/kbdd", home);
-    } else {
+    if (state_dir(dir, sizeof(dir)) != 0) return -1;
+    n = snprintf(out, outsz, "%s/macro-profile%u.bin", dir, prof);
+    if (n < 0 || (size_t)n >= outsz) {
+        errno = ENAMETOOLONG;
         return -1;
     }
-    if (mkdir_p(dir) != 0) return -1;
-    snprintf(out, outsz, "%s/macro-profile%u.bin", dir, prof);
     return 0;
 }
 
@@ -913,77 +938,133 @@ static int macro_state_path(unsigned prof, char *out, size_t outsz)
  * followed by 3 x KBC_KEY_POSITIONS (210) bytes of keymap. */
 static int keymap_state_path(unsigned prof, char *out, size_t outsz)
 {
-    const char *xdg = getenv("XDG_CONFIG_HOME");
-    const char *home = getenv("HOME");
-    char dir[480];
+    char dir[512];
+    int n;
 
-    if (xdg != NULL && xdg[0] != '\0') {
-        snprintf(dir, sizeof(dir), "%s/kbdd", xdg);
-    } else if (home != NULL && home[0] != '\0') {
-        snprintf(dir, sizeof(dir), "%s/.config/kbdd", home);
-    } else {
+    if (state_dir(dir, sizeof(dir)) != 0) return -1;
+    if (mkdir_p(dir) != 0) return -1;
+    n = snprintf(out, outsz, "%s/keymap-profile%u.bin", dir, prof);
+    if (n < 0 || (size_t)n >= outsz) {
+        errno = ENAMETOOLONG;
         return -1;
     }
-    if (mkdir_p(dir) != 0) return -1;
-    snprintf(out, outsz, "%s/keymap-profile%u.bin", dir, prof);
     return 0;
 }
 
 #define KBDD_MACRO_MAGIC_CLI 0x4D435244u   /* "MACD" */
 #define KBDD_MACRO_VERSION_CLI 1u
 
-/* Load persisted macro data (key_index + 256 bytes) for `prof`. Returns 0 and
- * fills `key_index`/`data` on success, 0 when no file exists yet, -1 on error
- * or header validation failure. */
+/* Load persisted macro data (key_index + 256 bytes) for `prof`.
+ * Returns:
+ *    0  success (key_index/data filled)
+ *    1  no file exists yet (ENOENT)
+ *   -1  I/O error (path, open, read)
+ *   -2  the file exists but is not a valid regular macro state
+ *
+ * O_NOFOLLOW rejects a symlink and O_NONBLOCK keeps a FIFO from blocking the
+ * open; fstat() then rejects anything that is not a regular file. Opening
+ * once also avoids the access()-then-open() TOCTOU window. */
 static int macro_state_load(unsigned prof, uint8_t *key_index,
                             uint8_t data[KBC_MACRO_SIZE])
 {
     char spath[512];
     FILE *f;
+    struct stat st;
     uint32_t hdr[4];
     size_t n;
+    int fd;
+    int err;
 
     if (macro_state_path(prof, spath, sizeof(spath)) != 0) return -1;
-    f = fopen(spath, "rb");
-    if (f == NULL) return errno == ENOENT ? 0 : -1;
+    fd = open(spath, O_RDONLY | O_CLOEXEC | O_NOFOLLOW | O_NONBLOCK);
+    if (fd < 0) return (errno == ENOENT) ? 1 : -1;
+    if (fstat(fd, &st) != 0) {
+        err = errno;
+        close(fd);
+        errno = err;
+        return -1;
+    }
+    if (!S_ISREG(st.st_mode)) {
+        close(fd);
+        errno = EINVAL;
+        return -2;
+    }
+    f = fdopen(fd, "rb");
+    if (f == NULL) {
+        err = errno;
+        close(fd);
+        errno = err;
+        return -1;
+    }
     n = fread(hdr, 1, sizeof(hdr), f);
-    if (n != sizeof(hdr) ||
-        hdr[0] != KBDD_MACRO_MAGIC_CLI ||
+    if (n != sizeof(hdr)) {
+        if (ferror(f)) {
+            err = errno != 0 ? errno : EIO;
+            fclose(f);
+            errno = err;
+            return -1;
+        }
+        fclose(f);
+        return -2;
+    }
+    if (hdr[0] != KBDD_MACRO_MAGIC_CLI ||
         hdr[1] != KBDD_MACRO_VERSION_CLI ||
         hdr[2] >= 2u * KBC_KEY_POSITIONS ||
         hdr[3] != KBC_MACRO_SIZE) {
         fclose(f);
-        return -1;
+        return -2;
     }
     *key_index = (uint8_t)hdr[2];
     n = fread(data, 1, KBC_MACRO_SIZE, f);
+    if (ferror(f)) {
+        err = errno != 0 ? errno : EIO;
+        fclose(f);
+        errno = err;
+        return -1;
+    }
     fclose(f);
-    if (n != KBC_MACRO_SIZE) return -1;
+    if (n != KBC_MACRO_SIZE) return -2;
     return 0;
 }
 
-/* Persist macro data (key_index + 256 bytes) for `prof` atomically: .tmp +
- * chmod 0600 + rename. */
+/* Persist macro data (key_index + 256 bytes) for `prof` atomically: a unique
+ * mkstemp() file (created 0600, never following a planted symlink) is written
+ * and renamed over the target. */
 static int macro_state_save(unsigned prof, uint8_t key_index,
                             const uint8_t data[KBC_MACRO_SIZE])
 {
-    char spath[512], tmp[560];
+    char spath[512], tmp[560], dir[512];
     FILE *f;
     uint32_t hdr[4];
+    int fd, n;
 
-    if (macro_state_path(prof, spath, sizeof(spath)) != 0 ||
-        snprintf(tmp, sizeof(tmp), "%s.tmp", spath) >= (int)sizeof(tmp)) {
+    if (macro_state_path(prof, spath, sizeof(spath)) != 0) return -1;
+    if (state_dir(dir, sizeof(dir)) != 0) return -1;
+    if (mkdir_p(dir) != 0) return -1;
+    n = snprintf(tmp, sizeof(tmp), "%s.tmp.XXXXXX", spath);
+    if (n < 0 || (size_t)n >= sizeof(tmp)) {
+        errno = ENAMETOOLONG;
         return -1;
     }
     hdr[0] = KBDD_MACRO_MAGIC_CLI;
     hdr[1] = KBDD_MACRO_VERSION_CLI;
     hdr[2] = key_index;
     hdr[3] = KBC_MACRO_SIZE;
-    f = fopen(tmp, "w");
-    if (f == NULL) return -1;
-    if (fchmod(fileno(f), 0600) != 0) {
-        fclose(f);
+    fd = mkstemp(tmp);
+    if (fd < 0) return -1;
+    if (fchmod(fd, 0600) != 0) {
+        int err = errno;
+        close(fd);
         unlink(tmp);
+        errno = err;
+        return -1;
+    }
+    f = fdopen(fd, "wb");
+    if (f == NULL) {
+        int err = errno;
+        close(fd);
+        unlink(tmp);
+        errno = err;
         return -1;
     }
     if (fwrite(hdr, 1, sizeof(hdr), f) != sizeof(hdr) ||
@@ -1029,9 +1110,239 @@ static void macro_markers_to_default(uint8_t *payload)
     }
 }
 
-/* macro [--layer 0|1] [--repeat N] <key> <step>... | <key> clear */
+/* ---- Macro listing ------------------------------------------------------- */
+
+/* Format one macro step into `out`. Returns the number of bytes written
+ * (excluding NUL) or -1 if `out` is too small. */
+static int macro_step_format(int key_down, uint8_t keycode, uint8_t delay,
+                             char *out, size_t outsz)
+{
+    const char *dir = key_down ? "+" : "-";
+    int n;
+
+    if (outsz == 0) return -1;
+    n = snprintf(out, outsz, "%s0x%02x %ums", dir, keycode, (unsigned)delay);
+    if (n < 0 || (size_t)n >= outsz) return -1;
+    return n;
+}
+
+/* Worst case: 80 steps * "+0xFF 255ms" (11 bytes) + 79 separators + NUL
+ * = 960 bytes, so 2048 leaves a wide margin. */
+#define MACRO_RENDER_SIZE 2048
+
+/* Render a decoded macro into a human-readable, single-line summary.
+ * Returns 0 on success, -1 on truncation. `out` must have at least 1 byte. */
+static int macro_render(const kbc_macro *m, char *out, size_t outsz)
+{
+    size_t i, nsteps;
+    size_t used = 0;
+    int r;
+
+    if (m == NULL || out == NULL || outsz == 0) return -1;
+    nsteps = kbc_macro_step_count(m);
+    if (nsteps == 0) {
+        r = snprintf(out, outsz, "<empty>");
+        if (r < 0 || (size_t)r >= outsz) return -1;
+        return 0;
+    }
+    used = 0;
+    for (i = 0; i < nsteps; i++) {
+        uint8_t delay, keycode;
+        int key_down;
+        char step[32];
+        size_t sep = (i > 0) ? 1u : 0u;
+
+        if (kbc_macro_get_step(m, i, &delay, &key_down, &keycode) != KBC_OK) {
+            return -1;
+        }
+        r = macro_step_format(key_down, keycode, delay, step, sizeof(step));
+        if (r < 0) return -1;
+        if (used + sep + (size_t)r + 1 > outsz) return -1;
+        if (sep) out[used++] = ' ';
+        memcpy(out + used, step, (size_t)r);
+        used += (size_t)r;
+    }
+    out[used] = '\0';
+    return 0;
+}
+
+/* Format a key index (0..139) as "name" or "fn+name". */
+static int macro_key_name(uint8_t key_index, char *out, size_t outsz)
+{
+    /* Positions 0..69 = normal layer; 70..139 = Fn layer. */
+    if (key_index < KBC_KEY_POSITIONS) {
+        const char *name = kbc_key_name((size_t)key_index);
+        if (name != NULL) {
+            int n = snprintf(out, outsz, "%s", name);
+            if (n < 0 || (size_t)n >= outsz) return -1;
+            return 0;
+        }
+        int n = snprintf(out, outsz, "?");
+        if (n < 0 || (size_t)n >= outsz) return -1;
+        return 0;
+    }
+    /* Fn layer: prefix "fn+" and resolve the relative position (0..69). */
+    size_t base = (size_t)(key_index - KBC_KEY_POSITIONS);
+    const char *name = kbc_key_name(base);
+    if (name != NULL) {
+        int n = snprintf(out, outsz, "fn+%s", name);
+        if (n < 0 || (size_t)n >= outsz) return -1;
+        return 0;
+    }
+    int n = snprintf(out, outsz, "fn+%zu", base);
+    if (n < 0 || (size_t)n >= outsz) return -1;
+    return 0;
+}
+
+/* Print a saved macro for one profile. Returns 0 when something was shown
+ * (a valid macro, or a present-but-corrupt one), 1 when no macro is saved
+ * for this profile, -1 only on a real error (path, read, memory). */
+static int macro_show_profile(unsigned prof, int detailed)
+{
+    uint8_t key_index = 0;
+    uint8_t data[KBC_MACRO_SIZE];
+    kbc_macro *m = NULL;
+    char keyname[64];
+    char rendered[MACRO_RENDER_SIZE];
+    int rc;
+    int corrupt = 0;
+    int have_meta = 0;
+
+    rc = macro_state_load(prof, &key_index, data);
+    if (rc == 1) {
+        if (detailed) {
+            printf("profile %u: no macro saved\n", prof);
+        }
+        return 1;
+    }
+    if (rc == -2) {
+        /* File exists but its header/payload is not a valid macro state, so
+         * neither the key nor the data can be trusted. */
+        corrupt = 1;
+    } else if (rc != 0) {
+        fprintf(stderr, "kbctl: cannot read macro state for profile %u: %s\n",
+                prof, strerror(errno));
+        return -1;
+    } else {
+        have_meta = 1;
+        m = kbc_macro_create();
+        if (m == NULL) {
+            fprintf(stderr, "kbctl: out of memory\n");
+            return -1;
+        }
+        if (kbc_macro_decode(m, data, sizeof(data)) != KBC_OK) {
+            /* Header is valid but the payload is not a decodable macro. */
+            corrupt = 1;
+            kbc_macro_destroy(m);
+            m = NULL;
+        }
+    }
+
+    if (have_meta && macro_key_name(key_index, keyname, sizeof(keyname)) == 0) {
+        /* keyname filled */
+    } else {
+        snprintf(keyname, sizeof(keyname), "?");
+    }
+    if (corrupt) {
+        snprintf(rendered, sizeof(rendered), "<corrupt>");
+    } else if (macro_render(m, rendered, sizeof(rendered)) != 0) {
+        snprintf(rendered, sizeof(rendered), "<render error>");
+    }
+
+    if (detailed) {
+        printf("profile %u:\n", prof);
+        if (have_meta) {
+            printf("  key:      %s (position %u)\n", keyname, (unsigned)key_index);
+        } else {
+            printf("  key:      ? (position -)\n");
+        }
+        if (corrupt) {
+            printf("  reps:     -\n");
+            printf("  steps:    -\n");
+            printf("  macro:    %s\n", rendered);
+        } else {
+            printf("  reps:     %u\n", kbc_macro_get_repetitions(m));
+            printf("  steps:    %zu\n", kbc_macro_step_count(m));
+            printf("  macro:    %s\n", rendered);
+        }
+    } else if (corrupt) {
+        if (have_meta) {
+            printf("%-8u %-12s %-9u %-5s %-5s %s\n",
+                   prof, keyname, (unsigned)key_index, "-", "-", rendered);
+        } else {
+            printf("%-8u %-12s %-9s %-5s %-5s %s\n",
+                   prof, keyname, "-", "-", "-", rendered);
+        }
+    } else {
+        printf("%-8u %-12s %-9u %-5u %-5zu %s\n",
+               prof, keyname, (unsigned)key_index,
+               kbc_macro_get_repetitions(m), kbc_macro_step_count(m), rendered);
+    }
+    if (m != NULL) kbc_macro_destroy(m);
+    return 0;
+}
+
+static int cmd_macro_list(int argc, char **argv)
+{
+    unsigned long prof = 0;
+    int have_profile = 0;
+    int i;
+    int rc = 0;
+    int any = 0;
+
+    for (i = 1; i < argc; i++) {
+        if (strcmp(argv[i], "--profile") == 0) {
+            if (i + 1 >= argc) {
+                fprintf(stderr, "kbctl: --profile requires a value (1-4)\n");
+                return 2;
+            }
+            if (kbctl_parse_uint(argv[++i], 4, &prof) != 0 || prof < 1 || prof > 4) {
+                fprintf(stderr, "kbctl: invalid profile (expected 1-4)\n");
+                return 2;
+            }
+            have_profile = 1;
+        } else if (strcmp(argv[i], "--help") == 0 || strcmp(argv[i], "-h") == 0) {
+            usage_command(stdout, "macro");
+            printf("\nmacro list [--profile 1-4]\n\n"
+                   "List the macros saved locally for each profile (offline; no daemon needed).\n"
+                   "A profile has at most one macro, bound to a single key. Without --profile,\n"
+                   "all four profiles are scanned and saved/corrupt ones are shown in a compact\n"
+                   "table. With --profile, a detailed view is shown for that profile only.\n\n"
+                   "Exit status: 0 on success (including no saved macro), 1 on a read error,\n"
+                   "2 on a usage error.\n\n"
+                   "Files: $XDG_CONFIG_HOME/kbdd/macro-profile<N>.bin (mode 0600).\n");
+            return 0;
+        } else {
+            fprintf(stderr, "kbctl: unexpected argument '%s' (see: kbctl macro list --help)\n",
+                    argv[i]);
+            return 2;
+        }
+    }
+
+    if (have_profile) {
+        rc = macro_show_profile((unsigned)prof, 1);
+        return rc < 0 ? 1 : 0;
+    }
+
+    printf("%-8s %-12s %-9s %-5s %-5s %s\n",
+           "profile", "key", "position", "reps", "steps", "macro");
+    for (i = 1; i <= 4; i++) {
+        int r = macro_show_profile((unsigned)i, 0);
+        if (r == 0) any = 1;
+        else if (r < 0) rc = 1;
+    }
+    if (!any && rc == 0) {
+        printf("(no macros saved for any profile)\n");
+    }
+    return rc;
+}
+
+/* macro [--layer 0|1] [--repeat N] <key> <step>... | <key> clear | list */
 static int cmd_macro(int argc, char **argv)
 {
+    if (argc >= 3 && strcmp(argv[2], "list") == 0) {
+        return cmd_macro_list(argc - 2, argv + 2);
+    }
     uint8_t payload[KBDD_MACRO_PAYLOAD_SIZE];
     uint8_t *map = payload, *mac = payload + 3 * KBC_KEY_POSITIONS + 1;
     uint8_t def[KBC_KEY_POSITIONS];
@@ -1063,6 +1374,11 @@ static int cmd_macro(int argc, char **argv)
             payload[3 * KBC_KEY_POSITIONS] = mkey;
         }
     }
+    /* A profile holds a single macro blob. Drop every persisted 0xB2 marker
+     * (restoring the factory code underneath) before binding or clearing, so
+     * a rebind cannot leave a second key pointing at the same blob and a
+     * keymap-only clear never carries an orphan 0xB2 (the daemon rejects it). */
+    macro_markers_to_default(map);
     /* options first, then the key, then steps */
     for (i = 2; i < argc && pos < 0; i++) {
         if (strcmp(argv[i], "--layer") == 0) {

@@ -59,6 +59,66 @@ check_rc 0 "esc"                      -- led keys
 check_rc 0 "effect"                   -- led effects
 check_rc 0 "Usage:"                   -- help
 
+# 4b. Offline macro listing: reads local state only, never creates the dir.
+macro_dir="$XDG_CONFIG_HOME/kbdd"
+mkdir -p "$macro_dir"
+check_rc 0 "(no macros saved for any profile)" -- macro list
+check_rc 0 "profile 2: no macro saved"        -- macro list --profile 2
+
+# A profile with no saved macro is a successful query (exit 0), and listing
+# must not create $XDG_CONFIG_HOME/kbdd when it does not exist yet.
+tmpcfg="$XDG_RUNTIME_DIR/macro-empty-config"
+mkdir -p "$tmpcfg"
+out=$(XDG_CONFIG_HOME="$tmpcfg" "$KBCTL" macro list 2>&1); rc=$?
+[ "$rc" -eq 0 ] || fail "macro list (no config dir): rc=$rc, expected 0"
+[ ! -d "$tmpcfg/kbdd" ] || fail "macro list created kbdd/ in the config directory"
+rm -rf "$tmpcfg"
+
+# Valid macro: Fn+1 (position 75), one press of 'c'.
+{
+    printf '\104\122\103\115\001\000\000\000\113\000\000\000\000\001\000\000'
+    printf '\000\001\224\000\006\024\000\006'
+    dd if=/dev/zero bs=248 count=1 2>/dev/null
+} > "$macro_dir/macro-profile1.bin"
+check_rc 0 "fn+1"                   -- macro list --profile 1
+check_rc 0 "+0x06 20ms -0x06 20ms"  -- macro list --profile 1
+
+# Wrong magic: present but invalid state is reported, not silently ignored.
+printf '\001\000\000\000\001\000\000\000\000\000\000\000\000\001\000\000' \
+    > "$macro_dir/macro-profile2.bin"
+check_rc 0 "<corrupt>"              -- macro list --profile 2
+check_rc 0 "<corrupt>"              -- macro list
+
+# Maximum step count (80) must render fully, not as <render error>.
+{
+    printf '\104\122\103\115\001\000\000\000\000\000\000\000\000\001\000\000'
+    printf '\000\001'
+    i=0; while [ "$i" -lt 80 ]; do printf '\224\000\004'; i=$((i + 1)); done
+    dd if=/dev/zero bs=14 count=1 2>/dev/null
+} > "$macro_dir/macro-profile3.bin"
+out=$("$KBCTL" macro list --profile 3 2>&1); rc=$?
+[ "$rc" -eq 0 ] || fail "macro list (80 steps): rc=$rc, expected 0"
+case $out in *"<render error>"*) fail "macro list (80 steps): render error" ;; esac
+tokens=$(printf '%s\n' "$out" | tr ' ' '\n' | grep -c '^+0x04$')
+[ "$tokens" -eq 80 ] || fail "macro list (80 steps): rendered $tokens steps, expected 80"
+
+# A symlinked state file must be refused (O_NOFOLLOW), not read through.
+rm -f "$macro_dir/macro-profile4.bin"
+ln -s /etc/passwd "$macro_dir/macro-profile4.bin"
+check_rc 1 "cannot read macro state" -- macro list --profile 4
+rm -f "$macro_dir/macro-profile4.bin"
+
+# A FIFO at the state path must not block the offline listing.
+if command -v timeout >/dev/null 2>&1; then
+    mkfifo "$macro_dir/macro-profile4.bin"
+    out=$(timeout 5 "$KBCTL" macro list --profile 4 2>&1); rc=$?
+    [ "$rc" -eq 0 ] || fail "macro list (FIFO): rc=$rc (hung or failed)"
+    case $out in *"<corrupt>"*) ;; *) fail "macro list (FIFO): expected <corrupt>" ;; esac
+    rm -f "$macro_dir/macro-profile4.bin"
+fi
+rm -f "$macro_dir"/macro-profile1.bin "$macro_dir"/macro-profile2.bin \
+      "$macro_dir"/macro-profile3.bin
+
 # 5. Argument validation happens client-side (rc 2).
 check_rc 2 "unknown command"          -- bogus
 check_rc 2 "profile <1-4>"            -- profile 9

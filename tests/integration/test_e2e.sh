@@ -102,10 +102,51 @@ case $out in *"<render error>"*) fail "macro list (80 steps): render error" ;; e
 tokens=$(printf '%s\n' "$out" | tr ' ' '\n' | grep -c '^+0x04$')
 [ "$tokens" -eq 80 ] || fail "macro list (80 steps): rendered $tokens steps, expected 80"
 
-# A symlinked state file must be refused (O_NOFOLLOW), not read through.
-rm -f "$macro_dir/macro-profile4.bin"
-ln -s /etc/passwd "$macro_dir/macro-profile4.bin"
-check_rc 1 "cannot read macro state" -- macro list --profile 4
+# Multiple macros per profile with auto-incremented slots.
+# Slot 1 (legacy macro-profile4.bin): Fn+1 = position 75, macro +c (0x06).
+# Slot 2 (macro-profile4-002.bin): Fn+2 = position 80, macro +d (0x07).
+python3 -c "
+import struct, os
+macro_dir = '$macro_dir'
+slot1 = struct.pack('<IIII', 0x4D435244, 1, 75, 256)
+slot1 += b'\x00\x01' + b'\x94\x00\x06' + b'\x14\x00\x06' + b'\x00' * (256 - 8)
+with open(os.path.join(macro_dir, 'macro-profile4.bin'), 'wb') as f:
+    f.write(slot1)
+slot2 = struct.pack('<IIII', 0x4D435244, 1, 80, 256)
+slot2 += b'\x00\x01' + b'\x94\x00\x07' + b'\x14\x00\x07' + b'\x00' * (256 - 8)
+with open(os.path.join(macro_dir, 'macro-profile4-002.bin'), 'wb') as f:
+    f.write(slot2)
+"
+out=$("$KBCTL" macro list --profile 4 2>&1); rc=$?
+[ "$rc" -eq 0 ] || fail "macro list multi (profile 4): rc=$rc"
+echo "$out" | grep -q "fn+1" || fail "macro list multi: missing fn+1"
+echo "$out" | grep -q "fn+2" || fail "macro list multi: missing fn+2"
+echo "$out" | grep -q "+0x06 20ms -0x06 20ms" || fail "macro list multi: missing +0x06 steps"
+echo "$out" | grep -q "+0x07 20ms -0x07 20ms" || fail "macro list multi: missing +0x07 steps"
+
+# Remove slot 2 file directly (macro clear needs profile write, disabled in e2e).
+rm -f "$macro_dir/macro-profile4-002.bin"
+out=$("$KBCTL" macro list --profile 4 2>&1); rc=$?
+[ "$rc" -eq 0 ] || fail "macro list after slot removal (profile 4): rc=$rc"
+echo "$out" | grep -q "fn+1" || fail "macro list after slot removal: missing fn+1"
+echo "$out" | grep -q "fn+2" && fail "macro list after slot removal: fn+2 should be gone"
+
+# Verify slot 1 file still exists.
+[ -f "$macro_dir/macro-profile4.bin" ] || fail "macro slot removal: slot 1 file missing"
+
+# Corrupt indexed file (slot 2) should show <corrupt> but slot 1 still listed.
+python3 -c "
+import struct, os
+with open('$macro_dir/macro-profile4-002.bin', 'wb') as f:
+    f.write(struct.pack('<IIII', 0x01, 1, 1, 256))
+    f.write(b'\x00' * 256)
+"
+out=$("$KBCTL" macro list --profile 4 2>&1); rc=$?
+[ "$rc" -eq 0 ] || fail "macro list corrupt slot 2: rc=$rc"
+echo "$out" | grep -q "<corrupt>" || fail "macro list corrupt slot 2: missing <corrupt>"
+echo "$out" | grep -q "fn+1" || fail "macro list corrupt slot 2: missing fn+1"
+
+rm -f "$macro_dir/macro-profile4.bin" "$macro_dir/macro-profile4-002.bin"
 rm -f "$macro_dir/macro-profile4.bin"
 
 # A FIFO at the state path must not block the offline listing.

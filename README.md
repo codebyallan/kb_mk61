@@ -335,16 +335,17 @@ kbctl macro [--layer 0|1|normal|fn] <key> clear
   reconnect or restart will not re-apply the old macro. `remap reset` also
   removes every macro key.
 - The macro data (`0x05`) is write-only like `remap`: the write is acknowledged but
-  cannot be verified by read-back. `kbctl` keeps a local copy of the last macro it
-  wrote for each profile (`$XDG_CONFIG_HOME/kbdd/macro-profile<N>.bin`, default
+  cannot be verified by read-back. `kbctl` persists each macro to its own slot file:
+  slot 1 uses `$XDG_CONFIG_HOME/kbdd/macro-profile<N>.bin` (legacy format) and slots
+  2..255 use `macro-profile<N>-MMM.bin` (`$XDG_CONFIG_HOME/kbdd/`, default
   `~/.config/kbdd/`, beside the daemon config and the keymap file). Each `macro`
-  call starts from that copy. The file starts with a 16-byte header (magic, version,
-  key index, data length) followed by 256 bytes of macro data; on load the daemon
-  validates magic and version before trusting the payload, so corrupt or unrelated
-  files are rejected. The file is written by `kbctl macro`/`kbctl macro clear` and
-  read by `kbdd` only for restore; the daemon does not overwrite it. `clear` removes
-  the macro file. Mode `0600`, atomic temp-then-rename, same pattern as the LED and
-  keymap config.
+  call saves to the next free slot (auto-increment). Each file starts with a 16-byte
+  header (magic, version, key index, data length) followed by 256 bytes of macro
+  data; on load the daemon validates magic and version before trusting the payload,
+  so corrupt or unrelated files are rejected. The file is written by `kbctl macro`
+  /`kbctl macro clear` and read by `kbdd` only for restore; the daemon does not
+  overwrite it. `clear` removes the macro file(s) of the cleared key. Mode `0600`,
+  atomic temp-then-rename, same pattern as the LED and keymap config.
 
 Use cases and how to undo each:
 
@@ -384,20 +385,39 @@ kbctl macro list --profile 2
   each profile that has a saved macro (offline; no daemon needed; it never
   creates or modifies the config directory). Profiles without a file are
   omitted; when none exist it prints `(no macros saved for any profile)`.
-  Each profile holds at most one macro, bound to a single key. Columns:
-  profile, key name, matrix position, repetitions, step count, and the
-  rendered step list (`+code 20ms` = key down, `-code 20ms` = key up).
+  Columns: profile, key name, matrix position, repetitions, step count, and
+  the rendered step list (`+code 20ms` = key down, `-code 20ms` = key up).
 - `kbctl macro list --profile N` shows a detailed view for profile `N` (1-4),
-  including the key, repetitions, step count and the full step list. With no
-  saved macro it prints `profile N: no macro saved`.
-- Macro files live in `$XDG_CONFIG_HOME/kbdd/macro-profile<N>.bin`
-  (default `~/.config/kbdd/`, mode `0600`, atomic temp-then-rename). A file
-  that exists but cannot be validated or decoded is shown as `<corrupt>`.
+  including all saved macros of that profile (one line per slot), the key,
+  repetitions, step count and the full step list. With no saved macro it
+  prints `profile N: no macro saved`.
+- Macro files live in `$XDG_CONFIG_HOME/kbdd/`. Slot 1 uses the legacy
+  `macro-profile<N>.bin`; slots 2..255 use `macro-profile<N>-MMM.bin` where
+  `MMM` is the zero-padded slot number (e.g. `macro-profile1-002.bin`).
+  Mode `0600`, atomic temp-then-rename. A file that exists but cannot be
+  validated or decoded is shown as `<corrupt>`.
   Exit status is 0 on success (including no saved macro), 1 on a read error,
   and 2 on a usage error.
 - The listing renders the exact keycodes of every step. Macros that type
   sensitive text (for example a password) are therefore shown in clear; the
   state file is `0600`, and `macro list` is meant to be run by the owner.
+
+#### Multiple macros per profile
+
+A profile can hold up to 255 macros. Each `kbctl macro <key> ...` call saves
+to the next free slot (auto-increment):
+
+- Slot 1: `macro-profile<N>.bin` (legacy format, backward compatible)
+- Slots 2..255: `macro-profile<N>-MMM.bin` (e.g. `macro-profile1-002.bin`)
+
+`kbctl macro list --profile N` lists every saved macro of profile `N`, one
+line per slot. `kbctl macro list` (without `--profile`) scans all four
+profiles and shows all saved macros.
+
+`kbctl macro <key> clear` removes every macro bound to that key (all slots
+whose key index matches). The `0xB2` marker is removed from the keymap, so
+the keyboard ignores the macro data. `remap reset` also removes every macro
+key.
 
 If something goes wrong, restore the backup printed as `backup: <path>` with
 `kbctl restore-profile <profile> <file>`.

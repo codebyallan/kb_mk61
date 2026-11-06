@@ -643,6 +643,191 @@ static void test_symlinked_config_dir(void)
     unsetenv("XDG_CONFIG_HOME");
 }
 
+/* ---- Macro slot tests --------------------------------------------------- */
+
+static void write_macro_file(const char *dir, const char *fname, uint8_t key_index)
+{
+    char path[512];
+    FILE *f;
+    uint32_t hdr[4] = {KBDD_MACRO_MAGIC, KBDD_MACRO_VERSION, key_index, KBC_MACRO_SIZE};
+    uint8_t data[KBC_MACRO_SIZE];
+
+    memset(data, 0, sizeof(data));
+    snprintf(path, sizeof(path), "%s/kbdd/%s", dir, fname);
+    f = fopen(path, "wb");
+    CHECK(f != NULL);
+    if (f == NULL) return;
+    fwrite(hdr, 1, sizeof(hdr), f);
+    fwrite(data, 1, KBC_MACRO_SIZE, f);
+    fclose(f);
+}
+
+static void test_kbdd_macro_slot_next(void)
+{
+    char dir[] = "/tmp/kbdd-macro-slot-test-XXXXXX";
+    CHECK(mkdtemp(dir) != NULL);
+    CHECK(setenv("XDG_CONFIG_HOME", dir, 1) == 0);
+
+    kbdd_ctx_t k;
+    memset(&k, 0, sizeof(k));
+    k.config_keymap_profile = 1;
+
+    /* Nenhum arquivo: slot 1 livre */
+    uint8_t slot = 0;
+    CHECK(kbdd_macro_slot_next(&k, &slot) == 0);
+    CHECK(slot == 1);
+
+    /* Cria slot 1 (legado): próximo livre deve ser 2 */
+    write_macro_file(dir, "macro-profile1.bin", 7);
+    CHECK(kbdd_macro_slot_next(&k, &slot) == 0);
+    CHECK(slot == 2);
+
+    /* Cria slot 2 (indexado): próximo livre deve ser 3 */
+    write_macro_file(dir, "macro-profile1-002.bin", 8);
+    CHECK(kbdd_macro_slot_next(&k, &slot) == 0);
+    CHECK(slot == 3);
+
+    /* Preenche todos os slots 1..255: deve falhar */
+    for (int s = 3; s <= 255; s++) {
+        char fname[64];
+        if (s == 1) {
+            snprintf(fname, sizeof(fname), "macro-profile1.bin");
+        } else {
+            snprintf(fname, sizeof(fname), "macro-profile1-%03d.bin", s);
+        }
+        write_macro_file(dir, fname, (uint8_t)s);
+    }
+    CHECK(kbdd_macro_slot_next(&k, &slot) == -1);
+
+    /* Limpa */
+    for (int s = 1; s <= 255; s++) {
+        char fname[64];
+        if (s == 1) {
+            snprintf(fname, sizeof(fname), "macro-profile1.bin");
+        } else {
+            snprintf(fname, sizeof(fname), "macro-profile1-%03d.bin", s);
+        }
+        char path[512];
+        snprintf(path, sizeof(path), "%s/kbdd/%s", dir, fname);
+        unlink(path);
+    }
+    rmdir(dir);
+    unsetenv("XDG_CONFIG_HOME");
+}
+
+static void test_kbdd_load_macro_with_slot(void)
+{
+    char dir[] = "/tmp/kbdd-macro-load-test-XXXXXX";
+    CHECK(mkdtemp(dir) != NULL);
+    CHECK(setenv("XDG_CONFIG_HOME", dir, 1) == 0);
+
+    kbdd_ctx_t k;
+    memset(&k, 0, sizeof(k));
+
+    /* Slot inexistente → 0 (não encontrado, não erro) */
+    uint8_t key_index = 0;
+    uint8_t data[KBC_MACRO_SIZE];
+    memset(data, 0xAA, sizeof(data));
+    CHECK(kbdd_load_macro(&k, 1, 99, &key_index, data) == 0);
+    CHECK(key_index == 0);
+
+    /* Slot inválido (0 ou 256) → -1 */
+    CHECK(kbdd_load_macro(&k, 1, 0, &key_index, data) == -1);
+    CHECK(kbdd_load_macro(&k, 1, 256, &key_index, data) == -1);
+
+    /* Cria slot 1 válido */
+    write_macro_file(dir, "macro-profile1.bin", 42);
+    CHECK(kbdd_load_macro(&k, 1, 1, &key_index, data) == 0);
+    CHECK(key_index == 42);
+
+    /* Cria slot 2 válido */
+    write_macro_file(dir, "macro-profile1-002.bin", 75);
+    CHECK(kbdd_load_macro(&k, 1, 2, &key_index, data) == 0);
+    CHECK(key_index == 75);
+
+    /* Slot corrompido (magic errado) → -1 */
+    char path[512];
+    snprintf(path, sizeof(path), "%s/kbdd/macro-profile1-003.bin", dir);
+    FILE *f = fopen(path, "wb");
+    CHECK(f != NULL);
+    if (f) {
+        uint32_t bad_hdr[4] = {0xDEADBEEF, 1, 10, KBC_MACRO_SIZE};
+        fwrite(bad_hdr, 1, sizeof(bad_hdr), f);
+        fwrite(data, 1, KBC_MACRO_SIZE, f);
+        fclose(f);
+    }
+    CHECK(kbdd_load_macro(&k, 1, 3, &key_index, data) == -1);
+
+    /* Limpa */
+    unlink(path);
+    snprintf(path, sizeof(path), "%s/kbdd/macro-profile1.bin", dir);
+    unlink(path);
+    snprintf(path, sizeof(path), "%s/kbdd/macro-profile1-002.bin", dir);
+    unlink(path);
+    rmdir(dir);
+    unsetenv("XDG_CONFIG_HOME");
+}
+
+static void test_kbdd_macro_slot_find_by_key(void)
+{
+    char dir[] = "/tmp/kbdd-macro-find-test-XXXXXX";
+    CHECK(mkdtemp(dir) != NULL);
+    CHECK(setenv("XDG_CONFIG_HOME", dir, 1) == 0);
+
+    kbdd_ctx_t k;
+    memset(&k, 0, sizeof(k));
+    k.config_keymap_profile = 1;
+
+    /* Nenhum arquivo: não encontrado */
+    uint8_t slot = 0;
+    CHECK(kbdd_macro_slot_find_by_key(&k, 1, 42, &slot) == -1);
+
+    /* Cria slot 1 com key_index 42 */
+    write_macro_file(dir, "macro-profile1.bin", 42);
+    CHECK(kbdd_macro_slot_find_by_key(&k, 1, 42, &slot) == 0);
+    CHECK(slot == 1);
+
+    /* Cria slot 2 com key_index 75 */
+    write_macro_file(dir, "macro-profile1-002.bin", 75);
+    CHECK(kbdd_macro_slot_find_by_key(&k, 1, 75, &slot) == 0);
+    CHECK(slot == 2);
+
+    /* Key_index não existente */
+    CHECK(kbdd_macro_slot_find_by_key(&k, 1, 99, &slot) == -1);
+
+    /* Perfil inválido */
+    CHECK(kbdd_macro_slot_find_by_key(&k, 99, 42, &slot) == -1);
+
+    /* NULL out_slot */
+    CHECK(kbdd_macro_slot_find_by_key(&k, 1, 42, NULL) == -1);
+
+    /* Limpa */
+    char path[512];
+    snprintf(path, sizeof(path), "%s/kbdd/macro-profile1.bin", dir);
+    unlink(path);
+    snprintf(path, sizeof(path), "%s/kbdd/macro-profile1-002.bin", dir);
+    unlink(path);
+    rmdir(dir);
+    unsetenv("XDG_CONFIG_HOME");
+}
+
+static void test_macro_slot_persistence(void)
+{
+    kbdd_ctx_t k;
+    kbdd_config_defaults(&k);
+
+    /* config_macro_slot inicia como 0 (nenhum) */
+    CHECK(k.config_macro_slot == 0);
+    CHECK(k.config_macro_set == 0);
+
+    /* Recarrega */
+    kbdd_ctx_t k2;
+    kbdd_config_defaults(&k2);
+    CHECK(load_temp("macro_slot 3\n", &k2) == 0);
+    CHECK(k2.config_macro_slot == 3);
+}
+
+
 int main(void)
 {
     test_missing_file_defaults();
@@ -665,6 +850,11 @@ int main(void)
     test_unknown_keys_tolerated_and_preserved();
     test_invalid_config_is_kept();
     test_symlinked_config_dir();
+
+    test_kbdd_macro_slot_next();
+    test_kbdd_load_macro_with_slot();
+    test_kbdd_macro_slot_find_by_key();
+    test_macro_slot_persistence();
 
     if (failures != 0) {
         fprintf(stderr, "%d test(s) failed\n", failures);

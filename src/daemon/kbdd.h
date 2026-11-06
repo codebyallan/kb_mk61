@@ -117,6 +117,7 @@ typedef struct kbdd_ctx {
     uint8_t config_macro_key;      /* key index 0..139, or 0xFF when none */
     uint8_t config_macro_data[KBC_MACRO_SIZE];
     int config_macro_set;          /* 1 once a macro has been persisted */
+    uint8_t config_macro_slot;     /* active macro slot (1..255; 0 when none) */
     /* Persisted runtime capability switches (survive daemon restart).
      * These are only honoured when the matching environment variable is not
      * set; environment variables always win over the stored value. */
@@ -173,8 +174,14 @@ int kbdd_save_config(const kbdd_ctx_t *k);
 int kbdd_config_has_colors(const kbdd_ctx_t *k);
 int kbdd_load_keymap(kbdd_ctx_t *k, uint8_t profile,
                      uint8_t map[3][KBC_KEY_POSITIONS]);
-int kbdd_load_macro(kbdd_ctx_t *k, uint8_t profile,
+int kbdd_load_macro(const kbdd_ctx_t *k, uint8_t profile, int slot,
                     uint8_t *key_index, uint8_t data[KBC_MACRO_SIZE]);
+/* Find the first free macro slot (1..255) of the active profile. */
+int kbdd_macro_slot_next(const kbdd_ctx_t *k, uint8_t *out_slot);
+/* Find the on-disk slot (1..255) whose persisted macro has key_index == target.
+ * Returns 0 and stores the slot in *out_slot, or -1 when not found. */
+int kbdd_macro_slot_find_by_key(const kbdd_ctx_t *k, uint8_t profile,
+                                uint8_t target_key_index, uint8_t *out_slot);
 int kbdd_hidraw_enumerate(const kbdd_model_t *models, size_t model_count,
                           kbdd_hid_device_t **out_devs, size_t *out_count);
 void kbdd_hidraw_free(kbdd_hid_device_t *devs, size_t count);

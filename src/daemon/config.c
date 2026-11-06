@@ -126,6 +126,7 @@ void kbdd_config_defaults(kbdd_ctx_t *k)
     k->config_macro_key = 0xFF;
     memset(k->config_macro_data, 0, sizeof(k->config_macro_data));
     k->config_macro_set = 0;
+    k->config_macro_slot = 0;
     k->config_allow_led = 0;
     k->config_allow_profile_write = 0;
 }
@@ -220,6 +221,12 @@ int kbdd_load_config_file(kbdd_ctx_t *k, const char *path)
                 return -1;
             }
             k->config_allow_profile_write = (int)value;
+        } else if (strcmp(key, "macro_slot") == 0) {
+            if (fscanf(f, "%u", &value) != 1 || value < 1 || value > 255) {
+                fclose(f);
+                return -1;
+            }
+            k->config_macro_slot = (uint8_t)value;
         } else if (strcmp(key, "led_direction") == 0) {
             if (fscanf(f, "%u", &value) != 1 || value > 3) {
                 fclose(f);
@@ -453,6 +460,13 @@ int kbdd_save_config(const kbdd_ctx_t *k)
         unlink(tmp);
         return -1;
     }
+    if (k->config_macro_set && k->config_macro_slot >= 1) {
+        if (fprintf(f, "macro_slot %u\n", (unsigned)k->config_macro_slot) < 0) {
+            fclose(f);
+            unlink(tmp);
+            return -1;
+        }
+    }
     if (fclose(f) != 0 || rename(tmp, path) != 0) {
         unlink(tmp);
         return -1;
@@ -489,6 +503,16 @@ int kbdd_load_keymap(kbdd_ctx_t *k, uint8_t profile,
         kbdd_keymap_path(path, sizeof(path), profile) != 0) {
         return -1;
     }
+    {
+        int fd = open(path, O_RDONLY | O_CLOEXEC | O_NOFOLLOW | O_NONBLOCK);
+        if (fd < 0) return errno == ENOENT ? 0 : -1;
+        struct stat st;
+        if (fstat(fd, &st) != 0 || !S_ISREG(st.st_mode)) {
+            close(fd);
+            return errno == ENOENT ? 0 : -1;
+        }
+        close(fd);
+    }
     f = fopen(path, "rb");
     if (f == NULL) return errno == ENOENT ? 0 : -1;
 
@@ -509,23 +533,73 @@ int kbdd_load_keymap(kbdd_ctx_t *k, uint8_t profile,
     return 0;
 }
 
-/* Path of the persisted macro for a profile, beside the daemon config:
- * $XDG_CONFIG_HOME/kbdd/macro-profile<N>.bin  (default ~/.config/kbdd/).
- * Same directory and ownership rules as kbdd_config_path(). */
-static int kbdd_macro_path(char *path, size_t size, uint8_t profile)
+/* Resolve the on-disk path of macro slot `slot` (1..255) of `profile`.
+ * Slot 1 lives in the legacy macro-profile<N>.bin file; slots 2..255 live in
+ * the indexed macro-profile<N>-MMM.bin files. Returns 0 on success, -1 on
+ * error (including an unknown slot). */
+static int kbdd_macro_slot_path(char *path, size_t size, uint8_t profile, int slot)
 {
     char dir[512];
-    if (kbdd_config_dir(dir, sizeof(dir)) != 0 ||
-        snprintf(path, size, "%s/macro-profile%u.bin", dir, profile) >= (int)size) {
+
+    if (profile < 1 || profile > 4 || slot < 1 || slot > 255) {
         return -1;
+    }
+    if (kbdd_config_dir(dir, sizeof(dir)) != 0) {
+        return -1;
+    }
+    if (slot == 1) {
+        if (snprintf(path, size, "%s/macro-profile%u.bin", dir, (unsigned)profile) >= (int)size) {
+            return -1;
+        }
+    } else {
+        if (snprintf(path, size, "%s/macro-profile%u-%03u.bin", dir, (unsigned)profile, (unsigned int)slot) >= (int)size) {
+            return -1;
+        }
     }
     return 0;
 }
 
-/* Load the persisted macro of `profile` if present. Returns 0 and fills
- * `key_index` and `data` on success, 0 when no file exists yet, -1 on
+/* Find the first free macro slot (1..255) of the active profile. Slot 1 is
+ * the legacy macro-profile<N>.bin; slots 2..255 are macro-profile<N>-MMM.bin.
+ * Returns 0 and stores the slot in *out_slot, or -1 when all 255 are taken. */
+int kbdd_macro_slot_next(const kbdd_ctx_t *k, uint8_t *out_slot)
+{
+    int slot;
+
+    if (k == NULL || out_slot == NULL) {
+        return -1;
+    }
+    /* Quando nenhum keymap foi persistido (profile == 0), alocar no
+     * profile 1 como padrão, pois os macros pertencem a um perfil. */
+    uint8_t slot_profile = k->config_keymap_profile;
+    if (slot_profile < 1 || slot_profile > 4) {
+        slot_profile = 1;
+    }
+
+    for (slot = 1; slot <= 255; slot++) {
+        char path[768];
+
+        if (kbdd_macro_slot_path(path, sizeof(path), slot_profile, slot) == 0) {
+            FILE *f = fopen(path, "r");
+            int taken = 0;
+
+            if (f != NULL) {
+                fclose(f);
+                taken = 1;
+            }
+            if (!taken) {
+                *out_slot = (uint8_t)slot;
+                return 0;
+            }
+        }
+    }
+    return -1;
+}
+
+/* Load the persisted macro of `profile` slot `slot` if present. Returns 0 and
+ * fills `key_index` and `data` on success, 0 when no file exists yet, -1 on
  * error or if the file fails magic/version/size validation. */
-int kbdd_load_macro(kbdd_ctx_t *k, uint8_t profile,
+int kbdd_load_macro(const kbdd_ctx_t *k, uint8_t profile, int slot,
                     uint8_t *key_index, uint8_t data[KBC_MACRO_SIZE])
 {
     char path[768];
@@ -534,7 +608,10 @@ int kbdd_load_macro(kbdd_ctx_t *k, uint8_t profile,
     size_t n;
 
     if (k == NULL || key_index == NULL || data == NULL || profile < 1 ||
-        profile > 4 || kbdd_macro_path(path, sizeof(path), profile) != 0) {
+        profile > 4 || slot < 1 || slot > 255) {
+        return -1;
+    }
+    if (kbdd_macro_slot_path(path, sizeof(path), profile, slot) != 0) {
         return -1;
     }
     f = fopen(path, "rb");
@@ -556,5 +633,29 @@ int kbdd_load_macro(kbdd_ctx_t *k, uint8_t profile,
     if (n != KBC_MACRO_SIZE) return -1;
     *key_index = (uint8_t)hdr.key_index;
     return 0;
+}
+
+/* Find the on-disk slot (1..255) whose persisted macro has key_index == target.
+ * Returns 0 and stores the slot in *out_slot, or -1 when not found. */
+int kbdd_macro_slot_find_by_key(const kbdd_ctx_t *k, uint8_t profile,
+                                uint8_t target_key_index, uint8_t *out_slot)
+{
+    uint8_t key_index = 0;
+    uint8_t data[KBC_MACRO_SIZE];
+    int slot;
+
+    if (k == NULL || out_slot == NULL || profile < 1 || profile > 4) {
+        return -1;
+    }
+    for (slot = 1; slot <= 255; slot++) {
+        if (kbdd_load_macro(k, profile, slot, &key_index, data) != 0) {
+            continue; /* no valid macro in this slot */
+        }
+        if (key_index == target_key_index) {
+            *out_slot = (uint8_t)slot;
+            return 0;
+        }
+    }
+    return -1;
 }
 

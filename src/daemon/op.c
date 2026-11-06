@@ -1033,26 +1033,40 @@ static void op_complete(kbdd_ctx_t *kctx, kbdd_op_node_t *op,
                             (unsigned)kctx->config_keymap_profile);
                 }
             }
-            /* Re-apply the locally persisted macro so it is not silently lost
-             * by the restore. restore-profile does not delete or modify
-             * ~/.config/kbdd/macro-profile<N>.bin. */
-            if (kctx->config_macro_set &&
-                kctx->config_macro_key < 2u * KBC_KEY_POSITIONS) {
-                uint8_t mpayload[KBDD_MACRO_PAYLOAD_SIZE];
-                memset(mpayload, 0, sizeof(mpayload));
-                memcpy(mpayload, kctx->config_keymap[0], 3u * KBC_KEY_POSITIONS);
-                mpayload[3u * KBC_KEY_POSITIONS] = kctx->config_macro_key;
-                memcpy(mpayload + 3u * KBC_KEY_POSITIONS + 1,
-                       kctx->config_macro_data, KBC_MACRO_SIZE);
-                kbdd_ipc_message_t fake_req;
-                memset(&fake_req, 0, sizeof(fake_req));
-                fake_req.payload = mpayload;
-                fake_req.payload_len = KBDD_MACRO_PAYLOAD_SIZE;
-                if (!kbdd_op_has_room() ||
-                    kbdd_op_queue_macro(&fake_req, &op->dev, 0) != 0) {
-                    fprintf(stderr,
-                            "kbdd: profile %u restored but macro re-apply queued failed\n",
-                            (unsigned)kctx->config_macro_key);
+            /* Re-apply every locally persisted macro so none is silently lost
+             * by the restore. restore-profile does not delete or modify the
+             * ~/.config/kbdd/macro-profile<N>-MMM.bin files. */
+            if (kctx->config_macro_set && kctx->allow_profile_write) {
+                uint8_t key_index = 0;
+                uint8_t mdata[KBC_MACRO_SIZE];
+                for (int slot = 1; slot <= 255; slot++) {
+                    if (kbdd_load_macro(kctx, kctx->config_keymap_profile, slot,
+                                        &key_index, mdata) != 0) {
+                        continue; /* no valid macro in this slot */
+                    }
+                    /* Only re-apply macros whose 0xB2 marker is still present
+                     * in the restored keymap. */
+                    if (key_index >= 2u * KBC_KEY_POSITIONS ||
+                        kctx->config_keymap[key_index / KBC_KEY_POSITIONS]
+                                           [key_index % KBC_KEY_POSITIONS] != 0xB2) {
+                        continue;
+                    }
+                    uint8_t mpayload[KBDD_MACRO_PAYLOAD_SIZE];
+                    memset(mpayload, 0, sizeof(mpayload));
+                    memcpy(mpayload, kctx->config_keymap[0], 3u * KBC_KEY_POSITIONS);
+                    mpayload[3u * KBC_KEY_POSITIONS] = key_index;
+                    memcpy(mpayload + 3u * KBC_KEY_POSITIONS + 1,
+                           mdata, KBC_MACRO_SIZE);
+                    kbdd_ipc_message_t fake_req;
+                    memset(&fake_req, 0, sizeof(fake_req));
+                    fake_req.payload = mpayload;
+                    fake_req.payload_len = KBDD_MACRO_PAYLOAD_SIZE;
+                    if (!kbdd_op_has_room() ||
+                        kbdd_op_queue_macro(&fake_req, &op->dev, 0) != 0) {
+                        fprintf(stderr,
+                                "kbdd: profile %u restored but macro re-apply queued failed\n",
+                                (unsigned)key_index);
+                    }
                 }
             }
         } else {
@@ -1123,6 +1137,13 @@ static void op_complete(kbdd_ctx_t *kctx, kbdd_op_node_t *op,
                        op->payload + 3u * KBC_KEY_POSITIONS + 1,
                        KBC_MACRO_SIZE);
                 kctx->config_macro_set = 1;
+                /* Record which on-disk slot this macro lives in so a later
+                 * restore can re-apply every saved macro for the profile. */
+                if (kbdd_macro_slot_find_by_key(kctx, kctx->config_keymap_profile,
+                                                kctx->config_macro_key,
+                                                &kctx->config_macro_slot) != 0) {
+                    kctx->config_macro_slot = 0;
+                }
             }
         } else {
             op_send_error(kctx, op, r);
@@ -1742,25 +1763,37 @@ int kbdd_op_queue_restore_config(kbdd_ctx_t *k, const kbdd_hid_device_t *dev)
         op_enqueue(kop);
     }
 
-    /* Re-apply the persisted macro after the keymap (write-only in the
-     * protocol, so it cannot be verified by read-back). */
-    if (k->config_macro_set &&
-        k->config_macro_key < 2u * KBC_KEY_POSITIONS &&
-        k->allow_profile_write) {
-        uint8_t mpayload[KBDD_MACRO_PAYLOAD_SIZE];
-        memset(mpayload, 0, sizeof(mpayload));
-        memcpy(mpayload, k->config_keymap[0], 3u * KBC_KEY_POSITIONS);
-        mpayload[3u * KBC_KEY_POSITIONS] = k->config_macro_key;
-        memcpy(mpayload + 3u * KBC_KEY_POSITIONS + 1,
-               k->config_macro_data, KBC_MACRO_SIZE);
-        kbdd_op_node_t *mop = op_new(OP_SET_MACRO, NULL);
-        if (mop == NULL) {
-            return -1;
+    /* Re-apply every persisted macro after the keymap (write-only in the
+     * protocol, so it cannot be verified by read-back). Re-apply each macro
+     * whose 0xB2 marker is present in the restored keymap. */
+    if (k->config_macro_set && k->config_keymap_set && k->allow_profile_write) {
+        uint8_t key_index = 0;
+        uint8_t mdata[KBC_MACRO_SIZE];
+        for (int slot = 1; slot <= 255; slot++) {
+            if (kbdd_load_macro(k, k->config_keymap_profile, slot,
+                                &key_index, mdata) != 0) {
+                continue; /* no valid macro in this slot */
+            }
+            if (key_index >= 2u * KBC_KEY_POSITIONS ||
+                k->config_keymap[key_index / KBC_KEY_POSITIONS]
+                                [key_index % KBC_KEY_POSITIONS] != 0xB2) {
+                continue; /* marker gone: do not re-apply this macro */
+            }
+            uint8_t mpayload[KBDD_MACRO_PAYLOAD_SIZE];
+            memset(mpayload, 0, sizeof(mpayload));
+            memcpy(mpayload, k->config_keymap[0], 3u * KBC_KEY_POSITIONS);
+            mpayload[3u * KBC_KEY_POSITIONS] = key_index;
+            memcpy(mpayload + 3u * KBC_KEY_POSITIONS + 1,
+                   mdata, KBC_MACRO_SIZE);
+            kbdd_op_node_t *mop = op_new(OP_SET_MACRO, NULL);
+            if (mop == NULL) {
+                return -1;
+            }
+            op_attach_dev(mop, dev);
+            mop->flags = 0;
+            op_set_payload(mop, mpayload, KBDD_MACRO_PAYLOAD_SIZE);
+            op_enqueue(mop);
         }
-        op_attach_dev(mop, dev);
-        mop->flags = 0;
-        op_set_payload(mop, mpayload, KBDD_MACRO_PAYLOAD_SIZE);
-        op_enqueue(mop);
     }
 
     kbdd_op_node_t *op = op_new(OP_RESTORE_CONFIG, NULL);

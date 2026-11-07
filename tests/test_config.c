@@ -825,6 +825,120 @@ static void test_macro_slot_persistence(void)
     kbdd_config_defaults(&k2);
     CHECK(load_temp("macro_slot 3\n", &k2) == 0);
     CHECK(k2.config_macro_slot == 3);
+    /* macro_slot is only written when a macro has been persisted, so the flag
+     * config_macro_set must be restored as well. */
+    CHECK(k2.config_macro_set == 1);
+}
+
+static void test_keymap_profile_parsing(void)
+{
+    kbdd_ctx_t k;
+    kbdd_config_defaults(&k);
+
+    /* Parsing only: no keymap binary exists yet, so the flag stays clear. */
+    CHECK(load_temp("keymap_profile 2\n", &k) == 0);
+    CHECK(k.config_keymap_profile == 2);
+    CHECK(k.config_keymap_set == 0);
+
+    /* Invalid values are rejected. */
+    kbdd_ctx_t k2;
+    kbdd_config_defaults(&k2);
+    CHECK(load_temp("keymap_profile 0\n", &k2) != 0);
+    CHECK(load_temp("keymap_profile 5\n", &k2) != 0);
+}
+
+static void write_test_keymap_file(const char *dir, uint8_t profile)
+{
+    char path[512];
+    snprintf(path, sizeof(path), "%s/kbdd/keymap-profile%u.bin", dir, profile);
+
+    FILE *f = fopen(path, "wb");
+    if (f == NULL) {
+        return;
+    }
+    kbdd_keymap_header_t hdr;
+    memset(&hdr, 0, sizeof(hdr));
+    hdr.magic = KBDD_KEYMAP_MAGIC;
+    hdr.version = KBDD_KEYMAP_VERSION;
+    hdr.layer_count = 3;
+    hdr.positions_per_layer = KBC_KEY_POSITIONS;
+    fwrite(&hdr, 1, sizeof(hdr), f);
+    uint8_t matrix[3 * KBC_KEY_POSITIONS];
+    memset(matrix, 0, sizeof(matrix));
+    /* Put a 0xB2 macro marker at position 0 of layer 0. */
+    matrix[0] = 0xB2;
+    fwrite(matrix, 1, sizeof(matrix), f);
+    fclose(f);
+}
+
+static void test_keymap_profile_load_from_disk(void)
+{
+    /* Use a temporary XDG_CONFIG_HOME so we don't clobber the user's config. */
+    const char *tmpdir = "/tmp/kbdd-config-test-xdg";
+    char kbdd_dir[512];
+    snprintf(kbdd_dir, sizeof(kbdd_dir), "%s/kbdd", tmpdir);
+    mkdir(tmpdir, 0700);
+    mkdir(kbdd_dir, 0700);
+
+    setenv("XDG_CONFIG_HOME", tmpdir, 1);
+
+    write_test_keymap_file(tmpdir, 1);
+    kbdd_ctx_t k;
+    kbdd_config_defaults(&k);
+    /* kbdd_load_config reads $XDG_CONFIG_HOME/kbdd/config. Write a minimal
+     * config pointing to keymap profile 1. */
+    char cfgpath[512];
+    snprintf(cfgpath, sizeof(cfgpath), "%s/kbdd/config", tmpdir);
+    FILE *cfg = fopen(cfgpath, "w");
+    if (cfg != NULL) {
+        fprintf(cfg, "keymap_profile 1\n");
+        fclose(cfg);
+    }
+
+    CHECK(kbdd_load_config(&k) == 0);
+    CHECK(k.config_keymap_profile == 1);
+    CHECK(k.config_keymap_set == 1);
+    CHECK(k.config_keymap[0][0] == 0xB2);
+
+    unsetenv("XDG_CONFIG_HOME");
+    remove(cfgpath);
+    char keypath[512];
+    snprintf(keypath, sizeof(keypath), "%s/kbdd/keymap-profile1.bin", tmpdir);
+    remove(keypath);
+    rmdir(kbdd_dir);
+    rmdir(tmpdir);
+}
+
+static void test_keymap_profile_missing_binary_clears_flag(void)
+{
+    const char *tmpdir = "/tmp/kbdd-config-test-xdg2";
+    char kbdd_dir[512];
+    snprintf(kbdd_dir, sizeof(kbdd_dir), "%s/kbdd", tmpdir);
+    mkdir(tmpdir, 0700);
+    mkdir(kbdd_dir, 0700);
+
+    setenv("XDG_CONFIG_HOME", tmpdir, 1);
+
+    /* No keymap-profile1.bin exists. */
+    kbdd_ctx_t k;
+    kbdd_config_defaults(&k);
+    char cfgpath[512];
+    snprintf(cfgpath, sizeof(cfgpath), "%s/kbdd/config", tmpdir);
+    FILE *cfg = fopen(cfgpath, "w");
+    if (cfg != NULL) {
+        fprintf(cfg, "keymap_profile 1\n");
+        fclose(cfg);
+    }
+
+    CHECK(kbdd_load_config(&k) == 0);
+    /* Orphan reference must be cleared. */
+    CHECK(k.config_keymap_profile == 0);
+    CHECK(k.config_keymap_set == 0);
+
+    unsetenv("XDG_CONFIG_HOME");
+    remove(cfgpath);
+    rmdir(kbdd_dir);
+    rmdir(tmpdir);
 }
 
 
@@ -855,6 +969,9 @@ int main(void)
     test_kbdd_load_macro_with_slot();
     test_kbdd_macro_slot_find_by_key();
     test_macro_slot_persistence();
+    test_keymap_profile_parsing();
+    test_keymap_profile_load_from_disk();
+    test_keymap_profile_missing_binary_clears_flag();
 
     if (failures != 0) {
         fprintf(stderr, "%d test(s) failed\n", failures);

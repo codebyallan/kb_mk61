@@ -9,6 +9,8 @@
 #include <sys/stat.h>
 #include <unistd.h>
 
+static int kbdd_keymap_path(char *path, size_t size, uint8_t profile);
+
 static int kbdd_ensure_dir(const char *path)
 {
     struct stat st;
@@ -227,6 +229,15 @@ int kbdd_load_config_file(kbdd_ctx_t *k, const char *path)
                 return -1;
             }
             k->config_macro_slot = (uint8_t)value;
+            /* macro_slot is only written when a macro has been persisted,
+             * so the active macro flag must be restored as well. */
+            k->config_macro_set = 1;
+        } else if (strcmp(key, "keymap_profile") == 0) {
+            if (fscanf(f, "%u", &value) != 1 || value < 1 || value > 4) {
+                fclose(f);
+                return -1;
+            }
+            k->config_keymap_profile = (uint8_t)value;
         } else if (strcmp(key, "led_direction") == 0) {
             if (fscanf(f, "%u", &value) != 1 || value > 3) {
                 fclose(f);
@@ -324,6 +335,7 @@ int kbdd_load_config_file(kbdd_ctx_t *k, const char *path)
             }
         }
     }
+
     fclose(f);
     return 0;
 }
@@ -336,6 +348,34 @@ int kbdd_load_config(kbdd_ctx_t *k)
 
     if (k == NULL || kbdd_config_path(path, sizeof(path)) != 0) return -1;
     rc = kbdd_load_config_file(k, path);
+    if (rc == 0) {
+        /* If a keymap profile was persisted, load the matrix from disk so it
+         * is available for restore (re-applying remap and macros) after a
+         * daemon restart. On failure or missing file, clear the orphan
+         * profile reference. */
+        if (k->config_keymap_profile >= 1 && k->config_keymap_profile <= 4) {
+            char keypath[768];
+            if (kbdd_keymap_path(keypath, sizeof(keypath),
+                                 k->config_keymap_profile) == 0 &&
+                access(keypath, F_OK) == 0) {
+                if (kbdd_load_keymap(k, k->config_keymap_profile,
+                                     k->config_keymap) != 0) {
+                    fprintf(stderr,
+                            "kbdd: config: keymap-profile%u.bin could not be "
+                            "loaded; macros will not be re-applied\n",
+                            (unsigned)k->config_keymap_profile);
+                    k->config_keymap_profile = 0;
+                    k->config_keymap_set = 0;
+                } else {
+                    k->config_keymap_set = 1;
+                }
+            } else {
+                /* File does not exist: clear the orphan reference. */
+                k->config_keymap_profile = 0;
+                k->config_keymap_set = 0;
+            }
+        }
+    }
     if (rc != 0 && access(path, F_OK) == 0) {
         /* The caller falls back to defaults and the next save would overwrite
          * the file: keep the user's original next to it. */
@@ -462,6 +502,15 @@ int kbdd_save_config(const kbdd_ctx_t *k)
     }
     if (k->config_macro_set && k->config_macro_slot >= 1) {
         if (fprintf(f, "macro_slot %u\n", (unsigned)k->config_macro_slot) < 0) {
+            fclose(f);
+            unlink(tmp);
+            return -1;
+        }
+    }
+    if (k->config_keymap_set && k->config_keymap_profile >= 1 &&
+        k->config_keymap_profile <= 4) {
+        if (fprintf(f, "keymap_profile %u\n",
+                    (unsigned)k->config_keymap_profile) < 0) {
             fclose(f);
             unlink(tmp);
             return -1;
